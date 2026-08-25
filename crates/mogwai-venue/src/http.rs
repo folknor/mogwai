@@ -1972,6 +1972,11 @@ pub(crate) async fn trades(
             .and_then(|river| {
                 rivers
                     .ensure_reach(&river, run_start_ns)
+                    // Flattening the typed refusal here loses no classification:
+                    // `materialize` above already refused the caller-class arms
+                    // (a bad shape, a spent river cap) as a 400, so a refusal
+                    // surviving to this reach is the venue failing a river it
+                    // just promised, and the 500 below is its correct status.
                     .map_err(anyhow::Error::new)
                     .and_then(|_| bounded_trades(&river, start, end, limit, &rivers))
             })
@@ -2071,6 +2076,8 @@ pub(crate) async fn quotes(
             .and_then(|river| {
                 rivers
                     .ensure_reach(&river, run_start_ns)
+                    // No classification is lost in this flattening: see the
+                    // identical escape in `trades`.
                     .map_err(anyhow::Error::new)
                     .and_then(|_| bounded_quotes(&river, start, end, limit, &rivers))
             })

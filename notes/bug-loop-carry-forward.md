@@ -1,13 +1,13 @@
 # Bug-loop carry-forward
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
-its own round. Every brief carries the relevant slice forward. Current as of the
-`notes/bugs-venue-mechanics.md` arc, round 2, which closed findings 6 through 9
-and ruled on the structural recommendation. That document is now deleted: every
-finding in it is closed, and the two rewrites it proposed are refused with
-reasons recorded below rather than deferred. The `notes/bugs-engine.md` arc
-below it is closed and judged sound. What is owed next is the close pass over
-the whole arc.
+its own round. Every brief carries the relevant slice forward. Current as of
+the close pass over the `notes/bugs-venue-mechanics.md` arc, which reviewed the
+whole two-commit arc and closed it; the record is at the bottom. That document
+is deleted: every finding in it is closed, and the two rewrites it proposed are
+refused with reasons recorded below rather than deferred. The bugs-engine arc
+below it is closed and judged sound. What is owed next is the remaining bug
+documents from the reconnaissance pass - three scopes still unworked.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -186,21 +186,19 @@ the whole arc.
   for the retained-print half. Reverting the loop shape alone only ever fires
   the first assertion.
 
-## Least-examined after round 2, for the close pass
+## Rulings from the close pass over the venue-mechanics arc
 
-Everything here was read and judged acceptable rather than missed, but it is
-where the next look is worth most.
-
-- **The typed refusal is checked but not classified, one layer out.** Making
-  `Rivers::ensure_reach` return `MaterializeRefusal` forces every caller to
-  handle the type, which is what closed finding 8 at the socket history site.
-  It does not force a caller to *classify*: the cheap escape is
-  `.map_err(anyhow::Error::new)`, and `http.rs` takes it at both `/trades` and
-  `/quotes`, where every refusal - a spent river cap included - still becomes
-  one `500`. That was already true before this round and the round did not
-  widen it, so it was left alone; but the operator HTTP surface is the same
-  lost classification finding 8 named, on a different route, and it is a real
-  open item rather than a settled one.
+- **The `http.rs` typed-refusal escape is settled, not open.** Round 2 left
+  "a spent river cap still becomes one `500` at `/trades` and `/quotes`" as a
+  live wire-surface question. It is not: both routes call `rivers.materialize`
+  before the blocking task, and `materialize_refusal_response` already answers
+  a `Resolve` refusal and a spent cap with a `400` there. By the time
+  `ensure_reach` runs inside the task the river was materialized by this very
+  request, so the only refusals reachable through the
+  `.map_err(anyhow::Error::new)` escape are `Reach` and `KeyMismatch` - venue
+  faults, whose correct status is the `500` they get. The escape now carries a
+  comment saying so, which is what keeps the flattening from reading as the
+  lost classification it is not.
 - **The classification regression tests `Refusal::materialization`, not
   `serve_page`.** The doctrine hazard round 1 hit three times. The call site is
   one readable line and was audited by reading. A call-site regression was
@@ -325,3 +323,42 @@ found and did:
   with its owed split, `clear_armed`, `MAX_GROUP_ORDERS`, and the unbumped
   `TAPE_PROTOCOL_VERSION`) were re-verified and stand. Nothing in the arc
   touched `mogwai-data`, `analysis/` or the fingerprint, so no bump was owed.
+
+## The close pass, and how the bugs-venue-mechanics arc ended
+
+The close pass reviewed the whole two-commit arc and closed it. What it found
+and did:
+
+- The whole diff was re-read at its sites. The extremes epoch handoff was
+  checked under every interleaving of the writer's three epoch loads against
+  `take`'s bump-then-lock and is sound; the per-seat `readable` premise was
+  verified in the registry - a connection's ride is installed in the same
+  `commit` transaction that makes the account attended, and the boat is placed
+  before the commit, so an attached account can never be observed seated on a
+  boat the `boats()` read misses. The unpaced predicates agree because
+  `TapeSpawn.speed` is taken from `key.speed()` after quantization.
+- The pass-snapshot recompute was bite-checked by deleting the replacement
+  block as a text edit: the funding regression fails on its named assertion,
+  showing exactly the missing funding debit, and was restored the same way.
+- Two durable-prose corrections in `reference/architecture.md`: the futures
+  paragraph claimed "exactly one account snapshot per pass" where the
+  invariant is at most one from the engine phase (the `DropNextAccountUpdate`
+  suppression and `enforce_policy`'s own snapshots both contradict "exactly
+  one per pass"), and the extremes paragraph still claimed "one relaxed load"
+  and "publishes only when an extreme actually moves", both superseded by the
+  round-1 race fix it sits directly above.
+- The `TAPE_PROTOCOL_VERSION` non-bump was verified rather than trusted: the
+  arc touches no `mogwai-data` code, no fill-band draw, and the tape edit only
+  gates the extremes accumulator on the publication thread; the re-blessed
+  golden is read by nothing but its own comparison. No bump owed, on the same
+  grounds as both rounds recorded.
+- The `http.rs` escape question round 2 left open is settled above. The other
+  deliberate residuals - the helper-level regressions without a two-account
+  sweeper fixture, the untested `Ticket::drop` guard, the sweep-side
+  `next_due` staleness window, the `serve_page`-level classification test not
+  laid - were re-read and stand as recorded.
+- The retained-print ordering in `last_trade_at_or_before_with_budget` was
+  questioned and accepted: returning a found print when the budget expires
+  could in principle return a non-final print, but `SWEEP_DRAIN_BUDGET` is
+  13.1e9 ticks - a runaway guard, not a tightness bound - so the case is
+  unreachable in practice and either answer there is already a disaster.

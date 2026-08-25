@@ -401,8 +401,9 @@ The policy observes the two extremes in the order the tape reached them and then
 the close: a spike that opened and closed between passes spends drawdown budget,
 and a collapse that recovered before the pass breaches. Order matters and is not
 a detail - replaying favourable-first would invent breaches that never happened.
-The tape thread's cost is two comparisons and one relaxed load per tick, and it
-publishes only when an extreme actually moves.
+The tape thread's cost is two comparisons and two atomic loads per tick, and it
+takes the mutex only when it has something to hand over - an extreme that
+moved, or a print that found the span already taken.
 
 The handoff between the two threads is an epoch the reader bumps as it takes.
 Every print belongs to whichever span was open when it happened, including a
@@ -1102,8 +1103,11 @@ nautilus `MarginBalance` rows. Reduce-only orders place no hold, which is
 what makes two bracket legs against one position exclusive rather than
 additive. The sweep pass marks every open futures position to the tape, strikes
 every settlement instant the calendar crossed at its own instant rather than at
-the sweep boundary, and emits exactly one account snapshot per pass, after the
-mark, so no consumer sees a stale `mark_px`. Settlement moves the accumulated
+the sweep boundary, and its engine phase emits at most one account snapshot,
+recomputed after the mark, expiry and funding it covers, so no consumer sees a
+stale `mark_px`. At most one, not exactly one: `DropNextAccountUpdate` works by
+that phase emitting none, and risk enforcement may append its own snapshots
+afterwards. Settlement moves the accumulated
 difference into actual cash and resets the VWAP to the settlement price, which
 is why a losing futures position drains an account rather than merely carrying
 a worse unrealized number. A breach is `total_balance + unrealized <
