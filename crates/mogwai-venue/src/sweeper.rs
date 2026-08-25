@@ -133,22 +133,39 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 .into_iter()
                 .filter(|account_state| !account_state.is_frozen())
                 .collect();
-            // What a cursor is actually reading right now. An attached account's
-            // order outside this set rests on a river with no clock: nothing can
-            // sweep it, nothing can expire it, and it cannot be told apart from
-            // an order the tape has not reached. The venue refuses to leave it
-            // there rather than letting it sit forever - the consumer is attached,
-            // so it can be told. A frozen account is not here at all, and its
-            // book survives for the socket that returns to it.
-            let readable: Vec<mogwai_protocol::Symbol> = next_due
-                .values()
-                .map(|(boat, _)| mogwai_protocol::Symbol::from(boat.symbol()))
-                .collect();
+            // Every boat placed right now, re-read after the freeze filter above
+            // rather than reused from `next_due`. An upgrade places its boat
+            // before it attaches the connection, so an account observed attached
+            // here has its boat in this list; `next_due` was sampled before the
+            // pass slept and can be missing a boat boarded during that sleep,
+            // which would make the cancellation below fire on an account that
+            // had only just sat down.
+            let placed = sweep.run.boatyard.boats();
             let mut scans: Vec<(usize, PendingScan)> = Vec::new();
             let mut mark_symbols = Vec::new();
             let venue_now = sim_now_ns(sweep.run.sim);
             for (index, account_state) in attached_accounts.iter().enumerate() {
                 let mut engine = account_state.engine.lock().await;
+                // What this account's own cursors are actually reading right
+                // now. Its order outside this set rests on a river no cursor of
+                // its own reads: the sweep decides a scan only for an account
+                // seated on the due boat, so an order on anyone else's river is
+                // never filled, never expired and never cancelled, and cannot be
+                // told apart from an order the tape has not reached. The venue
+                // refuses to leave it there rather than letting it sit forever -
+                // the consumer is attached, so it can be told.
+                //
+                // Per account, not per venue, because the predicate that decides
+                // cancellation must be the predicate that decides sweeping. A
+                // venue-wide set is "rivers with a clock" while the sweep asks
+                // "rivers with this account's clock", and those differ the moment
+                // two accounts ride different symbols or one river at two
+                // cadences. A frozen account is not in this loop at all, and its
+                // book survives for the socket that returns to it.
+                let readable = readable_symbols(
+                    placed.iter().map(|boat| (boat.symbol(), boat.key())),
+                    |key| account_state.is_seated_on(key),
+                );
                 // Stamped on the venue clock, which is the only one that
                 // answers here: the order being cancelled is on a river with no
                 // boat, so there is no river clock to date it by.
@@ -333,8 +350,17 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     })
                     .collect();
                 let rivers = Arc::clone(&sweep.rivers);
-                let reads =
-                    run_blocking(move || read_marks(&symbols, &settlements, to_ns, &rivers));
+                let unpaced = boat_key.speed_micros() == 0;
+                let span_river = boat_key.river().clone();
+                let reads = run_blocking(move || {
+                    let marks = read_marks(&symbols, &settlements, to_ns, &rivers)?;
+                    let span = if unpaced {
+                        fills::price_span(&span_river, last_swept_ns, to_ns, &rivers)?
+                    } else {
+                        None
+                    };
+                    Some((marks, span))
+                });
                 let reads = tokio::select! {
                     reads = reads => reads.flatten(),
                     _ = completion.changed() => break 'passes,
@@ -342,7 +368,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let frontier = frontier_after(last_swept_ns, to_ns, reads.is_some());
                 boat.last_swept_ns
                     .store(frontier, std::sync::atomic::Ordering::Release);
-                let Some(((marks, settlement_marks), span)) = commit_pass(reads, &boat.extremes)
+                let Some(((marks, settlement_marks), span)) =
+                    commit_pass(reads, &boat.extremes, unpaced)
                 else {
                     // The reading task died, or one of this span's settlement
                     // instants had no readable price. Abandoning the whole pass is
@@ -554,11 +581,17 @@ fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
 /// Ordering alone is what enforces this, so the two steps are here, in one
 /// expression a reordering has to delete rather than move.
 fn commit_pass(
-    reads: Option<MarkReads>,
+    reads: Option<(MarkReads, Option<crate::extremes::PriceSpan>)>,
     extremes: &crate::extremes::PriceExtremes,
+    unpaced: bool,
 ) -> Option<(MarkReads, Option<crate::extremes::PriceSpan>)> {
-    let reads = reads?;
-    Some((reads, extremes.take()))
+    let (reads, bounded_span) = reads?;
+    let span = if unpaced {
+        bounded_span
+    } else {
+        extremes.take()
+    };
+    Some((reads, span))
 }
 
 async fn run_blocking<F, T>(work: F) -> Option<T>
@@ -646,11 +679,12 @@ fn apply_engine_pass_on_clock(
     events.extend(funded.events);
     originated += marked.originated_orders;
     events.extend(marked.events);
-    // Exactly one `AccountState` per pass, and it is the last one: scans,
-    // every settlement and the mark each snapshot, and every snapshot but the
-    // final one reports a stale `mark_px` and `unrealized_pnl`. Dropping the
-    // earlier ones unconditionally is what makes the invariant hold on a pass
-    // where a settlement snapshotted and the mark did not move.
+    // Exactly one `AccountState` from this phase, recomputed after every
+    // mutation in the phase. Choosing an existing snapshot by vector position
+    // is insufficient: marking is computed before expiry and funding but its
+    // events are appended after both, so the last appended snapshot can be the
+    // oldest ledger state. The presence of a surviving snapshot still decides
+    // whether one is emitted, preserving `DropNextAccountUpdate`.
     let last_state = events
         .iter()
         .rposition(|event| matches!(event, VenueMessage::AccountState(_)));
@@ -661,6 +695,13 @@ fn apply_engine_pass_on_clock(
             index += 1;
             keep
         });
+        let snapshot = engine.account_snapshot(to_ns);
+        if let Some(state) = events
+            .iter_mut()
+            .find(|event| matches!(event, VenueMessage::AccountState(_)))
+        {
+            *state = VenueMessage::AccountState(snapshot);
+        }
     } else if settled_cash {
         // Cash settling moves `free` and `locked` without moving `total` and
         // without producing an order event, so it is the one transition that
@@ -976,6 +1017,19 @@ fn holds_one_ledger(accounts: &[Arc<crate::run::Account>]) -> bool {
     accounts.len() == 1
 }
 
+fn readable_symbols<'a>(
+    boats: impl Iterator<Item = (&'a str, crate::boatyard::BoatKey)>,
+    mut is_seated_on: impl FnMut(&crate::boatyard::BoatKey) -> bool,
+) -> Vec<mogwai_protocol::Symbol> {
+    let mut readable: Vec<_> = boats
+        .filter(|(_, key)| is_seated_on(key))
+        .map(|(symbol, _)| mogwai_protocol::Symbol::from(symbol))
+        .collect();
+    readable.sort();
+    readable.dedup();
+    readable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1039,19 @@ mod tests {
         TimeInForce, WireAssetClass,
     };
     use rust_decimal::Decimal;
+
+    #[test]
+    fn readable_is_scoped_to_the_account_seated_on_the_boat() {
+        let run = crate::run::test_run();
+        let btc = run.rivers.test_key("BTCUSDT");
+        let btc_boat = crate::boatyard::BoatKey::new(btc.clone(), 1.0).unwrap();
+        let mnq_boat = crate::boatyard::BoatKey::new(btc, 2.0).unwrap();
+        let readable = readable_symbols(
+            [("BTCUSDT", btc_boat.clone()), ("MNQ", mnq_boat)].into_iter(),
+            |key| key == &btc_boat,
+        );
+        assert_eq!(readable, vec![mogwai_protocol::Symbol::from("BTCUSDT")]);
+    }
 
     /// A terminating breach ends the run only when the run holds one ledger,
     /// and a frozen account is one the run still holds.
@@ -1334,22 +1401,22 @@ mod tests {
         extremes.record(&mut writer, rust_decimal::Decimal::from(90), 2);
 
         assert!(
-            commit_pass(None, &extremes).is_none(),
+            commit_pass(None, &extremes, false).is_none(),
             "a failed reading abandons the pass"
         );
 
         // The next pass re-sweeps the same interval, and must still find the
         // spike the tape actually printed in it.
-        let (_reads, span) =
-            commit_pass(Some((Vec::new(), Vec::new())), &extremes).expect("the reading succeeded");
+        let (_reads, span) = commit_pass(Some(((Vec::new(), Vec::new()), None)), &extremes, false)
+            .expect("the reading succeeded");
         let span = span.expect("the tape printed in this interval");
         assert_eq!(span.high_px, rust_decimal::Decimal::from(140));
         assert_eq!(span.low_px, rust_decimal::Decimal::from(90));
 
         // And a committed pass does consume it, so the next span starts from
         // its own prints rather than re-ratcheting a peak already spent.
-        let (_reads, span) =
-            commit_pass(Some((Vec::new(), Vec::new())), &extremes).expect("the reading succeeded");
+        let (_reads, span) = commit_pass(Some(((Vec::new(), Vec::new()), None)), &extremes, false)
+            .expect("the reading succeeded");
         assert!(span.is_none(), "a committed pass consumes the span");
     }
 
@@ -1459,6 +1526,62 @@ mod tests {
                 ts_ns: 1,
                 band_ticks: 0,
             }),
+        );
+        engine
+    }
+
+    fn engine_with_perpetual_position() -> mogwai_engine::Engine {
+        let def = InstrumentDef {
+            symbol: "BTCUSDT.P".into(),
+            class: InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Cryptocurrency,
+                funding_interval_ns: 8 * 3_600 * 1_000_000_000,
+                funding_rate: Decimal::new(1, 4),
+                index_symbol: None,
+                funding_clamp: Decimal::ZERO,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        };
+        let mut engine = mogwai_engine::Engine::build(EngineConfig {
+            account_id: AccountId::parse("TEST-001").unwrap(),
+            instruments: vec![def],
+            balances: HashMap::from([("USDT".into(), Decimal::from(100_000))]),
+            fill_seed: 7,
+        });
+        engine.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: MarginBreachAction::Refuse,
+                basis: Default::default(),
+            },
+        );
+        engine.process(
+            Command::SubmitOrder(SubmitOrder {
+                client_order_id: "OPEN-PERP".into(),
+                symbol: "BTCUSDT.P".into(),
+                position_id: None,
+                side: Side::Buy,
+                order_type: OrderType::Market,
+                quantity: Decimal::ONE,
+                price: Some(Decimal::from(50_000)),
+                trigger_price: None,
+                trail_offset: None,
+                limit_offset: None,
+                reduce_only: false,
+                post_only: false,
+                time_in_force: TimeInForce::Gtc,
+                expire_time: None,
+                link: None,
+            }),
+            1,
         );
         engine
     }
@@ -1671,6 +1794,51 @@ mod tests {
                 .filter(|event| matches!(event, VenueMessage::AccountState(_)))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn a_pass_snapshot_is_taken_after_its_funding_payment() {
+        const FUNDING: u64 = 8 * 3_600 * 1_000_000_000;
+        let mut engine = engine_with_perpetual_position();
+        let (events, _, _) = apply_engine_pass_on_clock(
+            &mut engine,
+            &[],
+            Vec::new(),
+            &[("BTCUSDT.P".into(), Decimal::from(60_000))],
+            &[],
+            FUNDING - 1,
+            FUNDING,
+            None,
+            mogwai_protocol::SimClock::identity(),
+        );
+        let delivered = events.iter().find_map(|event| match event {
+            VenueMessage::AccountState(state) => Some(state),
+            _ => None,
+        });
+        assert_eq!(
+            serde_json::to_value(delivered.expect("the pass emitted its account state")).unwrap(),
+            serde_json::to_value(engine.account_snapshot(FUNDING)).unwrap(),
+            "the delivered state must include the funding payment"
+        );
+    }
+
+    #[test]
+    fn an_unpaced_pass_uses_its_clock_bounded_span() {
+        let extremes = crate::extremes::PriceExtremes::default();
+        let mut writer = crate::extremes::SpanWriter::default();
+        extremes.record(&mut writer, Decimal::from(999), 999);
+        let bounded = crate::extremes::PriceSpan::of(Decimal::from(100), 5);
+        let (_, span) = commit_pass(
+            Some(((Vec::new(), Vec::new()), Some(bounded))),
+            &extremes,
+            true,
+        )
+        .expect("the market reads succeeded");
+        assert_eq!(span, Some(bounded));
+        assert!(
+            extremes.take().is_some(),
+            "the future publisher span was not consumed as this pass's prices"
         );
     }
 

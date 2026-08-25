@@ -2,10 +2,88 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current as of the
-`notes/bugs-engine.md` arc, round 2, which closed that document. What follows is
-also the handover to the close pass.
+`notes/bugs-venue-mechanics.md` arc, round 1, which closed findings 1 through 5
+of that document; findings 6 through 9 and the structural recommendation are a
+later round. The `notes/bugs-engine.md` arc below it is closed and judged sound.
 
-## Machinery agents may build on and must not break
+## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
+
+- **A sweep pass emits at most one `AccountState` from the engine phase, and it
+  is recomputed at the end of the phase**, never selected by vector position.
+  Marking is computed before expiry and funding but its events are appended
+  after both, so `rposition` picked the oldest ledger state. The presence of a
+  surviving snapshot still decides whether one is emitted at all, which is what
+  keeps `DropNextAccountUpdate` working - do not turn the recompute into an
+  unconditional push. The invariant is scoped to that phase: `enforce_policy`
+  legitimately appends more `AccountState` frames afterwards, and the comment
+  now says so rather than claiming one per pass.
+- **`PriceExtremes` epoch handling is a two-sided contract.** The epoch read at
+  the top of `record_with` may be stale by the time the print is published, so
+  the writer re-reads it under the `published` lock and, on a moved epoch,
+  opens the new span from this print. A print that moved *neither* extreme of
+  the old span takes the same path: it re-reads the epoch off the mutex, and
+  only returns early when the epoch is genuinely unchanged. Both halves are
+  needed and both have their own barrier-pinned regression. Never reintroduce
+  an early return that skips the recheck.
+- **An unpaced boat (`speed_micros() == 0`) does not use the tape thread's
+  extremes accumulator at all.** Its publisher runs ahead of the boat clock, so
+  `fills::price_span` regenerates the clock-bounded span from the same river
+  and `commit_pass` takes the accumulator only on a paced boat. `tape.rs`
+  correspondingly stops recording when `spawn.speed == 0.0`. The two predicates
+  agree exactly because `BoardRequest`'s speed is quantized through
+  `BoatKey::speed()` before `TapeSpawn` sees it - if either side stops going
+  through the quantized value they diverge silently.
+- **Risk precedence: a terminating rule wins over a lock on the same reading**,
+  and same-action rules keep evaluation order. **A lock is acted on once**:
+  `observe` returns `Clear` while `locked`, after the day-boundary lift and
+  after the peak ratchet. The ratchet deliberately still runs while locked -
+  the peak is a property of the tape, not of the account's permission to trade.
+- **`readable` is computed per account seat**, from the boats that account is
+  seated on, because the predicate that decides cancellation must be the
+  predicate that decides sweeping. It is sourced from a fresh
+  `boatyard.boats()` read taken *after* the freeze filter, not from `next_due`:
+  an upgrade places its boat before it attaches the connection, so an account
+  observed attached has its boat in that list, while `next_due` was sampled
+  before the pass slept and can miss a boat boarded during the sleep. Reusing
+  `next_due` there would cancel the orders of an account that had just sat
+  down.
+
+## Hazards this arc has already paid for, from bugs-venue-mechanics round 1
+
+- A race regression must pin the interleaving with barriers, and the barrier
+  hook has to sit at the point the branch under test reaches. Round 1's
+  finding-2 test was correctly barrier-pinned and still could not reach the
+  non-moving-print branch, because its single print always sets `moved = true`
+  and the hook fired after the `!moved` early return. A race test that only
+  covers the easy branch reads exactly like one that covers both.
+- Three of round 1's five regressions test a pure helper (`readable_symbols`,
+  `commit_pass`) rather than the call site that feeds it. They bite, but they
+  would still pass if the sweeper passed `|_| true` or a wrong `unpaced`. The
+  wiring is one readable line in each case and was audited by reading; a later
+  round wanting stronger coverage needs a two-account, two-boat sweeper
+  fixture, which does not exist yet.
+- `Rivers::history_source` yields the same realization the tape thread
+  publishes - `FlowSurge` mutates the live river so prints, history and trigger
+  decisions agree - which is what makes regenerating a span off the river
+  equivalent to reading the accumulator. If that ever stops being true, the
+  unpaced path silently observes different water than the passengers saw.
+
+## Decisions already ruled on, from bugs-venue-mechanics round 1
+
+- **No `TAPE_PROTOCOL_VERSION` bump is owed by this round.** `mogwai-data`,
+  `analysis/` and the fingerprint were untouched. `mogwai-venue`'s `tape.rs` is
+  the publication thread, not the generator: gating the extremes recording
+  changes no tick, no seed derivation, no arrival clock and no fill band draw.
+  `fills::price_span` builds a fresh `history_source` per call exactly as
+  `read_marks` and `scan_triggers` already do, so it consumes the generator
+  rather than advancing shared state.
+- The one-sweep-interval window in which a boat placed during the pass's sleep
+  is missing from `next_due` still exists for the *sweep* itself. It is closed
+  for cancellation by the fresh `boats()` read above; closing it for the sweep
+  would mean re-deriving `next_due` after the sleep, which changes the cadence
+  schedule. Left alone deliberately.
+
+## Machinery agents may build on and must not break, from the bugs-engine arc
 
 - **Group closing linkage uses the booked fill quantity**, never quantities
   reconstructed from the emitted `VenueMessage` stream. `on_submit_from` returns
@@ -44,7 +122,7 @@ also the handover to the close pass.
   instrument set. `Warned::saturated` is a `RefCell` so `free_balance`, which
   takes `&self`, can warn on its own clipping.
 
-## Hazards this arc has already paid for
+## Hazards the bugs-engine arc already paid for
 
 - Group admission atomicity is backed by a `debug_assert`, so a group regression
   test is structurally prone to passing vacuously in release. Assert the
@@ -68,7 +146,7 @@ also the handover to the close pass.
   any wire path. Neither "it reproduces" nor "it does not reproduce" was the
   answer; closing it by making the two folds agree by construction was.
 
-## Decisions already ruled on, not to be relitigated
+## Decisions already ruled on in the bugs-engine arc, not to be relitigated
 
 - Splitting the overloaded `apply_divergences` flag is the durable fix for the
   dry-pass blindness. It is recorded as owed in `reference/architecture.md`, and
@@ -85,7 +163,7 @@ also the handover to the close pass.
   round 2 did. `mogwai-data`, `analysis/` and the fingerprint were untouched
   throughout.
 
-## The close pass, and how the arc ended
+## The close pass, and how the bugs-engine arc ended
 
 The close pass reviewed the whole `d58ff1e..HEAD` arc and closed it. What it
 found and did:

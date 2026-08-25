@@ -254,6 +254,12 @@ not take down the batch. Enforcement without the flatten would be a
 report; the flatten is what makes a forward claim mean anything, because a
 strategy that would have been liquidated actually is.
 
+One equity reading may cross several configured floors. A terminating rule
+wins over a lock on that reading, so a softer rule earlier in evaluation order
+cannot permanently hide a hard floor. Rules with the same action keep their
+evaluation order. A lock is acted on once and remains inert until the reset
+lifts it.
+
 The thresholds, the ratcheted peak and the remaining budget are published on
 `GET /account` for the evaluator rather than for the strategy. mogwai presents
 no dashboard, so a run that ended flat having spent most of its budget would be
@@ -394,8 +400,24 @@ policy is described.
 The policy observes the two extremes in the order the tape reached them and then
 the close: a spike that opened and closed between passes spends drawdown budget,
 and a collapse that recovered before the pass breaches. Order matters and is not
-a detail - replaying favourable-first would invent breaches that never happened. The tape thread's cost is two comparisons and one relaxed
-load per tick, and it publishes only when an extreme actually moves.
+a detail - replaying favourable-first would invent breaches that never happened.
+The tape thread's cost is two comparisons and one relaxed load per tick, and it
+publishes only when an extreme actually moves.
+
+The handoff between the two threads is an epoch the reader bumps as it takes.
+Every print belongs to whichever span was open when it happened, including a
+print that raced the take and one that moved neither of the old span's
+extremes: the writer re-reads the epoch before it publishes, and a print that
+finds the epoch moved opens the new span from itself rather than being dropped
+under a stamp the reader will no longer accept. Nothing else in the venue may
+assume the epoch read at the top of a record is still current at its end.
+
+An unpaced tape is the exception to where those extremes are accumulated, not
+to what the policy observes. Its publisher can run ahead of the boat clock, so
+the sweeper regenerates the clock-bounded span from the same river instead of
+consuming the publisher's future extremes. The regeneration reads the same
+realization the tape thread published, so a surged river's extremes are the
+surged ones.
 
 Time-in-force covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
 - both can wait for a trigger - but never Ioc or Fok, which cannot wait for

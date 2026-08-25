@@ -48,7 +48,9 @@
 //! The writer never blocks on a reader. The tape thread keeps its running
 //! extremes in its own stack and publishes only when one moves, which after the
 //! first few ticks of a span is rare. The reader opens a fresh span by bumping
-//! an epoch; the writer notices on its next tick with one relaxed load.
+//! an epoch; the writer notices on its next tick with an atomic load, and takes
+//! the mutex only when it has something to hand over - an extreme that moved,
+//! or a print that found the epoch bumped underneath it.
 
 use std::sync::{
     Mutex,
@@ -67,7 +69,7 @@ pub(crate) struct PriceSpan {
 }
 
 impl PriceSpan {
-    fn of(px: Decimal, ts_ns: u64) -> Self {
+    pub(crate) fn of(px: Decimal, ts_ns: u64) -> Self {
         Self {
             high_px: px,
             high_ns: ts_ns,
@@ -78,7 +80,7 @@ impl PriceSpan {
 
     /// Fold one print in. Returns whether either extreme moved, which is what
     /// decides whether the writer publishes.
-    fn fold(&mut self, px: Decimal, ts_ns: u64) -> bool {
+    pub(crate) fn fold(&mut self, px: Decimal, ts_ns: u64) -> bool {
         let mut moved = false;
         if px > self.high_px {
             self.high_px = px;
@@ -132,8 +134,20 @@ pub(crate) struct SpanWriter {
 
 impl PriceExtremes {
     /// Record one print. Called from the tape thread on every trade it
-    /// publishes, and holding the lock only when an extreme actually moved.
+    /// publishes, and holding the lock only when it has something to publish:
+    /// an extreme that moved, or a print that raced a `take` and so opens the
+    /// span the reader just started.
     pub(crate) fn record(&self, writer: &mut SpanWriter, px: Decimal, ts_ns: u64) {
+        self.record_with(writer, px, ts_ns, || {});
+    }
+
+    fn record_with(
+        &self,
+        writer: &mut SpanWriter,
+        px: Decimal,
+        ts_ns: u64,
+        before_publish: impl FnOnce(),
+    ) {
         let epoch = self.epoch.load(Ordering::Acquire);
         let moved = if writer.epoch == epoch {
             match &mut writer.span {
@@ -148,16 +162,33 @@ impl PriceExtremes {
             writer.span = Some(PriceSpan::of(px, ts_ns));
             true
         };
-        if !moved {
+        before_publish();
+        // A print that moved nothing still belongs to whatever span is open
+        // when it happens. If the reader took the span after the load above,
+        // this print is the new span's first print and the writer's untouched
+        // old extremes describe a span that has already been spent - so the
+        // epoch is re-read here rather than only on the publishing path. The
+        // re-read is one atomic load and stays off the mutex, which is what
+        // keeps the ordinary non-moving print nearly free.
+        if !moved && self.epoch.load(Ordering::Acquire) == epoch {
             return;
         }
         let Some(span) = writer.span else {
             return;
         };
-        *self
+        let mut published = self
             .published
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((epoch, span));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.epoch.load(Ordering::Acquire);
+        if current == epoch {
+            *published = Some((epoch, span));
+        } else {
+            writer.epoch = current;
+            let span = PriceSpan::of(px, ts_ns);
+            writer.span = Some(span);
+            *published = Some((current, span));
+        }
     }
 
     /// Take the span since the last call and open a fresh one.
@@ -257,6 +288,88 @@ mod tests {
             span.high_px,
             px(100),
             "the new span starts from its own first print, not the old high"
+        );
+    }
+
+    /// The barrier fixes the reported interleaving: the writer has folded the
+    /// print under the old epoch but cannot publish until the reader has taken
+    /// that epoch. A scheduler race would be a coin flip against this defect.
+    #[test]
+    fn a_print_racing_a_take_belongs_to_the_new_span() {
+        use std::sync::{Arc, Barrier};
+
+        let extremes = Arc::new(PriceExtremes::default());
+        let folded = Arc::new(Barrier::new(2));
+        let taken = Arc::new(Barrier::new(2));
+        let writer_extremes = Arc::clone(&extremes);
+        let writer_folded = Arc::clone(&folded);
+        let writer_taken = Arc::clone(&taken);
+        let writer = std::thread::spawn(move || {
+            let mut writer = SpanWriter::default();
+            writer_extremes.record_with(&mut writer, px(140), 7, || {
+                writer_folded.wait();
+                writer_taken.wait();
+            });
+        });
+
+        folded.wait();
+        assert!(
+            extremes.take().is_none(),
+            "the old span had no published print"
+        );
+        taken.wait();
+        writer.join().expect("the writer completed");
+        let span = extremes.take().expect("the racing print remains owed");
+        assert_eq!((span.high_px, span.high_ns), (px(140), 7));
+    }
+
+    /// The same race for a print that moves nothing.
+    ///
+    /// The writer already holds a wide span under the open epoch, so folding an
+    /// interior print returns false. That print is still the first print of
+    /// whatever span the racing `take` opened, and the early return for a
+    /// non-moving print used to discard it - the writer's next print resets the
+    /// span from itself and nothing ever published this one. Barriers pin the
+    /// interleaving; a scheduler race here would be a coin flip against the
+    /// defect rather than a test of it.
+    #[test]
+    fn an_interior_print_racing_a_take_opens_the_new_span() {
+        use std::sync::{Arc, Barrier};
+
+        let extremes = Arc::new(PriceExtremes::default());
+        let folded = Arc::new(Barrier::new(2));
+        let taken = Arc::new(Barrier::new(2));
+        let mut writer = SpanWriter::default();
+        // A wide span the interior print below cannot move, published under the
+        // epoch the reader is about to close.
+        extremes.record(&mut writer, px(200), 1);
+        extremes.record(&mut writer, px(50), 2);
+
+        let writer_extremes = Arc::clone(&extremes);
+        let writer_folded = Arc::clone(&folded);
+        let writer_taken = Arc::clone(&taken);
+        let printing = std::thread::spawn(move || {
+            writer_extremes.record_with(&mut writer, px(120), 3, || {
+                writer_folded.wait();
+                writer_taken.wait();
+            });
+        });
+
+        folded.wait();
+        let old = extremes
+            .take()
+            .expect("the old span published its extremes");
+        assert_eq!((old.high_px, old.low_px), (px(200), px(50)));
+        taken.wait();
+        printing.join().expect("the writer completed");
+
+        let span = extremes
+            .take()
+            .expect("the interior print opened the new span rather than vanishing");
+        assert_eq!(
+            (span.high_px, span.high_ns, span.low_px, span.low_ns),
+            (px(120), 3, px(120), 3),
+            "the new span is exactly the print that raced the take"
         );
     }
 }

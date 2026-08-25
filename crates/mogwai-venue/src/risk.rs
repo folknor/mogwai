@@ -149,42 +149,52 @@ impl RiskLedger {
         {
             self.peak_equity = self.peak_equity.max(equity);
         }
+        // An already-acted lock is inert until the reset above lifts it. The
+        // ratchet still runs, because the peak is a property of the tape rather
+        // than of the account's permission to trade, and a rule below this one
+        // is evaluated the first pass after the lift rather than never.
+        if self.locked {
+            return Verdict::Clear;
+        }
 
+        let mut first = None;
+        let mut terminating = None;
         if let Some(trailing) = &self.policy.trailing_drawdown {
             let threshold = self.trailing_threshold(trailing.amount, trailing.lock_at_equity);
             if equity < threshold {
-                return self.fire(
+                let candidate = (
                     BreachedRule::TrailingDrawdown,
                     trailing.on_breach,
-                    equity,
                     threshold,
-                    now_ns,
                 );
+                first = Some(candidate);
+                if trailing.on_breach == BreachAction::Terminate {
+                    terminating = Some(candidate);
+                }
             }
         }
         if let Some(daily) = &self.policy.daily_loss_limit {
             let threshold = self.day_open_equity - daily.amount;
             if equity < threshold {
-                return self.fire(
-                    BreachedRule::DailyLossLimit,
-                    daily.on_breach,
-                    equity,
-                    threshold,
-                    now_ns,
-                );
+                let candidate = (BreachedRule::DailyLossLimit, daily.on_breach, threshold);
+                first.get_or_insert(candidate);
+                if daily.on_breach == BreachAction::Terminate && terminating.is_none() {
+                    terminating = Some(candidate);
+                }
             }
         }
         if let Some(overall) = &self.policy.overall_drawdown {
             let threshold = self.opening_equity - overall.amount;
             if equity < threshold {
-                return self.fire(
-                    BreachedRule::OverallDrawdown,
-                    overall.on_breach,
-                    equity,
-                    threshold,
-                    now_ns,
-                );
+                let candidate = (BreachedRule::OverallDrawdown, overall.on_breach, threshold);
+                first.get_or_insert(candidate);
+                if overall.on_breach == BreachAction::Terminate && terminating.is_none() {
+                    terminating = Some(candidate);
+                }
             }
+        }
+        if let Some((rule, action, threshold)) = terminating.or(first) {
+            return self.fire(rule, action, equity, threshold, now_ns);
         }
         Verdict::Clear
     }
@@ -301,7 +311,7 @@ fn day_index(now_ns: u64, reset_minute_utc: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mogwai_protocol::risk::{DailyLossLimit, TrailingDrawdown};
+    use mogwai_protocol::risk::{DailyLossLimit, OverallDrawdown, TrailingDrawdown};
 
     const DAY: u64 = 24 * 60 * NANOS_PER_MINUTE;
 
@@ -463,5 +473,54 @@ mod tests {
         };
         assert_eq!(breach.rule, BreachedRule::OverallDrawdown);
         assert_eq!(breach.action, BreachAction::Terminate);
+    }
+
+    #[test]
+    fn a_lock_rule_cannot_mask_a_simultaneous_terminating_breach() {
+        let policy = AccountPolicy {
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: Decimal::from(1_000),
+                basis: TrailingBasis::PeakEquity,
+                lock_at_equity: None,
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            overall_drawdown: Some(OverallDrawdown {
+                amount: Decimal::from(2_000),
+                on_breach: BreachAction::Terminate,
+            }),
+            reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
+        };
+        let mut ledger = RiskLedger::new(policy, Decimal::from(50_000), 0);
+        let Verdict::Breached(breach) = ledger.observe(Decimal::from(47_000), 1) else {
+            panic!("the reading crosses both floors");
+        };
+        assert_eq!(breach.rule, BreachedRule::OverallDrawdown);
+        assert_eq!(breach.action, BreachAction::Terminate);
+        assert_eq!(ledger.state(Decimal::from(47_000)).breached, Some(breach));
+    }
+
+    #[test]
+    fn a_lock_breach_is_acted_on_once_until_reset() {
+        let policy = AccountPolicy {
+            daily_loss_limit: Some(DailyLossLimit {
+                amount: Decimal::from(500),
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
+        };
+        let mut ledger = RiskLedger::new(policy, Decimal::from(50_000), 0);
+        assert!(matches!(
+            ledger.observe(Decimal::from(49_000), 1),
+            Verdict::Breached(_)
+        ));
+        assert_eq!(
+            ledger.observe(Decimal::from(49_000), 2),
+            Verdict::Clear,
+            "an already-flattened lock must not fire on every sweep"
+        );
     }
 }

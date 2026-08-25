@@ -93,9 +93,11 @@ frontier sits in the new cursor's future. And whatever the account held off the
 river the new socket bound - resting orders, positions - is retired, because the
 returning connection can neither see nor close it.
 
-While a consumer is attached, an order on a symbol no cursor is reading is
-cancelled rather than left resting: nothing could ever fill or expire it, and
-the consumer is there to be told.
+While a consumer is attached, an order on a symbol none of that account's own
+cursors is reading is cancelled rather than left resting: nothing could ever
+fill or expire it, and the consumer is there to be told. Another account riding
+that symbol does not keep the order alive - the sweep decides an order only for
+an account seated on the due boat.
 
 History synthesis runs four `/trades` or `/quotes` requests at a time per run. A
 slot is held until the response has been written, not merely until synthesis

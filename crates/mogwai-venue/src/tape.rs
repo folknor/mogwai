@@ -107,7 +107,9 @@ impl Tape {
                 // would be an extreme no fill or valuation could ever have been
                 // taken at. Recorded before publication, so a reader that takes
                 // the span after seeing a frame cannot miss that frame's price.
-                if let mogwai_data::TickEvent::Trade(trade) = &tick {
+                if spawn.speed != 0.0
+                    && let mogwai_data::TickEvent::Trade(trade) = &tick
+                {
                     spawn.extremes.record(&mut span, trade.price, ts_event);
                 }
                 let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));

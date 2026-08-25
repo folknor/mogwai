@@ -260,6 +260,57 @@ pub(crate) fn scan_triggers(
     scan_triggers_with_budget(river, scans, to_ns, rivers, SWEEP_DRAIN_BUDGET)
 }
 
+/// Read the exact trade extremes in one half-open sweep continuation.
+///
+/// Unpaced tape publication can run arbitrarily ahead of its boat clock, so
+/// its tape-thread accumulator cannot describe the clock-bounded span the
+/// engine is allowed to observe. The sweeper regenerates that short span from
+/// the same river instead. The outer `None` is a failed read; the inner `None`
+/// is the ordinary answer that the span contained no trade.
+pub(crate) fn price_span(
+    river: &source::RiverKey,
+    from_ns: u64,
+    to_ns: u64,
+    rivers: &source::Rivers,
+) -> Option<Option<crate::extremes::PriceSpan>> {
+    let mut source = history_or_warn(
+        rivers,
+        river,
+        from_ns.saturating_add(1),
+        "price-extremes scan could not read its river",
+    )?;
+    let mut span = None;
+    let mut drained = 0usize;
+    while drained < SWEEP_DRAIN_BUDGET {
+        let Some(tick) = source.next_tick() else {
+            break;
+        };
+        if tick.ts_event() > to_ns {
+            return Some(span);
+        }
+        drained += 1;
+        if let mogwai_data::TickEvent::Trade(trade) = tick {
+            match &mut span {
+                Some(span) => {
+                    span.fold(trade.price, trade.ts_event);
+                }
+                slot @ None => {
+                    *slot = Some(crate::extremes::PriceSpan::of(trade.price, trade.ts_event));
+                }
+            }
+        }
+    }
+    if drained == SWEEP_DRAIN_BUDGET {
+        tracing::warn!(
+            symbol = river.symbol(),
+            budget = SWEEP_DRAIN_BUDGET,
+            "price-extremes scan exhausted its drain budget"
+        );
+        return None;
+    }
+    Some(span)
+}
+
 fn scan_triggers_with_budget(
     river: &source::RiverKey,
     scans: &[PendingScan],

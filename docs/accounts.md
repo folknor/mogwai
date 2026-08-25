@@ -215,9 +215,13 @@ nobody was reading was never watched and no fill is owed for it, which is the
 same statement the freeze makes. A live account boarding a second river retires
 nothing: that is the many-rivers shape, not a return.
 
-While a consumer is attached, an order on a symbol no cursor is reading is
-cancelled rather than left resting. Nothing could ever fill or expire it, and
-the consumer is there to be told.
+While a consumer is attached, an order on a symbol none of that account's own
+cursors is reading is cancelled rather than left resting. Nothing could ever
+fill or expire it, and the consumer is there to be told. The set is the
+account's own rides and not every river the venue happens to be running: the
+sweep decides an order only for an account seated on the boat that came due, so
+another account riding the symbol would leave this one's order undecided
+forever.
 
 `account_ttl_ms` (default `0`, meaning never) is how long an unattended account
 survives before the venue collects it, in wall milliseconds rather than
@@ -292,10 +296,18 @@ current terms: `intraday-trail`, `eod-trail`, `daily-limit-only`,
 `static-drawdown` and `intraday-trail-sized`. Their numbers are listed under
 "Account policies" in `docs/config.md`.
 
+When one equity reading crosses several rules at once, a terminating rule wins
+over a lock, so a softer floor earlier in evaluation order cannot mask a hard
+one. Rules carrying the same action keep their evaluation order.
+
 Once a rule fires, that breach is what describes the run: a breached account is
 not re-evaluated, and only a terminating rule is recorded as the breach. A
 `lock_until_reset` breach is remembered as a lock and lifts at the next
-crossing of the reset minute. A locked account's submits are refused with
+crossing of the reset minute. It is acted on once: the flatten and the breach
+frame happen on the crossing, and the account is then inert rather than
+re-flattened on every sweep for the rest of the period. A rule that would have
+fired underneath the lock is evaluated on the first reading after the lift.
+A locked account's submits are refused with
 `account <id> breached its risk policy and may not open a position`, while
 cancels and queries are still served - a locked consumer must be able to see
 and tidy its own book, and refusing its queries would make a locked account
