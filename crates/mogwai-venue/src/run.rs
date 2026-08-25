@@ -1179,15 +1179,30 @@ impl Run {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        for account_id in &expired {
-            tracing::info!(
-                account = %account_id,
-                ttl_ms = ttl.as_millis(),
-                "collecting an account nobody reclaimed",
-            );
-            self.collect_account(account_id);
+        let mut collected = Vec::with_capacity(expired.len());
+        for account_id in expired {
+            // The filter's answer is already the past: an admission can reserve
+            // or commit on this account between the read above and the removal,
+            // and collecting it anyway would delete the connection record that
+            // admission just committed - the finding-1 stranding through the
+            // TTL door. `collect_account` re-derives the guard atomically and
+            // says whether the collection happened; a refused one simply waits
+            // out its next expiry, if it ever becomes unattended again.
+            if self.collect_account(&account_id) {
+                tracing::info!(
+                    account = %account_id,
+                    ttl_ms = ttl.as_millis(),
+                    "collected an account nobody reclaimed",
+                );
+                collected.push(account_id);
+            } else {
+                tracing::info!(
+                    account = %account_id,
+                    "an expired account was reclaimed before it could be collected",
+                );
+            }
         }
-        expired
+        collected
     }
 
     /// Discard an account's ledger so the next connection opens a clean one.
@@ -1198,8 +1213,10 @@ impl Run {
     }
 
     /// Discard one account's ledger and the order claims attributing its frames.
-    /// The connection registry is deliberately left intact: reconnect reset is
-    /// reached after admission has committed the successor's ride and handoff.
+    /// The connection registry is deliberately left intact: reconnect reset runs
+    /// inside the admission's reservation window, before the commit that
+    /// installs the successor's ride and handoff, so the connection lifecycle is
+    /// not this path's to touch.
     fn discard_account(&self, account_id: &str) {
         self.accounts
             .lock()
@@ -1211,11 +1228,33 @@ impl Run {
             .retain(|_, owner| owner != account_id);
     }
 
-    /// Collect an unattended account entirely. Unlike reconnect reset, the TTL
-    /// path has established that no committed or reading connection remains.
-    fn collect_account(&self, account_id: &str) {
-        self.discard_account(account_id);
-        self.registry.forget(account_id);
+    /// Collect an unattended account entirely, or refuse because an admission
+    /// got in between.
+    ///
+    /// The sweep's expiry read is stale by the time it acts, so the registry
+    /// re-derives "unattended, and nothing pending" under its own lock before
+    /// the entry goes - see `ConnectionRegistry::collect`. The ledger is
+    /// removed under the accounts lock taken before that registry call, in the
+    /// same accounts-then-registry order the expiry filter already nests, so an
+    /// admission reading the ledger through this map cannot interleave between
+    /// the registry removal and the ledger removal: it either sees both or
+    /// neither.
+    fn collect_account(&self, account_id: &str) -> bool {
+        {
+            let mut accounts = self
+                .accounts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !self.registry.collect(account_id) {
+                return false;
+            }
+            accounts.remove(account_id);
+        }
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, owner| owner != account_id);
+        true
     }
 
     /// Resolve a risk policy the way a symbol resolves: total, three steps,
@@ -2387,9 +2426,9 @@ pub(crate) mod tests {
             "the committed ride survived reset"
         );
         assert!(!fresh.is_frozen(), "the live reset connection is attended");
-        assert_eq!(
+        assert_ne!(
             run.ledger_incarnation(&account),
-            observed + 1,
+            observed,
             "the committed reset advanced the identity the replacement is paired with"
         );
         drop(attach);

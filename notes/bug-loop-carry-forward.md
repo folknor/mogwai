@@ -2,17 +2,12 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current as of
-the close pass over the `notes/bugs-venue-mechanics.md` arc, which reviewed the
+the close pass over the `notes/bugs-venue-serving.md` arc, which reviewed the
 whole two-commit arc and closed it; the record is at the bottom. That document
-is deleted: every finding in it is closed, and the two rewrites it proposed are
-refused with reasons recorded below rather than deferred. The bugs-engine arc
-below it is closed and judged sound. Both rounds of
-`notes/bugs-venue-serving.md` are closed, and the exhausted document is
-removed. Round 2's own cold review found one regression the round had
-introduced - the admission tail's move into `on_upgrade` broke handshake
-linearization while closing a guard-scope hole - and the fix-and-commit pass
-settled it so both properties hold; the record is in the round-2 section
-below.
+is deleted and both its rounds are closed. The bugs-venue-mechanics and
+bugs-engine arcs below it are closed and judged sound. Two bug documents
+remain to be worked: `notes/bugs-protocol-cli.md` and `notes/bugs-adapter.md`,
+which is why this carry-forward stays live.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -527,3 +522,53 @@ and did:
   could in principle return a non-final print, but `SWEEP_DRAIN_BUDGET` is
   13.1e9 ticks - a runaway guard, not a tightness bound - so the case is
   unreachable in practice and either answer there is already a disaster.
+
+## The close pass, and how the bugs-venue-serving arc ended
+
+The close pass reviewed the whole two-commit arc and closed it. What it found
+and did:
+
+- The admission transaction was re-read at its sites against the three
+  interlocking requirements in the `crate::registry` module docs, and it holds
+  as documented: the incarnation is sampled in `/ws` before the first ledger
+  read, `claim_account` and `commit_admission` run with no await between them
+  inside the spawned tail, the tail is spawned and awaited before the 101, and
+  the registry docs describe what the code does. The round-2 prose in
+  `reference/architecture.md` and `docs/havoc.md` matches the code.
+- **One real defect found and fixed: the TTL collection raced the very
+  reconnect it exists to give up on.** `collect_expired_accounts` read
+  `frozen_for` under the accounts lock and then called an unconditional
+  `registry.forget` - so an admission that reserved, or fully committed, in
+  the window between the sweep's read and its removal had its registry entry
+  deleted. That was the finding-1 stranding through the TTL door, and it also
+  made `commit`'s "unreachable while a live reservation exists" arms reachable
+  by deleting an entry whose reservation was live. `forget` is now
+  `ConnectionRegistry::collect`, which re-derives "unattended, and nothing
+  pending" under the registry lock and answers whether the removal happened;
+  `Run::collect_account` removes the ledger under the accounts lock taken
+  before that registry call, in the same accounts-then-registry order the
+  expiry filter already nests, and a refused collection waits out its next
+  expiry.
+- The ABA half of the same race was closed by minting ledger incarnations from
+  a registry-wide counter instead of restarting each entry at 1: a collected
+  and recreated entry can no longer wear the identity an in-flight admission
+  sampled off its predecessor, so a stale sample is refused `LedgerMoved`
+  however the entry was reborn. `incarnation` now creates the entry it samples,
+  because a counter-minted identity cannot be predicted without creating it.
+  Incarnation values are identities, not sequences: nothing may assert
+  `observed + 1`, only that the identity moved. Both halves are pinned by
+  `collection_refuses_an_account_an_admission_has_reached_first` and
+  `a_sample_taken_before_collection_cannot_reserve`, both bitten.
+- One prose defect: `discard_account`'s comment said reconnect reset is
+  reached "after admission has committed the successor's ride and handoff",
+  while the same round moved the reset before the commit. Corrected to what
+  the code does; the TTL paragraph of `reference/architecture.md` now states
+  the collection guard.
+- The round-1 and round-2 residuals were re-read and stand as recorded: the
+  saturated-lane silent drop, the helper-level history-panic regression, the
+  untested minted-policy construction, the `result_large_err` expect, the
+  unauthenticated control plane as a stated operator convention, and the
+  detached history synthesis refusal.
+- No `TAPE_PROTOCOL_VERSION` bump is owed by the arc or by this close pass,
+  verified rather than trusted: nothing under `mogwai-data`, `analysis/` or
+  the fingerprint moved, and the registry is not on the tape generation path.

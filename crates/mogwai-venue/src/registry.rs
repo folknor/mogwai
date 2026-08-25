@@ -81,6 +81,16 @@
 //! wholly after it. One taken before carries the old incarnation and is refused
 //! at `reserve`; one taken after sees the ledger it will get.
 //!
+//! TTL collection is the other writer the boundary has to hold against.
+//! [`ConnectionRegistry::collect`] removes an entry only after re-deriving,
+//! under this lock, that the account is unattended and no admission is pending -
+//! the caller's own staleness check is a statement about the past by the time it
+//! acts. And incarnations are minted from one registry-wide counter rather than
+//! restarting at 1 per entry, so an entry recreated after a collection can never
+//! wear an identity some in-flight admission sampled off its predecessor: a
+//! sample taken before the collection is refused at `reserve` no matter how the
+//! entry was reborn in between.
+//!
 //! The one hard rule, which is what keeps the lock graph flat: **no guard from
 //! this module survives an await, a placement, an engine acquisition, a lane
 //! send, or a ticket drop.** The registry mutex and the engine's async mutex
@@ -339,6 +349,12 @@ pub(crate) struct ConnectionRegistry {
     entries: Mutex<HashMap<String, AccountEntry>>,
     next_reservation: AtomicU64,
     next_connection: AtomicU64,
+    /// The mint for ledger incarnations, registry-wide rather than per entry.
+    /// One account's identities are drawn from a strictly increasing sequence
+    /// across its whole life, collections and recreations included, which is
+    /// what keeps a recreated entry from wearing an identity an in-flight
+    /// admission sampled off its predecessor. See the module docs.
+    next_incarnation: AtomicU64,
 }
 
 impl ConnectionRegistry {
@@ -347,7 +363,12 @@ impl ConnectionRegistry {
             entries: Mutex::new(HashMap::new()),
             next_reservation: AtomicU64::new(1),
             next_connection: AtomicU64::new(1),
+            next_incarnation: AtomicU64::new(1),
         })
+    }
+
+    fn fresh_incarnation(&self) -> u64 {
+        self.next_incarnation.fetch_add(1, Ordering::Relaxed)
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, HashMap<String, AccountEntry>> {
@@ -388,7 +409,7 @@ impl ConnectionRegistry {
         let mut entries = self.locked();
         let entry = entries
             .entry(account_id.to_owned())
-            .or_insert_with(|| AccountEntry::new(1));
+            .or_insert_with(|| AccountEntry::new(self.fresh_incarnation()));
         if entry.pending.is_some() {
             return Err(AdmissionRefusal::Busy);
         }
@@ -508,7 +529,7 @@ impl ConnectionRegistry {
         // could then read the outgoing ledger and still reserve the new
         // identity.
         if reservation.resetting {
-            entry.incarnation += 1;
+            entry.incarnation = self.fresh_incarnation();
         }
         // Who is displaced, and separately which of them have lanes to close.
         // The two are not the same set: a committed incumbent that has not
@@ -666,21 +687,26 @@ impl ConnectionRegistry {
     ///
     /// Idempotent, and never disturbs an entry that already exists.
     pub(crate) fn ensure(&self, account_id: &str) {
+        let fresh = self.fresh_incarnation();
         self.locked()
             .entry(account_id.to_owned())
-            .or_insert_with(|| AccountEntry::new(1));
+            .or_insert_with(|| AccountEntry::new(fresh));
     }
 
     /// Which ledger this account currently holds.
     ///
     /// Sampled by an admission before it reads the ledger, and handed back to
-    /// [`ConnectionRegistry::reserve`]. An account with no entry answers the
-    /// identity `reserve` would create it with, so a first-sight account and a
-    /// long-lived one take the same path.
+    /// [`ConnectionRegistry::reserve`]. An account with no entry is created
+    /// here, so the identity the sample names is the identity `reserve` will
+    /// find rather than a guess at the one it would mint - incarnations come
+    /// from a registry-wide counter, so the created value is not predictable
+    /// without creating it.
     pub(crate) fn incarnation(&self, account_id: &str) -> u64 {
+        let fresh = self.fresh_incarnation();
         self.locked()
-            .get(account_id)
-            .map_or(1, |entry| entry.incarnation)
+            .entry(account_id.to_owned())
+            .or_insert_with(|| AccountEntry::new(fresh))
+            .incarnation
     }
 
     /// Whether some connection of this account already presents `callsign`.
@@ -716,10 +742,28 @@ impl ConnectionRegistry {
         entry.frozen_since.map(|since| since.elapsed())
     }
 
-    /// Forget an account entirely. Reached when the TTL collects a ledger
-    /// nobody reclaimed, so the registry does not outlive what it describes.
-    pub(crate) fn forget(&self, account_id: &str) {
-        self.locked().remove(account_id);
+    /// Forget an account the TTL has collected, or refuse because somebody got
+    /// there first.
+    ///
+    /// The caller's expiry check is a statement about the past by the time this
+    /// runs - an admission can reserve and even commit between the sweep's read
+    /// and its removal - so the removal re-derives both conditions under the
+    /// lock and answers whether it happened. An unconditional remove here was
+    /// the finding-1 stranding through another door: it deleted the connection
+    /// record a racing admission had just committed, and it made `commit`'s
+    /// missing-entry arm reachable by deleting an entry whose reservation was
+    /// still live.
+    #[must_use]
+    pub(crate) fn collect(&self, account_id: &str) -> bool {
+        let mut entries = self.locked();
+        let Some(entry) = entries.get(account_id) else {
+            return false;
+        };
+        if entry.pending.is_some() || entry.attended() {
+            return false;
+        }
+        entries.remove(account_id);
+        true
     }
 
     /// Give up a reservation that never committed.
@@ -879,9 +923,9 @@ mod tests {
 
         let mut committed = registry.reserve("A", seat(), true, 1).unwrap();
         drop(registry.commit(&mut committed, None, Some(ride(1.0)), true));
-        assert_eq!(
+        assert_ne!(
             registry.incarnation("A"),
-            2,
+            1,
             "the committed reset advanced ledger identity"
         );
     }
@@ -918,6 +962,57 @@ mod tests {
             registry.reserve("A", seat(), false, fresh).is_ok(),
             "an admission that read the ledger it will be served was refused"
         );
+    }
+
+    /// The TTL's expiry read is stale by the time it removes anything, so the
+    /// removal re-derives the guard under the registry lock. An admission that
+    /// reserved, or committed, in the window between the sweep's read and its
+    /// removal refuses the collection; only an account genuinely unattended
+    /// with nothing pending goes.
+    #[test]
+    fn collection_refuses_an_account_an_admission_has_reached_first() {
+        let registry = ConnectionRegistry::new();
+        let observed = registry.incarnation("A");
+        let mut reservation = registry.reserve("A", seat(), false, observed).unwrap();
+        assert!(
+            !registry.collect("A"),
+            "a live reservation forbids collection, or its commit finds no entry"
+        );
+        let committed = registry
+            .commit(&mut reservation, None, None, true)
+            .expect("a live reservation commits");
+        assert!(
+            !registry.collect("A"),
+            "a committed connection holds the account attended against the sweep"
+        );
+        registry.release("A", committed.connection_id);
+        assert!(
+            registry.collect("A"),
+            "an account nothing holds any more is collectable"
+        );
+    }
+
+    /// The recreation half of the boundary. A collected entry that came back
+    /// must not wear the identity an in-flight admission sampled off its
+    /// predecessor: incarnations are minted from a registry-wide counter, so
+    /// the stale sample is refused at reserve however the entry was reborn.
+    #[test]
+    fn a_sample_taken_before_collection_cannot_reserve() {
+        let registry = ConnectionRegistry::new();
+        // The admission samples the identity it will read the ledger under.
+        let observed = registry.incarnation("A");
+        // The TTL collects the account, and the entry is later recreated.
+        assert!(registry.collect("A"));
+        assert!(
+            matches!(
+                registry.reserve("A", seat(), false, observed),
+                Err(AdmissionRefusal::LedgerMoved)
+            ),
+            "checks taken against a collected ledger were carried into a reservation"
+        );
+        // An admission that samples the reborn entry is served.
+        let fresh = registry.incarnation("A");
+        assert!(registry.reserve("A", seat(), false, fresh).is_ok());
     }
 
     #[test]

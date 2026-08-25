@@ -211,6 +211,14 @@ carried one wound down with the last socket. Zero, the default, keeps accounts
 for the life of the process, which is what a consumer restarting a worker needs.
 The setting is on the readiness record, so a consumer whose restart takes longer
 than the TTL can assert on the fact rather than discover it as a clean ledger.
+Collection races the very reconnect it exists to give up on, so the removal
+re-derives "unattended, and no admission pending" under the registry lock
+rather than acting on the sweep's earlier read: an account reclaimed between
+its expiry and its collection is spared, and an admission that sampled the
+ledger's identity before a collection is refused at its reservation - ledger
+incarnations are minted from one registry-wide counter, so a collected and
+recreated account can never wear an identity an in-flight admission already
+observed.
 
 A connection that names no account is served under the venue's default account.
 That exists for the ephemeral single-consumer venue, where making the one consumer
