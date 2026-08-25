@@ -476,16 +476,13 @@ pub enum OrderType {
     /// Pinned by `mogwai-engine`'s test
     /// `a_market_to_limit_remainder_is_governed_by_its_time_in_force`.
     ///
-    /// What the engine actually does with this type today is broken in both
-    /// halves, and neither half is a design choice this doc endorses. Its fill
-    /// takes the whole quantity at the order's own limit price with no
-    /// reference to the tape, so a buy limited at 200 against a last print of
-    /// 100 fills at 200 - the opposite of taking what the touch offers - which
-    /// is also why no remainder arises on the clean path at all. Where an armed
-    /// divergence manufactures one, the kept remainder rests inert rather than
-    /// as a limit, so it is scanned by nothing and can never fill or expire.
-    /// The two are one open engine defect with two symptoms, recorded here so a
-    /// reader does not mistake either for the intended model.
+    /// The engine implements both halves of that model: the executing part
+    /// takes the market's drawn price, bounded by the stated limit rather than
+    /// filled at it, and a kept remainder rests as a scannable limit at that
+    /// price. Both halves were broken until 2026-08-19 - the whole quantity
+    /// filled at the order's own limit with no reference to the tape, and a
+    /// divergence-manufactured remainder rested inert - and this comment
+    /// recorded the defect; it is closed, and the model above is the behaviour.
     MarketToLimit,
     /// A trailing stop that rests as a limit once it fires, rather than taking
     /// liquidity - `TrailingStopMarket` is to this what `StopMarket` is to

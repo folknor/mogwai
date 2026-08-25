@@ -85,15 +85,23 @@ also the handover to the close pass.
   round 2 did. `mogwai-data`, `analysis/` and the fingerprint were untouched
   throughout.
 
-## Left for the close pass
+## The close pass, and how the arc ended
 
-- The round-2 code least examined by anyone: the `SaturationKey` /
-  `RefCell<HashSet<..>>` conversion in `account.rs` and its call sites, and the
-  `BTreeSet` currency union in `snapshot`.
-- `mogwai_protocol::messages::OrderType::MarketToLimit`'s doc comment still says
-  the engine "takes the whole quantity at the order's own limit price with no
-  reference to the tape", and that `no remainder arises on the clean path at
-  all`. `orders.rs` has priced it off the tape since 2026-08-19 and its comment
-  says so. One of the two is wrong and it is almost certainly the protocol doc;
-  it was noticed in round 2 and deliberately left alone as outside the round's
-  scope.
+The close pass reviewed the whole `d58ff1e..HEAD` arc and closed it. What it
+found and did:
+
+- The `SaturationKey` / `RefCell<HashSet<..>>` conversion in `account.rs`, its
+  call sites, and the `BTreeSet` currency union in `snapshot` were re-read in
+  full and are sound: every borrow of the `RefCell` is confined to
+  `warn_saturated`, `free_balance`'s warn fires after its folds, and the union
+  preserves the sorted-unique contract the old `Vec` sort provided.
+- The `MarketToLimit` residual was settled the way round 2 suspected: the
+  protocol doc was the stale half. Its "broken in both halves" paragraph
+  described the pre-2026-08-19 engine; `orders.rs` prices the executing part
+  off the tape bounded by the stated limit and rests a kept remainder as a
+  scannable limit. The doc comment in `mogwai_protocol::messages` now states
+  the implemented model and names the old text as the closed defect record.
+- The four round-1 residual rulings (the overloaded `apply_divergences` flag
+  with its owed split, `clear_armed`, `MAX_GROUP_ORDERS`, and the unbumped
+  `TAPE_PROTOCOL_VERSION`) were re-verified and stand. Nothing in the arc
+  touched `mogwai-data`, `analysis/` or the fingerprint, so no bump was owed.
