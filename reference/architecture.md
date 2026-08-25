@@ -481,6 +481,19 @@ legitimately leaves an odd-lot remainder, so `size_increment` stays at one
 share. Submit and modify enforce the same grid, so a resting order cannot drift
 off it into a state a fresh submit would have refused.
 
+Executable margin-equity sells share one pool of long shares, so their hold is
+an aggregate over the symbol rather than a sum of per-order holds, and that
+aggregate is computed twice - once for the `locked` balance and once for the
+`initial` margin row the same snapshot reports. The two folds must count the
+same orders. In particular a sell carrying neither a price nor a trigger price
+contributes its quantity to both and a price to neither, so an order with no
+price cannot raise the reported requirement above the balance actually held
+against it. Nothing on the wire rests such an order today - every order type is
+validated into carrying one of the two, and a modify replaces a price rather
+than removing it - and the rule is stated over the folds anyway, because a
+reconciliation that holds only for the inputs validation happens to admit is
+one validation change away from being false.
+
 Margin has two bases. `per_contract` is a fixed amount of settlement currency
 however the price moves, which is what CME publishes and what every shipped
 preset states. `notional` is a fraction of notional, so the requirement moves
@@ -510,6 +523,10 @@ unrealized on futures settling in it. An order whose shape would leave a holding
 nothing prices is refused at entry by name, and an account that reaches an
 unvaluable state some other way is warned about and left unenforced rather than
 judged against a wrong number.
+
+When several priced instruments quote the same held currency into the policy
+currency, valuation uses the lexically first symbol. The choice is a stable
+tie-breaker for an ambiguous request, not a claim that the pairs share a market.
 
 Valuation is one hop: an asset is priced only through an instrument quoting it
 directly in the policy currency, never through a chain. There is no rate
@@ -657,7 +674,14 @@ and a venue-originated order - a risk or margin liquidation the venue mints - is
 claimed for the account whose ledger produced it. An order absent from that table
 is a bug in whoever built the batch, and the fallback of delivering it everywhere
 with a warning naming the id is the conservative direction to fail in while such
-a bug lives, not the ordinary path. A
+a bug lives, not the ordinary path. Where the venue mints several such orders at
+once - a margin cascade, a risk flatten, an off-river retirement - it sorts the
+positions by symbol and position id before minting, because the sequence number
+in the `LQ-` or `RISK-` id, the venue order ids behind them, the trade ids and
+the event order all follow from that order, and the positions themselves are
+held in a `HashMap`. Determinism per binary is a contract over everything the
+same seed and config produce, and it is not satisfied by a set the run happened
+to iterate one way. A
 resting order is one of three explicit states: a live limit, an
 untriggered conditional, or an inert market remainder left by a partial fill
 that is never scanned again and ends only on cancel. Every resting limit

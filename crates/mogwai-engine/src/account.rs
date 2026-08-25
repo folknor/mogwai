@@ -5,7 +5,10 @@
 //! `AccountState` snapshot. Includes the saturating arithmetic that keeps
 //! unbounded cross-fill accumulation from panicking the engine.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap, HashSet},
+};
 
 use mogwai_protocol::{AccountState, Balance, OrderFilled, Side, SubmitOrder, Symbol};
 use rust_decimal::Decimal;
@@ -63,12 +66,18 @@ pub(crate) struct Warned {
     /// range boundary (see `add_clamped` and friends). Once a key clips, its
     /// stored value is a boundary, not a true total, so the condition persists
     /// across every later snapshot - warn once per key, not once per event.
-    pub(crate) saturated: HashSet<String>,
+    pub(crate) saturated: RefCell<HashSet<SaturationKey>>,
     /// Inverse symbols a caller has offered a non-positive settlement price
     /// for. The mark is refused rather than applied, and the condition is a
     /// property of the caller rather than of one instant, so it would repeat on
     /// every settlement instant of the run - warn once per symbol.
     pub(crate) unpriceable_settlement: HashSet<Symbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SaturationKey {
+    Symbol(Symbol),
+    Currency(String),
 }
 
 impl Engine {
@@ -259,11 +268,21 @@ impl Engine {
             excluded != Some(order.submit.client_order_id.as_str())
                 && self.is_margin_equity_sell(order)
         }) {
-            let Some(price) = order.submit.price.or(order.submit.trigger_price) else {
-                continue;
-            };
             let entry = by_symbol.entry(order.submit.symbol.as_ref()).or_default();
-            entry.2 = entry.2.max(price);
+            // A price-less sell still contributes its quantity and contributes
+            // no price. Skipping it outright would have dropped the quantity
+            // here while `worst_case_leaves` - the fold
+            // `margin_equity_sell_hold_with_pending` runs for the same number -
+            // counted it, so the two would report different requirements for
+            // one account and `margin_requirement`'s stated reconciliation with
+            // `held_balances` would be false. Validation admits no such order
+            // today (every order type carries a price or a trigger price, and a
+            // modify cannot remove either), so this is agreement by
+            // construction rather than a live correction: the point is that the
+            // two folds cannot disagree even if a future path rests one.
+            if let Some(price) = order.submit.price.or(order.submit.trigger_price) {
+                entry.2 = entry.2.max(price);
+            }
             match order.submit.link.as_ref().filter(|link| {
                 matches!(
                     link.contingency,
@@ -516,7 +535,7 @@ impl Engine {
                 });
             }
             if clipped {
-                self.warn_saturated(&fill.symbol);
+                self.warn_saturated(&SaturationKey::Symbol(Symbol::clone(&fill.symbol)));
             }
             return;
         }
@@ -555,7 +574,7 @@ impl Engine {
             }
         }
         if clipped {
-            self.warn_saturated(&fill.symbol);
+            self.warn_saturated(&SaturationKey::Symbol(Symbol::clone(&fill.symbol)));
         }
     }
 
@@ -577,7 +596,7 @@ impl Engine {
         let mut clipped = false;
         let next = next_position(&current, delta, fill.last_px, &mut clipped);
         if clipped {
-            self.warn_saturated(&fill.symbol);
+            self.warn_saturated(&SaturationKey::Symbol(Symbol::clone(&fill.symbol)));
         }
         if next.qty == Decimal::ZERO {
             self.account.positions.remove(&(
@@ -595,17 +614,18 @@ impl Engine {
         }
     }
 
-    // `&mut self` purely for the once-per-currency saturation warning below;
-    // the account state itself is only read.
+    // `&mut self` keeps the snapshot API explicit about warning bookkeeping,
+    // although `free_balance` also reaches that bookkeeping through a shared
+    // reference and therefore stores it behind interior mutability.
     pub(crate) fn snapshot(&mut self, ts: u64) -> AccountState {
         let (held_balances, mut clipped_currencies) = self.held_balances();
-        let mut currencies: Vec<String> = self.account.balances.keys().cloned().collect();
-        for currency in held_balances.keys() {
-            if !currencies.contains(currency) {
-                currencies.push(currency.clone());
-            }
-        }
-        currencies.sort();
+        let currencies: BTreeSet<String> = self
+            .account
+            .balances
+            .keys()
+            .chain(held_balances.keys())
+            .cloned()
+            .collect();
 
         let balances = currencies
             .into_iter()
@@ -636,7 +656,7 @@ impl Engine {
             .collect();
 
         for currency in clipped_currencies {
-            self.warn_saturated(&currency);
+            self.warn_saturated(&SaturationKey::Currency(currency));
         }
 
         AccountState {
@@ -708,7 +728,11 @@ impl Engine {
                 held = add_clamped(held, maintenance, &mut clipped);
             }
         }
-        sub_clamped(total, held, &mut clipped)
+        let free = sub_clamped(total, held, &mut clipped);
+        if clipped {
+            self.warn_saturated(&SaturationKey::Currency(currency.to_owned()));
+        }
+        free
     }
 
     /// The hold one ordinary resting order contributes, as a currency kind and
@@ -861,13 +885,16 @@ impl Engine {
         }
     }
 
-    /// `key` is a symbol on the position path, a currency on the balance
-    /// paths. Saturation is sticky - a clipped total stays at the boundary -
-    /// so this fires once per key rather than flooding the log on every
-    /// subsequent fill and snapshot.
-    fn warn_saturated(&mut self, key: &str) {
-        if self.warned.saturated.insert(key.into()) {
+    /// Saturation is sticky, so this fires once per namespaced key rather than
+    /// flooding the log on every subsequent fill and snapshot.
+    fn warn_saturated(&self, key: &SaturationKey) {
+        if self.warned.saturated.borrow_mut().insert(key.clone()) {
+            let (namespace, key) = match key {
+                SaturationKey::Symbol(symbol) => ("symbol", symbol.as_ref()),
+                SaturationKey::Currency(currency) => ("currency", currency.as_str()),
+            };
             tracing::warn!(
+                %namespace,
                 %key,
                 "ledger arithmetic saturated at the Decimal range boundary; \
                  the stored value is clipped, not an exact total"

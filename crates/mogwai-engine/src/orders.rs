@@ -2759,9 +2759,8 @@ impl Engine {
         if apply_divergences
             && let Some(resting) = self
                 .open
-                .iter()
-                .find(|order| order.submit.client_order_id == client_order_id)
-                .map(|order| order.venue_order_id.clone())
+                .position(&client_order_id)
+                .map(|pos| self.open[pos].venue_order_id.clone())
             && let Some(Divergence::RejectNextCancel { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextCancel { .. }))
         {

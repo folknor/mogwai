@@ -921,12 +921,16 @@ impl Engine {
             if held_currency == currency || amount.is_zero() {
                 continue;
             }
-            let price = self.instruments.iter().find_map(|(symbol, def)| {
-                (def.class.base_currency() == Some(held_currency.as_str())
-                    && def.class.settlement_currency() == currency)
-                    .then(|| priced(symbol))
-                    .flatten()
-            })?;
+            let price = self
+                .instruments
+                .iter()
+                .filter(|(_, def)| {
+                    def.class.base_currency() == Some(held_currency.as_str())
+                        && def.class.settlement_currency() == currency
+                })
+                .filter_map(|(symbol, _)| priced(symbol).map(|price| (symbol, price)))
+                .min_by(|(left, _), (right, _)| left.cmp(right))
+                .map(|(_, price)| price)?;
             total = total.checked_add(amount.checked_mul(price)?)?;
         }
         for ((symbol, _), position) in &self.account.positions {
@@ -1303,6 +1307,7 @@ impl Engine {
                 }
             }
         }
+        liquidate.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
         let mut originated = 0;
         for (symbol, position_id, qty, mark) in liquidate {
             self.liquidation_seq = self.liquidation_seq.saturating_add(1);
@@ -1378,7 +1383,7 @@ impl Engine {
         for client_order_id in resting {
             events.extend(self.on_cancel(client_order_id, ts, false));
         }
-        let positions: Vec<_> = self
+        let mut positions: Vec<_> = self
             .account
             .positions
             .iter()
@@ -1392,6 +1397,7 @@ impl Engine {
                 )
             })
             .collect();
+        positions.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
         let mut originated = 0;
         for (symbol, position_id, qty, mark) in positions {
             self.liquidation_seq = self.liquidation_seq.saturating_add(1);
@@ -1474,7 +1480,7 @@ impl Engine {
             );
             events.extend(self.on_cancel(client_order_id, ts, false));
         }
-        let positions: Vec<_> = self
+        let mut positions: Vec<_> = self
             .account
             .positions
             .iter()
@@ -1490,6 +1496,7 @@ impl Engine {
                 )
             })
             .collect();
+        positions.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
         for (position_symbol, position_id, qty, mark) in positions {
             tracing::info!(
                 symbol = %position_symbol,
@@ -2341,7 +2348,6 @@ impl Engine {
         self.fills.push(fill.clone());
     }
 
-    // `&mut self` only for the saturation warning bookkeeping in `snapshot`.
     pub fn account_snapshot(&mut self, ts: u64) -> AccountState {
         self.snapshot(ts)
     }
@@ -7244,6 +7250,204 @@ mod tests {
         );
     }
 
+    fn seed_two_positions(engine: &mut Engine) {
+        let template = engine
+            .instruments
+            .get("MNQ")
+            .expect("the futures fixture instrument")
+            .clone();
+        engine.instruments.clear();
+        engine.margin.clear();
+        for (symbol, position_id, qty) in
+            [("ZED", None, Decimal::ONE), ("ALPHA", None, Decimal::ONE)]
+        {
+            let mut instrument = template.clone();
+            instrument.symbol = symbol.into();
+            engine.instruments.insert(symbol.into(), instrument);
+            engine.account.positions.insert(
+                (Symbol::from(symbol), position_id),
+                crate::account::PositionState {
+                    qty,
+                    avg_px: Decimal::from(100),
+                    mark_px: Decimal::from(100),
+                },
+            );
+        }
+    }
+
+    /// A futures engine holding one `ZED` and one `ALPHA` position, prepared by
+    /// `prepare` and redrawn until `non_lexical` holds of it.
+    ///
+    /// The witness is derived from the system rather than assumed. A two-entry
+    /// `HashMap` under `RandomState` iterates lexically about half the time, so
+    /// a test that merely seeds two positions and asserts lexical output passes
+    /// against an unsorted production path on a coin flip - the doctrine's
+    /// named hazard, and the reason a reverted sort here "failed
+    /// nondeterministically" rather than failing. Rebuilding the engine draws a
+    /// fresh `RandomState`, so the loop terminates with probability one and the
+    /// test that follows bites deterministically.
+    ///
+    /// `non_lexical` has to name the map the path under test actually walks,
+    /// which is not always `positions`: `apply_margin_breaches` decides its
+    /// order from `margin`, and pinning `positions` alone left that test a coin
+    /// flip.
+    fn engine_iterating_non_lexically(
+        prepare: impl Fn(&mut Engine),
+        non_lexical: impl Fn(&Engine) -> bool,
+    ) -> Engine {
+        for _ in 0..1_000 {
+            let mut engine = futures_engine(100_000, MarginBreachAction::Refuse);
+            seed_two_positions(&mut engine);
+            prepare(&mut engine);
+            if non_lexical(&engine) {
+                return engine;
+            }
+        }
+        panic!("no RandomState in 1000 draws iterated the fixture non-lexically");
+    }
+
+    /// `ZED` before `ALPHA` out of the position map.
+    fn positions_iterate_non_lexically(engine: &Engine) -> bool {
+        engine
+            .account
+            .positions
+            .keys()
+            .next()
+            .is_some_and(|(symbol, _)| symbol.as_ref() == "ZED")
+    }
+
+    fn submitted_ids(events: &[VenueMessage]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                VenueMessage::OrderAccepted {
+                    client_order_id, ..
+                }
+                | VenueMessage::OrderRejected {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn risk_flatten_mints_ids_in_symbol_and_position_order() {
+        let mut e = engine_iterating_non_lexically(|_| {}, positions_iterate_non_lexically);
+        let out = e.liquidate_all(5);
+        assert_eq!(submitted_ids(&out.events), ["RISK-ALPHA-1", "RISK-ZED-2"]);
+    }
+
+    #[test]
+    fn valuation_uses_the_lexical_priced_symbol_when_pairs_are_ambiguous() {
+        // Derived, not assumed: `valuation_in` walks `self.instruments`, and a
+        // two-entry `HashMap` iterates lexically about half the time, so a
+        // single fixture would leave this test passing against an unsorted
+        // production path on a coin flip. Redraw until the map hands `ZED` out
+        // first - the answer the unsorted code would then give is 200, the
+        // sorted one 100, and only the sorted one can pass.
+        let mut e = (0..1_000)
+            .map(|_| {
+                let template = default_instruments()
+                    .into_iter()
+                    .find(|def| def.symbol.as_ref() == "BTCUSDT")
+                    .expect("the default spot instrument");
+                let mut zed = template.clone();
+                zed.symbol = "ZED".into();
+                let mut alpha = template;
+                alpha.symbol = "ALPHA".into();
+                Engine::build(EngineConfig {
+                    account_id: test_account_id(),
+                    instruments: vec![zed, alpha],
+                    balances: HashMap::from([
+                        ("BTC".to_owned(), Decimal::ONE),
+                        ("USDT".to_owned(), Decimal::ZERO),
+                    ]),
+                    fill_seed: 7,
+                })
+            })
+            .find(|engine| {
+                engine
+                    .instruments
+                    .keys()
+                    .next()
+                    .is_some_and(|symbol| symbol.as_ref() == "ZED")
+            })
+            .expect("no RandomState in 1000 draws iterated the two instruments non-lexically");
+        e.last_marks.insert("ZED".into(), Decimal::from(200));
+        e.last_marks.insert("ALPHA".into(), Decimal::from(100));
+
+        assert_eq!(e.valuation_in("USDT"), Some(Decimal::from(100)));
+    }
+
+    #[test]
+    fn free_balance_records_saturation_in_the_currency_namespace() {
+        let mut e = Engine::new();
+        e.account.balances.insert("USD".to_owned(), Decimal::MIN);
+        e.order_holds.insert("USD".to_owned(), Decimal::MAX);
+
+        assert_eq!(e.free_balance("USD"), Decimal::MIN);
+        let warned = e.warned.saturated.borrow();
+        assert!(
+            warned.contains(&crate::account::SaturationKey::Currency("USD".to_owned())),
+            "the funds path warns on its own saturation, as the fill and \
+             snapshot paths already did"
+        );
+        // The namespace half of the same finding, read off the store the
+        // production call just wrote: a symbol named `USD` - which the open
+        // instrument set permits - must still be able to warn. Under the old
+        // bare-`String` key this membership held and the symbol's warning was
+        // suppressed for the life of the engine. This is a statement about the
+        // key type rather than about a second code path, and it is the whole
+        // fix: nothing but the type can make the two namespaces collide again.
+        assert!(
+            !warned.contains(&crate::account::SaturationKey::Symbol("USD".into())),
+            "a currency warning must not consume the identically named symbol's key"
+        );
+    }
+
+    #[test]
+    fn off_river_retirement_mints_ids_in_symbol_and_position_order() {
+        let mut e = engine_iterating_non_lexically(|_| {}, positions_iterate_non_lexically);
+        let out = e.retire_off_river("KEEP", 5);
+        assert_eq!(submitted_ids(&out), ["LQ-ALPHA-1", "LQ-ZED-2"]);
+    }
+
+    #[test]
+    fn margin_liquidation_mints_ids_in_symbol_and_position_order() {
+        // `apply_margin_breaches` walks `margin`, not `positions`, so that is
+        // the map this witness has to iterate non-lexically.
+        let mut e = engine_iterating_non_lexically(
+            |engine| {
+                for symbol in ["ZED", "ALPHA"] {
+                    engine.set_margin_policy(
+                        Symbol::from(symbol),
+                        MarginPolicy {
+                            initial_per_contract: Decimal::ONE,
+                            maintenance_per_contract: Decimal::MAX,
+                            breach_action: MarginBreachAction::Liquidate,
+                            basis: MarginBasis::PerContract,
+                        },
+                    );
+                }
+            },
+            |engine| {
+                engine
+                    .margin
+                    .keys()
+                    .next()
+                    .is_some_and(|symbol| symbol.as_ref() == "ZED")
+            },
+        );
+        let marks = [
+            (Symbol::from("ZED"), Decimal::from(100)),
+            (Symbol::from("ALPHA"), Decimal::from(100)),
+        ];
+        let mut events = Vec::new();
+        e.apply_margin_breaches(&marks, 5, &mut events);
+        assert_eq!(submitted_ids(&events), ["LQ-ALPHA-1", "LQ-ZED-2"]);
+    }
+
     // --- Order lists: OCO, OTO and OUO ---------------------------------------
 
     /// A funded engine on the spot default instrument, cash enough that no test
@@ -12066,6 +12270,61 @@ mod tests {
             .find(|row| row.symbol.as_ref() == "AAPL")
             .expect("the equity has a margin row");
         assert_eq!(margin.initial, Decimal::from(10_000));
+        e.reconcile_order_holds();
+    }
+
+    /// A price-less resting margin-equity sell is counted by both folds or by
+    /// neither.
+    ///
+    /// `margin_requirement`'s equity row runs `worst_case_leaves`, which counts
+    /// every executable sell whatever it is priced at, while `held_balances`
+    /// runs `margin_equity_sell_holds`. When the latter skipped a price-less
+    /// order outright the two disagreed on one account: the `initial` row
+    /// reported a requirement the `locked` balance did not carry, and the
+    /// reconciliation `margin_requirement` documents was false.
+    ///
+    /// No wire path rests such an order today - `validate_submit` gives every
+    /// order type a price or a trigger price and a modify can only replace one,
+    /// never remove it - so the witness is built by stripping the price off a
+    /// rested order directly. That is the point: the agreement is a property of
+    /// the two folds, not of what validation currently admits.
+    #[test]
+    fn a_price_less_equity_sell_reaches_both_folds_or_neither() {
+        let mut e = equity_engine(&Shares {
+            cash: 50_000,
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(1_000)),
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        for (id, price) in [("S1", 150), ("S2", 200)] {
+            let mut sell = order_with(id, Side::Sell, "AAPL", 100, Some(Decimal::from(price)));
+            sell.order_type = OrderType::Limit;
+            trade(&mut e, sell, 2);
+        }
+
+        let pos = e.open.position("S1").expect("the cheaper sell rests");
+        let before = e.open[pos].clone();
+        e.open[pos].submit.price = None;
+        e.refresh_open_hold(pos, &before);
+
+        let state = e.account_snapshot(3);
+        let row = state
+            .margins
+            .iter()
+            .find(|row| row.symbol.as_ref() == "AAPL")
+            .expect("the equity has a margin row");
+        assert_eq!(
+            row.initial,
+            Decimal::from(10_000),
+            "200 leaves against 100 covered shares, priced at the 200 sell"
+        );
+        assert_eq!(
+            balance(&state, "USD").locked,
+            row.initial + Decimal::from(2_500),
+            "the locked balance carries the whole reported initial requirement \
+             plus the position's maintenance"
+        );
         e.reconcile_order_holds();
     }
 
