@@ -356,6 +356,13 @@ pub(crate) async fn ws_upgrade(
     // the configured opening balances rather than whatever the account holds
     // now.
     let settlement = profile.def.class.settlement_currency();
+    // Which ledger the checks below are taken against, sampled before the first
+    // of them reads it and carried into the reservation, which refuses if this
+    // account's ledger has been replaced in between. See the ledger identity
+    // boundary in `crate::registry`: sampling it at the reservation instead
+    // would name the ledger that exists after the reads rather than the one
+    // they saw, which is a check that cannot fail.
+    let observed_incarnation = state.run.ledger_incarnation(&account_id);
     let resetting = state
         .run
         .claim_discards_ledger(&account_id, claimed, callsign);
@@ -425,11 +432,24 @@ pub(crate) async fn ws_upgrade(
         river: river.clone(),
         speed_micros,
     };
-    let mut reservation = match state
-        .run
-        .reserve_admission(account_id.as_str(), seat, resetting)
-    {
+    let mut reservation = match state.run.reserve_admission(
+        account_id.as_str(),
+        seat,
+        resetting,
+        observed_incarnation,
+    ) {
         Ok(reservation) => reservation,
+        Err(crate::registry::AdmissionRefusal::LedgerMoved) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "account {account} was reset while this upgrade was being decided, so its \
+                     funding and policy were checked against a ledger that no longer exists; retry",
+                    account = account_id.as_str()
+                ),
+            )
+                .into_response();
+        }
         Err(crate::registry::AdmissionRefusal::CadenceConflict(held)) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -495,6 +515,25 @@ pub(crate) async fn ws_upgrade(
                 .into_response();
         }
     };
+    // The ledger side, and it happens before the commit deliberately. The
+    // reservation is still outstanding here, so no other admission can reserve
+    // across the replacement; the commit then advances the ledger identity in
+    // the same exclusive window. Together those two make the incarnation a real
+    // boundary rather than a check that agrees with its own mutation - see the
+    // module docs in `crate::registry`. Run this after the commit instead and a
+    // second socket can read the outgoing ledger, reserve the identity the
+    // commit already advanced to, and be admitted on checks nothing supports.
+    //
+    // Nothing below refuses, which is what makes the ordering safe: every
+    // fallible step is behind us, so the ledger cannot be discarded for a
+    // connection that then fails to arrive.
+    //
+    // `resetting` was evaluated once, above, and is handed to `claim_account`
+    // rather than re-derived, so this cannot decide to reset an account the
+    // funding check was taken against on the assumption that it would not.
+    let account_state = state
+        .run
+        .claim_account(&account_id, claimed, callsign, resetting);
     // Phase three, and the sole linearization point of the whole upgrade. Every
     // fallible step is behind us: the shape resolved, the account funded, the
     // speed quantized, the arm normalized and the boat placed. So the commit
@@ -514,13 +553,6 @@ pub(crate) async fn ws_upgrade(
         Some(ticket.boat().key()),
         claimed,
     );
-    // The ledger side. `resetting` was evaluated once, above, and is handed to
-    // `claim_account` rather than re-derived, so this cannot decide to reset an
-    // account the funding check was taken against on the assumption that it
-    // would not.
-    let account_state = state
-        .run
-        .claim_account(&account_id, claimed, callsign, resetting);
     // Outside the registry lock, deliberately: closing a lane sends on a
     // channel, and the commit hands the displaced set out rather than closing
     // it, so a send can never block while the registry mutex is held.
@@ -753,6 +785,7 @@ fn spawn_history_page(
     let present = state.run_now().min(sim_now_ns(boat.sim));
     let run_start_ns = state.run.started_ns;
     let lanes = lanes.clone();
+    let panic_request_id = request_id.clone();
     tokio::spawn(async move {
         let Ok(synthesis_slot) = crate::http::acquire_history_slot(&slots, &waiters).await else {
             drop(send_admission(
@@ -795,38 +828,103 @@ fn spawn_history_page(
             .map_err(|refusal| (request_id, refusal))
         })
         .await;
-        match page {
-            Ok(Ok(Ok(payload))) => {
-                let Some(slot) = lanes.reserve_admission() else {
-                    // The lane is saturated, which means the peer is not
-                    // reading. Nothing useful can be sent, including a refusal.
-                    return;
-                };
-                drop(lanes.emit_history(slot, payload));
-            }
-            // Unreachable by construction - every field is a number, a string
-            // or a plain enum - and logged rather than given a wire meaning for
-            // the same reason the other producers do it.
-            Ok(Ok(Err(error))) => {
-                tracing::error!(%error, "could not serialize a history page");
-            }
-            Ok(Err((request_id, refusal))) => {
-                drop(send_admission(
-                    &lanes,
-                    VenueMessage::HistoryRejected {
-                        request_id,
-                        reason: refusal.reason,
-                        retryable: refusal.retryable,
-                    },
-                ));
-            }
-            // A panicked synthesis is a venue fault, not an empty window, and
-            // the consumer is told so rather than left waiting out its timeout.
-            Err(error) => {
-                tracing::error!(%error, "history synthesis task failed");
-            }
-        }
+        finish_history_page(page, &lanes, panic_request_id);
     });
+}
+
+type HistoryJoin = Result<
+    Result<Result<String, serde_json::Error>, (String, crate::history::Refusal)>,
+    tokio::task::JoinError,
+>;
+
+/// Resolve one history request, however the synthesis ended.
+///
+/// Every arm but one resolves the consumer's `request_id`, and the exception is
+/// stated where it sits: a saturated lane means the peer is not reading, so
+/// there is nothing to send a refusal on either.
+///
+/// `panic_request_id` is a clone taken before the id moves into the blocking
+/// closure, because a panicked task hands back no id of its own. Split out of
+/// `spawn_history_page` so a panicked synthesis can be exercised at all - a
+/// blocking task that panics cannot be provoked through the socket path.
+fn finish_history_page(page: HistoryJoin, lanes: &ExecLanes, panic_request_id: String) {
+    match page {
+        Ok(Ok(Ok(payload))) => {
+            let Some(slot) = lanes.reserve_admission() else {
+                // The lane is saturated, which means the peer is not
+                // reading. Nothing useful can be sent, including a refusal.
+                return;
+            };
+            drop(lanes.emit_history(slot, payload));
+        }
+        // Unreachable by construction - every field is a number, a string
+        // or a plain enum - and logged rather than given a wire meaning for
+        // the same reason the other producers do it.
+        Ok(Ok(Err(error))) => {
+            tracing::error!(%error, "could not serialize a history page");
+        }
+        Ok(Err((request_id, refusal))) => {
+            drop(send_admission(
+                lanes,
+                VenueMessage::HistoryRejected {
+                    request_id,
+                    reason: refusal.reason,
+                    retryable: refusal.retryable,
+                },
+            ));
+        }
+        // A panicked synthesis is a venue fault, not an empty window, and
+        // the consumer is told so rather than left waiting out its timeout.
+        Err(error) => {
+            tracing::error!(%error, "history synthesis task failed");
+            drop(send_admission(
+                lanes,
+                VenueMessage::HistoryRejected {
+                    request_id: panic_request_id,
+                    reason: format!("venue history synthesis failed: {error}"),
+                    retryable: true,
+                },
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod history_panic_tests {
+    use super::*;
+    use crate::admission::Outbound;
+
+    #[tokio::test]
+    async fn panicked_history_synthesis_resolves_the_request_as_retryable() {
+        let page = tokio::task::spawn_blocking(
+            || -> Result<Result<String, serde_json::Error>, (String, crate::history::Refusal)> {
+                panic!("synthesis witness")
+            },
+        )
+        .await;
+        let (lanes, mut receivers) = ExecLanes::detached();
+        finish_history_page(page, &lanes, "history-panic-1".to_owned());
+
+        let Outbound::Frame(frame) = receivers.prio_rx.try_recv().expect("a correlated refusal")
+        else {
+            panic!("history panic produced a close instead of a refusal")
+        };
+        let message: VenueMessage = serde_json::from_str(&frame.payload).expect("wire frame");
+        let VenueMessage::HistoryRejected {
+            request_id,
+            retryable,
+            reason,
+        } = message
+        else {
+            panic!("history panic produced the wrong frame: {message:?}")
+        };
+        assert_eq!(request_id, "history-panic-1");
+        assert!(retryable, "a venue synthesis fault can be retried");
+        assert!(
+            reason.contains("synthesis witness"),
+            "the refusal diagnoses the task failure"
+        );
+    }
 }
 
 fn spawn_command_dispatcher(

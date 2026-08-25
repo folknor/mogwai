@@ -91,6 +91,19 @@ upgrade must cost the incumbent nothing; the alternative made a single
 unauthenticated request a way to disconnect a live consumer and wipe its book
 without ever connecting.
 
+Under that knob the ledger the checks were taken against can also be replaced by
+somebody else, so each account carries a ledger incarnation and an upgrade
+samples it before it reads that ledger. The reservation refuses with a
+retryable `409` if the identity has moved since, and the replacement itself is
+performed while the reservation is outstanding, immediately before the commit
+that advances the identity. Those two facts are what make the incarnation a
+boundary rather than a decoration: every admission's checks lie wholly before
+the exclusive window or wholly after it, so a funding or calendar answer taken
+against a ledger that no longer exists can never be carried into a commit.
+Sampling the identity inside the reservation instead, or replacing the ledger
+after the commit, restores a window in which the check agrees with its own
+mutation.
+
 An unattended account freezes. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
 socket returning with the same id resumes it. This is a deliberate departure

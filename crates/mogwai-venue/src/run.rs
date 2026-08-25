@@ -823,17 +823,18 @@ impl Run {
         if let Some(pending) = &pending {
             pending.open_engine(&mut engine);
         }
-        let opening = opening_equity(
-            &self.account_opening_terms.opening_balances,
-            &mogwai_protocol::risk::AccountPolicy::default(),
-        );
+        let minted_policy = self.minted_policy();
+        let opening = opening_equity(&self.account_opening_terms.opening_balances, &minted_policy);
         let minted = Arc::new(Account {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
-            // Unpoliced: an account nobody stated rules for is enforced against
-            // nothing, which is what every consumer had before policies existed.
+            // `minted_policy` is unpoliced today: an account nobody stated
+            // rules for is enforced against nothing, which is what every
+            // consumer had before policies existed. It is asked for rather than
+            // spelled inline so the upgrade path's calendar check can ask the
+            // same question - see `Run::minted_policy`.
             risk: Mutex::new(crate::risk::RiskLedger::new(
-                mogwai_protocol::risk::AccountPolicy::default(),
+                minted_policy,
                 opening,
                 self.started_ns,
             )),
@@ -1184,7 +1185,7 @@ impl Run {
                 ttl_ms = ttl.as_millis(),
                 "collecting an account nobody reclaimed",
             );
-            self.discard_account(account_id);
+            self.collect_account(account_id);
         }
         expired
     }
@@ -1196,9 +1197,9 @@ impl Run {
         self.discard_account(account_id.as_str());
     }
 
-    /// Forget one account entirely: its ledger and the order claims attributing
-    /// its frames. The claims must go with it, or a fresh ledger's frames would
-    /// be attributed using a discarded one's history.
+    /// Discard one account's ledger and the order claims attributing its frames.
+    /// The connection registry is deliberately left intact: reconnect reset is
+    /// reached after admission has committed the successor's ride and handoff.
     fn discard_account(&self, account_id: &str) {
         self.accounts
             .lock()
@@ -1208,10 +1209,12 @@ impl Run {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, owner| owner != account_id);
-        // The registry entry goes with the ledger it describes, including the
-        // timeline it was committed to. A collected account that came back
-        // would otherwise be refused for naming a different world than the one
-        // its predecessor left.
+    }
+
+    /// Collect an unattended account entirely. Unlike reconnect reset, the TTL
+    /// path has established that no committed or reading connection remains.
+    fn collect_account(&self, account_id: &str) {
+        self.discard_account(account_id);
         self.registry.forget(account_id);
     }
 
@@ -1253,13 +1256,35 @@ impl Run {
         self.default_account_id.clone()
     }
 
+    /// The risk policy a fresh mint installs on this venue's accounts.
+    ///
+    /// One question, one answer, asked by `Run::account` when it mints and by
+    /// `Run::daily_reset_minute` when it has to say what a resetting claim will
+    /// be served. It is unpoliced today because `AccountOpeningTerms` carries
+    /// no policy - so a reset ledger has no daily loss limit and therefore no
+    /// reset minute to validate against a symbol's calendar. That was the
+    /// argument for the resetting path skipping the calendar refusal outright;
+    /// the argument is now a call instead, so the day the opening terms gain a
+    /// policy the refusal follows it rather than being silently skipped.
+    fn minted_policy(&self) -> mogwai_protocol::risk::AccountPolicy {
+        mogwai_protocol::risk::AccountPolicy::default()
+    }
+
+    /// The UTC minute at which this connection's ledger resets its daily loss
+    /// limit, if it polices one.
+    ///
+    /// A resetting claim is not served the ledger the account holds now, so it
+    /// is asked of the ledger it will actually get: the one `Run::account`
+    /// mints, whose policy is `minted_policy`. Answering `None` unconditionally
+    /// there was correct only for as long as that policy stayed unpoliced, and
+    /// nothing said so.
     pub(crate) fn daily_reset_minute(
         &self,
         account_id: &mogwai_protocol::AccountId,
         resetting: bool,
     ) -> Option<u32> {
         if resetting {
-            return None;
+            return crate::risk::daily_reset_minute_of(&self.minted_policy());
         }
         let account = self
             .accounts
@@ -1568,13 +1593,25 @@ impl Run {
     /// the split: an upgrade that goes on to fail placement, or has its future
     /// cancelled, costs the incumbent nothing, where a check-then-claim shape
     /// had to evict before it knew whether the newcomer could be served.
+    /// `observed_incarnation` comes from [`Run::ledger_incarnation`], sampled
+    /// before the caller read this account's ledger. See the ledger identity
+    /// boundary in `crate::registry`.
     pub(crate) fn reserve_admission(
         &self,
         account_id: &str,
         seat: crate::registry::Seat,
         resetting: bool,
+        observed_incarnation: u64,
     ) -> Result<crate::registry::Reservation, crate::registry::AdmissionRefusal> {
-        self.registry.reserve(account_id, seat, resetting)
+        self.registry
+            .reserve(account_id, seat, resetting, observed_incarnation)
+    }
+
+    /// The identity of the ledger this account holds right now, to be sampled
+    /// before any check is taken against that ledger and handed back to
+    /// [`Run::reserve_admission`].
+    pub(crate) fn ledger_incarnation(&self, account_id: &mogwai_protocol::AccountId) -> u64 {
+        self.registry.incarnation(account_id.as_str())
     }
 
     /// Phase three: install the connection, and hand back both the guard that
@@ -2253,6 +2290,15 @@ mod tests {
     use super::*;
 
     pub(super) fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
+        run_with_reset(started_ns, warmup_ns, run_duration_ns, false)
+    }
+
+    fn run_with_reset(
+        started_ns: u64,
+        warmup_ns: u64,
+        run_duration_ns: Option<u64>,
+        reset_account_on_reconnect: bool,
+    ) -> Arc<Run> {
         let profiles = Arc::new(source::InstrumentProfiles::from_profiles(vec![
             crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
         ]));
@@ -2282,10 +2328,70 @@ mod tests {
             200,
             mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
                 .expect("the default account id is legal"),
-            false,
+            reset_account_on_reconnect,
             std::collections::HashMap::new(),
             std::sync::mpsc::channel().0,
         )
+    }
+
+    /// The reconnect reset replaces the ledger and nothing else. It used to
+    /// call `registry.forget`, which removed the connection record the
+    /// admission had just committed - so the connection bound no lanes, rode no
+    /// boat, and its live account read as unattended to the TTL collector.
+    ///
+    /// Sequenced exactly as `/ws` sequences it: sample the identity, reserve,
+    /// replace the ledger inside the reservation's exclusive window, then
+    /// commit. That ordering is what makes the incarnation a boundary, so a
+    /// test that ran the reset after the commit would be pinning a shape the
+    /// handler no longer has.
+    #[test]
+    fn reconnect_reset_keeps_the_committed_connection_ride_and_lanes() {
+        let run = run_with_reset(1_000, 400, None, true);
+        let account = mogwai_protocol::AccountId::parse("RESET-001").unwrap();
+        let old = run.account(&account);
+        let key = boat_key(&run, "BTCUSDT", 1.0);
+        let observed = run.ledger_incarnation(&account);
+        let resetting = run.claim_discards_ledger(&account, true, Some("new"));
+        assert!(
+            resetting,
+            "the configured reconnect path must actually reset"
+        );
+
+        let mut reservation = run
+            .reserve_admission(
+                account.as_str(),
+                crate::registry::Seat {
+                    river: key.river().clone(),
+                    speed_micros: key.speed_micros(),
+                },
+                resetting,
+                observed,
+            )
+            .unwrap();
+        let fresh = run.claim_account(&account, true, Some("new"), resetting);
+        assert!(!Arc::ptr_eq(&old, &fresh), "the ledger itself was replaced");
+        let (attach, committed) =
+            run.commit_admission(&mut reservation, Some("new"), Some(key.clone()), true);
+
+        let (lanes, _rx) = ExecLanes::detached_as(committed.connection_id);
+        run.bind_lanes(lanes, account.as_str(), Some("new"));
+        assert!(
+            run.bound_lanes()
+                .iter()
+                .any(|bound| bound.account_id == account.as_str()),
+            "the reset did not erase the connection the admission committed"
+        );
+        assert!(
+            fresh.is_seated_on(&key),
+            "the committed ride survived reset"
+        );
+        assert!(!fresh.is_frozen(), "the live reset connection is attended");
+        assert_eq!(
+            run.ledger_incarnation(&account),
+            observed + 1,
+            "the committed reset advanced the identity the replacement is paired with"
+        );
+        drop(attach);
     }
 
     /// Pins [`audience`]'s verdicts on every discriminating case, so a
@@ -2639,7 +2745,12 @@ mod tests {
             speed_micros: crate::boatyard::quantize_speed(speed).expect("a legal speed"),
         };
         let mut reservation = run
-            .reserve_admission(account_id.as_str(), seat, false)
+            .reserve_admission(
+                account_id.as_str(),
+                seat,
+                false,
+                run.ledger_incarnation(account_id),
+            )
             .expect("nothing else is being admitted");
         run.commit_admission(&mut reservation, callsign, ride, true)
     }
@@ -2696,6 +2807,7 @@ mod tests {
                     speed_micros: crate::boatyard::quantize_speed(3.0).unwrap(),
                 },
                 false,
+                run.ledger_incarnation(&account),
             )
             .expect_err("a second cadence on one river is refused");
         let crate::registry::AdmissionRefusal::CadenceConflict(held) = refused else {

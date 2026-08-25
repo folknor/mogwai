@@ -6,8 +6,9 @@ the close pass over the `notes/bugs-venue-mechanics.md` arc, which reviewed the
 whole two-commit arc and closed it; the record is at the bottom. That document
 is deleted: every finding in it is closed, and the two rewrites it proposed are
 refused with reasons recorded below rather than deferred. The bugs-engine arc
-below it is closed and judged sound. What is owed next is the remaining bug
-documents from the reconnaissance pass - three scopes still unworked.
+below it is closed and judged sound. Round 1 of `notes/bugs-venue-serving.md`
+has landed on top of that; its findings 1 through 4 are closed and removed from
+that document, and 5 through 7 are untouched and owed to a later round.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -222,6 +223,81 @@ documents from the reconnaissance pass - three scopes still unworked.
   cap. Folded into `CHECKPOINT_K`'s own doc comment, with the reason the stride
   is outside `TAPE_PROTOCOL_VERSION`'s reach spelled out. Worth remembering
   that a bare `//` between two documented items attaches to neither.
+
+## Machinery agents may build on and must not break, from bugs-venue-serving round 1
+
+- **The reconnect reset replaces the ledger and nothing else.** `discard_account`
+  drops the account's engine and the order claims attributing its frames, and
+  deliberately leaves the connection registry alone; only `collect_account`, the
+  TTL path, calls `registry.forget`, and only because it has already established
+  that nothing is committed or reading. The old shared `forget` deleted the
+  connection record the admission had committed one line earlier, so the
+  connection bound no lanes, rode no boat, never reached `bound_lanes` - the fill
+  sweeper's only delivery channel - and its live account read as unattended to
+  the TTL collector.
+- **The ledger identity boundary, and the order it depends on.** `/ws` samples
+  `Run::ledger_incarnation` *before* it reads the ledger, carries that sample
+  into `reserve_admission`, and the registry refuses `AdmissionRefusal::
+  LedgerMoved` if the identity has moved since. `claim_account` then runs
+  *before* `commit_admission`, so the ledger replacement happens while the
+  reservation is outstanding and no other admission can reserve across it; the
+  commit advances the incarnation inside that same exclusive window. All three
+  are load-bearing together. Sample the identity inside `reserve` and the check
+  reads the state after the reads it covers. Replace the ledger after the
+  commit and a second socket can read the outgoing ledger, reserve the identity
+  the commit already advanced to, and be admitted on checks nothing supports.
+  Stated in the `crate::registry` module docs and in
+  `reference/architecture.md`, and pinned by
+  `a_check_taken_against_a_replaced_ledger_cannot_reserve`.
+- The reordering does not disturb the previous arc's per-seat `readable` work.
+  That rests on the ride being installed by the same `commit` transaction that
+  makes the account attended, with the boat placed before the commit. `commit`
+  is untouched and `claim_account` touches no registry state, so both halves
+  still hold; only the ledger swap moved, and it moved earlier, not later.
+- **A history request is resolved on every arm but one.** `finish_history_page`
+  is split out of `spawn_history_page` precisely so a panicked blocking task can
+  be exercised - the socket path cannot provoke one - and it answers a
+  `JoinError` with a correlated, retryable `HistoryRejected` rather than only
+  logging under a comment claiming it does. The single unresolved arm is a
+  saturated lane, which means the peer is not reading, and it says so.
+
+## Decisions and hazards from bugs-venue-serving round 1
+
+- **Finding 4 stays closed, and is now closed by construction rather than by
+  argument.** The fix pass and the cold reviewer both argued that a reset ledger
+  installs no policy needing calendar validation, which was true and unenforced.
+  `Run::minted_policy` is now the single source of the policy a fresh mint
+  installs: `Run::account` mints with it, and `Run::daily_reset_minute` answers
+  the resetting path with `risk::daily_reset_minute_of` over it instead of
+  returning `None` unconditionally. The answer is still `None` today, because
+  `AccountOpeningTerms` carries no policy - but the day it gains one the
+  calendar refusal follows it rather than being silently skipped. No test can
+  bite this today: with one policy value reachable, any assertion is `None ==
+  None`. The construction is the gate, and it is named at both sites.
+- The history-panic regression tests the helper, not the call site - the
+  doctrine hazard this loop has now hit five times. `spawn_history_page` passing
+  the wrong id to `finish_history_page` would still pass. The wiring is one
+  line, `let panic_request_id = request_id.clone();` taken before the id moves
+  into the closure, and it was audited by reading.
+- The identity-boundary regression forces its interleaving by sequencing two
+  registry calls by hand rather than by threading them. The window in `/ws` is a
+  few instructions wide, so a threaded version would be the coin flip against
+  its own defect that this loop has already paid for twice.
+- Bite-check note worth keeping: adding a new assertion to an existing
+  regression can mask the assertion the test was laid for. The reset regression
+  was written with the identity assertion ahead of the finding-1 assertions, and
+  the `registry.forget` perturbation then fired the identity one instead of "the
+  reset did not erase the connection the admission committed". Ordering
+  assertions so the older, more specific one fires first is the cheap fix.
+- No `TAPE_PROTOCOL_VERSION` bump is owed, verified rather than trusted.
+  `mogwai-data`, `analysis/` and the fingerprint are untouched; nothing in this
+  round reaches a generator constant, an arrival clock, a seed derivation, the
+  fill band's draw or the tape origin. `TAPE_PROTOCOL_VERSION` is 24.
+- Least examined by this round: the `Ok(Ok(Ok(payload)))` arm's silent drop when
+  `lanes.reserve_admission()` returns `None`. Finding 2 flagged it as the same
+  unresolved-request-id outcome; it is argued (the peer is not reading) and now
+  stated in `finish_history_page`'s doc, but it is not tested and nobody has
+  asked whether a lane can be momentarily saturated by a peer that is reading.
 
 ## Machinery agents may build on and must not break, from the bugs-engine arc
 

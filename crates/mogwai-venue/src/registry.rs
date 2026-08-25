@@ -48,6 +48,30 @@
 //! costs a live consumer nothing, where previously a placement failure could
 //! arrive after the eviction.
 //!
+//! # The ledger identity boundary
+//!
+//! A resetting admission replaces the account's ledger, and every check the
+//! caller made - funding, daily-reset calendar, policy - was taken against the
+//! outgoing one. `incarnation` names which ledger those checks saw, and it is
+//! a boundary rather than decoration only because three things hold together:
+//!
+//! 1. The caller samples the incarnation *before* it reads the ledger, and
+//!    hands that sample to [`ConnectionRegistry::reserve`], which refuses with
+//!    [`AdmissionRefusal::LedgerMoved`] if the ledger has moved since. Sampling
+//!    it inside `reserve` instead would read the identity after the reads it is
+//!    supposed to cover, which is what made the check vacuous.
+//! 2. The replacement itself happens while the reservation is outstanding, so
+//!    no other admission can reserve across it - `pending` exclusivity is the
+//!    exclusion the reviewer's "admissions must remain excluded until reopen
+//!    finishes" asks for.
+//! 3. The incarnation advances at the commit, inside that same exclusive
+//!    window. A proposal that rolls back leaves the identity alone, because a
+//!    proposal replaced no ledger.
+//!
+//! So any observation of this ledger lies wholly before the exclusive window or
+//! wholly after it. One taken before carries the old incarnation and is refused
+//! at `reserve`; one taken after sees the ledger it will get.
+//!
 //! The one hard rule, which is what keeps the lock graph flat: **no guard from
 //! this module survives an await, a placement, an engine acquisition, a lane
 //! send, or a ticket drop.** The registry mutex and the engine's async mutex
@@ -139,9 +163,10 @@ struct PendingAdmission {
 }
 
 struct AccountEntry {
-    /// Which ledger this is. Bumped whenever the account is reset, so a
+    /// Which ledger this is. Advanced by the commit of a resetting admission,
+    /// which is the instant a reset becomes visible to anybody else, so a
     /// reservation taken against the outgoing ledger cannot commit onto the
-    /// incoming one.
+    /// incoming one. See the ledger identity boundary in the module docs.
     incarnation: u64,
     connections: Vec<ConnectionRecord>,
     pending: Option<PendingAdmission>,
@@ -204,6 +229,10 @@ impl AccountEntry {
 /// What a refused admission is refused for.
 #[derive(Debug)]
 pub(crate) enum AdmissionRefusal {
+    /// This account's ledger was replaced after the caller took its funding and
+    /// policy checks against it. Retryable: the next attempt reads the ledger
+    /// that actually exists.
+    LedgerMoved,
     /// This account already rides that river at a different cadence. Carries the
     /// seat it is sitting in, so the refusal can name the cadence that is
     /// actually there rather than the one that was asked for.
@@ -228,6 +257,7 @@ pub(crate) struct Reservation {
     account_id: String,
     id: u64,
     incarnation: u64,
+    resetting: bool,
     /// What this admission intends to ride. Kept so a test can read back what
     /// was reserved; the commit takes the ride it actually placed, because the
     /// boat is the authority on that once it exists.
@@ -334,11 +364,19 @@ impl ConnectionRegistry {
     /// account keeps no book and no clock, so nothing it was riding constrains
     /// what the newcomer may ride; asking the outgoing ledger would refuse
     /// exactly the reconnect-at-a-new-cadence the reset knob exists to serve.
+    ///
+    /// `observed_incarnation` is the identity the caller read this account's
+    /// ledger under, sampled with [`ConnectionRegistry::incarnation`] before any
+    /// of those reads. It is refused rather than merely recorded, and that is
+    /// what makes the identity boundary in the module docs real: a check taken
+    /// against a ledger some other admission has since replaced can no longer
+    /// be carried into a commit.
     pub(crate) fn reserve(
         self: &std::sync::Arc<Self>,
         account_id: &str,
         seat: Seat,
         resetting: bool,
+        observed_incarnation: u64,
     ) -> Result<Reservation, AdmissionRefusal> {
         let mut entries = self.locked();
         let entry = entries
@@ -347,13 +385,16 @@ impl ConnectionRegistry {
         if entry.pending.is_some() {
             return Err(AdmissionRefusal::Busy);
         }
-        if resetting {
-            entry.incarnation += 1;
-        } else if let Some(sitting) = entry.connections.iter().find_map(|conn| {
-            conn.ride.as_ref().filter(|ride| {
-                *ride.river() == seat.river && ride.speed_micros() != seat.speed_micros
+        if entry.incarnation != observed_incarnation {
+            return Err(AdmissionRefusal::LedgerMoved);
+        }
+        if !resetting
+            && let Some(sitting) = entry.connections.iter().find_map(|conn| {
+                conn.ride.as_ref().filter(|ride| {
+                    *ride.river() == seat.river && ride.speed_micros() != seat.speed_micros
+                })
             })
-        }) {
+        {
             return Err(AdmissionRefusal::CadenceConflict(Seat {
                 river: sitting.river().clone(),
                 speed_micros: sitting.speed_micros(),
@@ -367,6 +408,7 @@ impl ConnectionRegistry {
             account_id: account_id.to_owned(),
             id,
             incarnation,
+            resetting,
             seat,
             committed: false,
         })
@@ -430,6 +472,20 @@ impl ConnectionRegistry {
         let resumed_from_freeze = !entry.attended();
         entry.pending = None;
         reservation.committed = true;
+        // A reset changes ledger identity only at the admission's linearization
+        // point. A reservation is a proposal and may still fail placement or be
+        // cancelled, so advancing the identity in `reserve` made rollback
+        // mutate state and made this revalidation agree with its own mutation.
+        //
+        // This is inside the exclusive window, and so is the ledger replacement
+        // the caller performs before it reaches here. That pairing is the whole
+        // of the identity boundary: see the module docs. Move the replacement
+        // back after this commit and the boundary is gone, because an admission
+        // could then read the outgoing ledger and still reserve the new
+        // identity.
+        if reservation.resetting {
+            entry.incarnation += 1;
+        }
         // Who is displaced, and separately which of them have lanes to close.
         // The two are not the same set: a committed incumbent that has not
         // reached its reading boundary holds no lanes and must still be
@@ -590,6 +646,18 @@ impl ConnectionRegistry {
             .or_insert_with(|| AccountEntry::new(1));
     }
 
+    /// Which ledger this account currently holds.
+    ///
+    /// Sampled by an admission before it reads the ledger, and handed back to
+    /// [`ConnectionRegistry::reserve`]. An account with no entry answers the
+    /// identity `reserve` would create it with, so a first-sight account and a
+    /// long-lived one take the same path.
+    pub(crate) fn incarnation(&self, account_id: &str) -> u64 {
+        self.locked()
+            .get(account_id)
+            .map_or(1, |entry| entry.incarnation)
+    }
+
     /// Whether some connection of this account already presents `callsign`.
     ///
     /// Counts committed connections as well as reading ones, so a second leg
@@ -666,7 +734,7 @@ mod tests {
     #[test]
     fn an_account_with_no_connection_is_frozen() {
         let registry = ConnectionRegistry::new();
-        let reservation = registry.reserve("A", seat(), false).unwrap();
+        let reservation = registry.reserve("A", seat(), false, 1).unwrap();
         drop(reservation);
         assert!(registry.is_frozen("A"));
     }
@@ -677,7 +745,7 @@ mod tests {
         // are zero readers, and the account must not read as unattended - a
         // freeze there retires a book because a socket arrived.
         let registry = ConnectionRegistry::new();
-        let mut reservation = registry.reserve("A", seat(), false).unwrap();
+        let mut reservation = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut reservation, None, None, true));
         assert!(!registry.is_frozen("A"));
         assert!(registry.frozen_for("A").is_none());
@@ -686,7 +754,7 @@ mod tests {
     #[test]
     fn a_committed_admission_that_never_reads_freezes_on_release() {
         let registry = ConnectionRegistry::new();
-        let mut reservation = registry.reserve("A", seat(), false).unwrap();
+        let mut reservation = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut reservation, None, None, true));
         registry.release("A", 1);
         assert!(registry.is_frozen("A"));
@@ -695,11 +763,11 @@ mod tests {
     #[test]
     fn a_rolled_back_reservation_leaves_a_live_account_live() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, Some("one"), None, true));
         // The reservation is dropped without committing, exactly as an upgrade
         // that fails placement or has its future cancelled would leave it.
-        let second = registry.reserve("A", seat(), false).unwrap();
+        let second = registry.reserve("A", seat(), false, 1).unwrap();
         drop(second);
         assert!(!registry.is_frozen("A"));
     }
@@ -707,9 +775,9 @@ mod tests {
     #[test]
     fn one_admission_at_a_time_per_account() {
         let registry = ConnectionRegistry::new();
-        let _first = registry.reserve("A", seat(), false).unwrap();
+        let _first = registry.reserve("A", seat(), false, 1).unwrap();
         assert!(matches!(
-            registry.reserve("A", seat(), false),
+            registry.reserve("A", seat(), false, 1),
             Err(AdmissionRefusal::Busy)
         ));
     }
@@ -721,10 +789,10 @@ mod tests {
     #[test]
     fn a_second_cadence_on_one_river_is_refused() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, None, Some(ride(1.0)), true));
         assert!(matches!(
-            registry.reserve("A", seat_at(2_000_000), false),
+            registry.reserve("A", seat_at(2_000_000), false, 1),
             Err(AdmissionRefusal::CadenceConflict(held)) if held == seat()
         ));
     }
@@ -736,13 +804,13 @@ mod tests {
     #[test]
     fn a_second_cadence_on_another_river_is_admitted() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, None, Some(ride(1.0)), true));
         let elsewhere = Seat {
             river: RiverKey::synthetic(2),
             speed_micros: 2_000_000,
         };
-        assert!(registry.reserve("A", elsewhere, false).is_ok());
+        assert!(registry.reserve("A", elsewhere, false, 1).is_ok());
     }
 
     /// A ride ends with its connection, so the cadence it held stops
@@ -750,31 +818,90 @@ mod tests {
     #[test]
     fn a_departed_ride_stops_refusing_a_new_cadence() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         let committed = registry.commit(&mut first, None, Some(ride(1.0)), true);
         registry.release("A", committed.connection_id);
-        assert!(registry.reserve("A", seat_at(2_000_000), false).is_ok());
+        assert!(registry.reserve("A", seat_at(2_000_000), false, 1).is_ok());
     }
 
     #[test]
     fn a_reset_ledger_may_bind_any_seat() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, None, Some(ride(1.0)), true));
         let faster = seat_at(4_000_000);
-        let reserved = registry.reserve("A", faster.clone(), true).unwrap();
+        let reserved = registry.reserve("A", faster.clone(), true, 1).unwrap();
         assert_eq!(reserved.seat(), &faster);
+    }
+
+    #[test]
+    fn reset_identity_moves_on_commit_and_not_on_proposal() {
+        let registry = ConnectionRegistry::new();
+        let proposed = registry.reserve("A", seat(), true, 1).unwrap();
+        assert_eq!(
+            registry.incarnation("A"),
+            1,
+            "a proposal did not reset a ledger"
+        );
+        drop(proposed);
+        assert_eq!(
+            registry.incarnation("A"),
+            1,
+            "a rolled-back proposal left ledger identity unchanged"
+        );
+
+        let mut committed = registry.reserve("A", seat(), true, 1).unwrap();
+        drop(registry.commit(&mut committed, None, Some(ride(1.0)), true));
+        assert_eq!(
+            registry.incarnation("A"),
+            2,
+            "the committed reset advanced ledger identity"
+        );
+    }
+
+    /// The identity boundary, with the interleaving forced rather than raced.
+    ///
+    /// The second admission reads the ledger first - that read is what
+    /// `observed` stands for - and only then does the resetting admission
+    /// commit. Sequencing the two calls by hand is the whole point: the window
+    /// is a few instructions wide in `/ws`, so a threaded version of this would
+    /// be a coin flip that passes against its own defect.
+    #[test]
+    fn a_check_taken_against_a_replaced_ledger_cannot_reserve() {
+        let registry = ConnectionRegistry::new();
+        // The second socket samples the identity it is about to check funding
+        // and policy against.
+        let observed = registry.incarnation("A");
+
+        // The first socket's resetting admission commits, replacing the ledger.
+        let mut resetting = registry.reserve("A", seat(), true, observed).unwrap();
+        drop(registry.commit(&mut resetting, Some("first"), Some(ride(1.0)), true));
+
+        // The second socket now tries to admit on checks nothing supports.
+        assert!(
+            matches!(
+                registry.reserve("A", seat(), false, observed),
+                Err(AdmissionRefusal::LedgerMoved)
+            ),
+            "an admission carrying checks against a replaced ledger was admitted"
+        );
+        // And a socket that reads the ledger that actually exists is admitted.
+        let fresh = registry.incarnation("A");
+        assert!(
+            registry.reserve("A", seat(), false, fresh).is_ok(),
+            "an admission that read the ledger it will be served was refused"
+        );
     }
 
     #[test]
     fn a_shared_callsign_coexists_and_a_different_one_displaces() {
         let registry = ConnectionRegistry::new();
-        let mut first = registry.reserve("A", seat(), false).unwrap();
+        let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, Some("leg"), None, true));
-        let mut second = registry.reserve("A", seat(), false).unwrap();
+        let mut second = registry.reserve("A", seat(), false, 1).unwrap();
         let committed = registry.commit(&mut second, Some("leg"), None, true);
         assert!(committed.displaced.is_empty());
-        let mut third = registry.reserve("A", seat(), false).unwrap();
+        let mut third = registry.reserve("A", seat(), false, 1).unwrap();
         let committed = registry.commit(&mut third, Some("other"), None, true);
         // Neither incumbent had bound lanes, so nothing is handed back to
         // close; what matters is that they are no longer registered.

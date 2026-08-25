@@ -79,6 +79,19 @@ pub(crate) enum Verdict {
     Breached(Breach),
 }
 
+/// The UTC minute a policy resets its daily loss limit at, or `None` when it
+/// polices no daily loss at all and so has no boundary to cross.
+///
+/// Stated over the policy rather than only over a live ledger, because the
+/// upgrade path has to ask it of a policy whose ledger does not exist yet: a
+/// resetting claim is served a ledger minted after the check.
+pub(crate) fn daily_reset_minute_of(policy: &AccountPolicy) -> Option<u32> {
+    policy
+        .daily_loss_limit
+        .as_ref()
+        .map(|_| policy.reset_minute_utc)
+}
+
 impl RiskLedger {
     pub(crate) fn new(policy: AccountPolicy, opening_equity: Decimal, now_ns: u64) -> Self {
         Self {
@@ -112,10 +125,7 @@ impl RiskLedger {
     }
 
     pub(crate) fn daily_reset_minute(&self) -> Option<u32> {
-        self.policy
-            .daily_loss_limit
-            .as_ref()
-            .map(|_| self.policy.reset_minute_utc)
+        daily_reset_minute_of(&self.policy)
     }
 
     /// Fold one equity reading in, and say what it costs.
