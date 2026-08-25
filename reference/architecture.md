@@ -272,11 +272,13 @@ every other conditional. `trail_offset` holds the trigger away from the extreme
 the tape has reached, exactly as on a trailing stop market. `limit_offset` holds
 the limit away from that trigger, on the side the order can fill from: a sell
 rests at `trigger - limit_offset`, a buy at `trigger + limit_offset`. The limit
-price is derived rather than consumer-stated, at acceptance and again on every
-ratchet through one function, so the two can never disagree about which side of
-the trigger the limit belongs on and the limit can never drift out of reach as
-the trigger advances. A consumer-stated price is refused on this type for the same
-reason: the first ratchet would overwrite it.
+price is derived rather than consumer-stated, at acceptance, on every ratchet
+and on an amended trigger, all through one function, so the two can never
+disagree about which side of the trigger the limit belongs on and the limit can
+never drift out of reach as the trigger advances. A consumer-stated price is
+refused on this type for the same reason - the first ratchet would overwrite it -
+and refused on the amend path as well as at submit, or a consumer could state
+through a modify what the front door will not let it state directly.
 
 What the second distance buys is a floor on the exit, and it bites in the gap
 case rather than the ordinary one. A sell's limit sits below its trigger, so a
@@ -320,7 +322,16 @@ admitted after the fill that adjusts them. That pass is the sole application of
 a member's linkage: the submit path suppresses its own, because `Ouo` subtracts
 the filled quantity rather than setting a target, so applying it at the fill and
 again at the close would shrink an already-resting sibling twice and cancel a
-stop-first bracket's stop outright.
+stop-first bracket's stop outright. The quantity that closing pass shrinks by is
+the booked fill, returned out of the submit path by reference, never a quantity
+summed back out of the emitted events: the wire is the layer this venue
+deliberately corrupts, and `DuplicateNextFill` emits the same fill twice with
+`last_qty` and all. Reconstructing the number from that stream produced exactly
+the naked position the group frame exists to prevent, so no engine control flow
+is derived from a `Vec<VenueMessage>` a divergence has touched. The only two
+production readers of such a batch that remain are `account_changed`, which asks
+presence rather than magnitude, and the group's own pass-two refusal check,
+which reads a rejection no divergence fabricates per member.
 
 The residual is funds. The dry pass reads the book as it is before the group
 runs, so a member the venue can no longer fund once an earlier member's fill has
@@ -333,10 +344,18 @@ The two passes are only as good as their agreement, and asserting that they
 agree is what keeps them honest. The standing invariant is that no refusal may
 reach a submit from outside `Engine::dry_refusal` - the dry pass and the real
 path ask that one function, so a refusal added to only one of them is the whole
-defect family in a single line. Three atomicity bugs came from it being
+defect family in a single line. Five atomicity bugs came from it being
 unwritten: a hedging `position_id` rule that lived outside the validator, a link
-validated without the group's own ids on the second pass, and a non-idempotent
-`Ouo` applied twice. Because nothing can detect the next such mismatch by
+validated without the group's own ids on the second pass, a non-idempotent
+`Ouo` applied twice, and then two the invariant did not catch because the two
+passes called the same function with different arguments - the dry pass asked
+`validate_submit` with `apply_divergences` false, and that one flag also gates
+the venue-reserved id-prefix refusal and the armed fee surcharge, so a member
+carrying an `LQ-` id or priced between the two commission thresholds was
+admitted dry and refused real. The dry pass now asks with the flag true, which
+is correct because a group is always consumer-submitted; the flag remains
+overloaded, and splitting the arm-spending meaning from the two order-property
+meanings is the durable fix. Because nothing can detect the next such mismatch by
 construction, the group checks itself instead: a member refused on pass two
 re-asks the dry question against the state as it now stands, and a dry pass that
 would admit what the real path just refused is a defect rather than the funds
@@ -456,9 +475,11 @@ The settlement period is `settlement_ns`: a sale's proceeds are credited at once
 and held unspendable until the span has run, appearing as `locked` on the balance
 row - which is what a `T+N` convention actually is to a strategy. It is a fixed
 sim span rather than N sessions, and that simplification is stated rather than
-hidden. The round lot is `lot_size`, and it governs what may be submitted rather
-than what the size grid can represent: a partial fill legitimately leaves an
-odd-lot remainder, so `size_increment` stays at one share.
+hidden. The round lot is `lot_size`, and it governs what may be submitted or
+amended to rather than what the size grid can represent: a partial fill
+legitimately leaves an odd-lot remainder, so `size_increment` stays at one
+share. Submit and modify enforce the same grid, so a resting order cannot drift
+off it into a state a fresh submit would have refused.
 
 Margin has two bases. `per_contract` is a fixed amount of settlement currency
 however the price moves, which is what CME publishes and what every shipped

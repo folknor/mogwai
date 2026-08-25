@@ -1348,6 +1348,7 @@ impl Engine {
                 }),
                 false,
                 &[],
+                None,
             ));
             originated += 1;
         }
@@ -1430,6 +1431,7 @@ impl Engine {
                 }),
                 false,
                 &[],
+                None,
             ));
             originated += 1;
         }
@@ -1661,6 +1663,7 @@ impl Engine {
             }),
             false,
             &[],
+            None,
         )
     }
 
@@ -6529,6 +6532,57 @@ mod tests {
         assert_eq!(resting_limit_px(&e, "TL1"), Decimal::from(138));
     }
 
+    #[test]
+    fn amending_a_trailing_stop_limit_trigger_rederives_its_limit() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            Command::SubmitOrder(trailing_stop_limit("TSL-AMEND", Side::Sell, 90, 10, 2)),
+            1,
+            Some(reading(1)),
+        );
+
+        let out = e.process(
+            Command::ModifyOrder {
+                client_order_id: "TSL-AMEND".into(),
+                price: None,
+                quantity: None,
+                trigger_price: Some(Decimal::from(80)),
+            },
+            2,
+        );
+        assert!(matches!(
+            &out[0],
+            VenueMessage::OrderUpdated {
+                price: Some(price),
+                trigger_price: Some(trigger),
+                ..
+            } if *price == Decimal::from(78) && *trigger == Decimal::from(80)
+        ));
+        assert_eq!(resting_limit_px(&e, "TSL-AMEND"), Decimal::from(78));
+        assert_eq!(resting_trigger(&e, "TSL-AMEND"), Decimal::from(80));
+
+        let rejected = e.process(
+            Command::ModifyOrder {
+                client_order_id: "TSL-AMEND".into(),
+                price: Some(Decimal::from(70)),
+                quantity: None,
+                trigger_price: None,
+            },
+            3,
+        );
+        assert!(matches!(
+            &rejected[0],
+            VenueMessage::OrderModifyRejected { reason, .. }
+                if reason == "TrailingStopLimit price is derived and cannot be amended"
+        ));
+        assert_eq!(resting_limit_px(&e, "TSL-AMEND"), Decimal::from(78));
+    }
+
     /// A buy is the mirror on both distances: the trigger follows the tape down
     /// and the limit sits above the trigger, because that is the side a buy can
     /// fill from.
@@ -6937,6 +6991,38 @@ mod tests {
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a whole number of lots is served: {round:?}"
         );
+    }
+
+    #[test]
+    fn a_lot_size_refuses_an_odd_lot_modify() {
+        let mut e = equity_engine(&Shares {
+            lot_size: Decimal::from(100),
+            cash: 1_000_000,
+            ..Shares::default()
+        });
+        let mut resting = share_order("ROUND-AMEND", Side::Buy, 200);
+        resting.order_type = OrderType::Limit;
+        resting.price = Some(Decimal::from(50));
+        let submitted = trade(&mut e, resting, 1);
+        assert!(
+            submitted
+                .iter()
+                .any(|event| matches!(event, VenueMessage::OrderAccepted { .. }))
+        );
+
+        let out = e.process(
+            Command::ModifyOrder {
+                client_order_id: "ROUND-AMEND".into(),
+                price: None,
+                quantity: Some(Decimal::from(250)),
+                trigger_price: None,
+            },
+            2,
+        );
+        assert!(
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "quantity must be a multiple of the 100-share lot")
+        );
+        assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(200));
     }
 
     /// The settlement period: the money is yours the moment the trade prints and
@@ -7463,6 +7549,130 @@ mod tests {
             Decimal::from(1),
             "shrunk by the fill ONCE - 2 less 1 - rather than by twice it: {out:?}"
         );
+    }
+
+    #[test]
+    fn a_duplicate_group_fill_shrinks_an_ouo_sibling_by_the_booked_quantity_once() {
+        let mut e = linked_engine();
+        e.arm(Divergence::DuplicateNextFill);
+        let mut stop = limit_order("STOP-DUP", 2);
+        stop.side = Side::Sell;
+        stop.price = Some(Decimal::from(400));
+        let stop = linked(
+            stop,
+            link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY-DUP"], None),
+        );
+        let mut entry = limit_order("ENTRY-DUP", 1);
+        entry.price = Some(Decimal::from(300));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Ouo, &["STOP-DUP"], None),
+        );
+
+        let out = e.process_with_market(
+            Command::SubmitOrderGroup {
+                orders: vec![stop, entry],
+            },
+            1,
+            Some(away_reading()),
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY-DUP"))
+                .count(),
+            2,
+            "the wire carries the deliberately duplicated fill: {out:?}"
+        );
+        let stop = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "STOP-DUP")
+            .expect("the stop survives one booked 1-lot shrink");
+        assert_eq!(stop.leaves_qty, Decimal::ONE);
+    }
+
+    #[test]
+    fn a_group_refuses_a_reserved_id_before_admitting_any_member() {
+        let mut e = linked_engine();
+        let a = linked(
+            limit_order("GOOD-ID", 1),
+            link_of(mogwai_protocol::Contingency::Oco, &["LQ-BAD"], None),
+        );
+        let b = linked(
+            limit_order("LQ-BAD", 1),
+            link_of(mogwai_protocol::Contingency::Oco, &["GOOD-ID"], None),
+        );
+        let out = e.process_with_market(
+            Command::SubmitOrderGroup { orders: vec![a, b] },
+            1,
+            Some(away_reading()),
+        );
+        assert!(
+            out.iter()
+                .all(|event| matches!(event, VenueMessage::OrderRejected { .. }))
+        );
+        assert!(e.open.is_empty());
+        // The discriminator, and the reason this asserts a phrasing rather than
+        // a count. Pass two rejecting the bad member leaves every rejection
+        // bare; only the dry pass blames a member and wraps its sibling's
+        // reason, so the sibling's text is what says which pass refused. Without
+        // it the test would pass in release, where the `debug_assert` that
+        // catches a broken-open group is compiled out.
+        assert!(out.iter().any(|event| matches!(
+            event,
+            VenueMessage::OrderRejected { client_order_id, reason, .. }
+                if client_order_id == "GOOD-ID"
+                    && reason == "order group rejected whole: LQ-BAD was refused because client_order_id uses a venue-reserved prefix (LQ-, RISK-)"
+        )));
+    }
+
+    #[test]
+    fn a_group_dry_pass_prices_an_armed_fee_surcharge() {
+        let mut e = funded(51);
+        e.set_fee_schedule(
+            "BTCUSDT".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        e.arm_fee_surcharge(Decimal::from(3), 0, 100);
+        let mut a = limit_order("FEE-A", 1);
+        a.price = Some(Decimal::from(50));
+        let a = linked(
+            a,
+            link_of(mogwai_protocol::Contingency::Oco, &["FEE-B"], None),
+        );
+        let mut b = limit_order("FEE-B", 1);
+        b.price = Some(Decimal::from(50));
+        let b = linked(
+            b,
+            link_of(mogwai_protocol::Contingency::Oco, &["FEE-A"], None),
+        );
+        let out = e.process_with_market(
+            Command::SubmitOrderGroup { orders: vec![a, b] },
+            1,
+            Some(away_reading()),
+        );
+        assert!(
+            out.iter()
+                .all(|event| matches!(event, VenueMessage::OrderRejected { .. }))
+        );
+        assert!(e.open.is_empty());
+        // As in the reserved-id case: both members are unaffordable once the
+        // surcharge is priced, so "everything was rejected" is true in both
+        // worlds and cannot discriminate. The wrapped sibling reason is what
+        // proves the dry pass caught it rather than pass two.
+        assert!(out.iter().any(|event| matches!(
+            event,
+            VenueMessage::OrderRejected { client_order_id, reason, .. }
+                if client_order_id == "FEE-B"
+                    && reason == "order group rejected whole: FEE-A was refused because insufficient USDT balance"
+        )));
     }
 
     /// A hedging reduce-only member naming no `position_id` is refused, and the
@@ -9498,6 +9708,65 @@ mod tests {
     }
 
     #[test]
+    fn a_price_amend_cannot_activate_an_inert_market_if_touched_remainder() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "MIT-REST".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        let mut order = trailing_stop("MIT-REST", Side::Buy, 110, 10);
+        order.order_type = OrderType::MarketIfTouched;
+        order.trail_offset = None;
+        e.process_with_market(Command::SubmitOrder(order), 1, Some(reading(1)));
+        assert!(matches!(e.open[0].resting, Resting::Inert));
+
+        let out = e.process(
+            Command::ModifyOrder {
+                client_order_id: "MIT-REST".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+                trigger_price: None,
+            },
+            2,
+        );
+        assert!(
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "a market-on-trigger order must not carry a price")
+        );
+        assert!(matches!(e.open[0].resting, Resting::Inert));
+        assert!(e.pending_scans().is_empty());
+    }
+
+    /// The sibling arm of the same guard. A resting `TrailingStopMarket` never
+    /// reaches `Resting::Inert`, so what a price amend would have corrupted here
+    /// is the hold: `effective_price` used to fall through to the amended price
+    /// for every type but `StopMarket`, so an invented limit would have priced
+    /// the lock on an order the venue refuses a price for at submit.
+    #[test]
+    fn a_price_amend_is_refused_on_a_resting_trailing_stop_market() {
+        let mut e = Engine::new();
+        e.process_with_market(
+            Command::SubmitOrder(trailing_stop("TSM-AMEND", Side::Buy, 110, 10)),
+            1,
+            Some(reading(1)),
+        );
+        assert!(matches!(e.open[0].resting, Resting::Conditional { .. }));
+
+        let out = e.process(
+            Command::ModifyOrder {
+                client_order_id: "TSM-AMEND".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+                trigger_price: None,
+            },
+            2,
+        );
+        assert!(
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "a market-on-trigger order must not carry a price")
+        );
+        assert_eq!(e.open[0].submit.price, None);
+    }
+
+    #[test]
     fn modify_quantity_grows_leaves_and_relocks() {
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
@@ -9517,13 +9786,19 @@ mod tests {
         );
 
         assert_eq!(out.len(), 2);
+        // The price is asserted although the amend states none: `OrderUpdated`
+        // reports the order's live price, so a quantity-only amend must repeat
+        // the resting price rather than publish `None`.
         assert!(matches!(
             updated(&out, 0),
             VenueMessage::OrderUpdated {
                 quantity,
                 leaves_qty,
+                price: Some(price),
                 ..
-            } if *quantity == Decimal::from(20) && *leaves_qty == Decimal::from(17)
+            } if *quantity == Decimal::from(20)
+                && *leaves_qty == Decimal::from(17)
+                && *price == Decimal::from(100)
         ));
         let usdt = balance(account(&out, 1), "USDT");
         assert_eq!(usdt.locked, Decimal::from(1700));

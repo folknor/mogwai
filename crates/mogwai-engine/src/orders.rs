@@ -25,7 +25,7 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<VenueMessage> {
-        self.on_submit_from(order, ts, reading, true, &[])
+        self.on_submit_from(order, ts, reading, true, &[], None)
     }
 
     /// The one refusal `on_submit_from` makes before `validate_submit`, lifted
@@ -228,7 +228,23 @@ impl Engine {
         let mut out = Vec::new();
         let mut filled: Vec<(SubmitOrder, Decimal)> = Vec::new();
         for order in orders {
-            let events = self.on_submit_from(order.clone(), ts, reading, true, orders);
+            // The booked quantity comes back out of `on_submit_from` by
+            // reference rather than being summed back out of `events`. The wire
+            // is the layer this venue deliberately corrupts - `DuplicateNextFill`
+            // emits the same fill twice, `last_qty` included - so a control-flow
+            // quantity reconstructed from it shrinks an `Ouo` sibling by twice
+            // the real fill and cancels it outright, leaving the position naked.
+            // No engine control flow may be derived from a `Vec<VenueMessage>`
+            // that divergences have already touched.
+            let mut member_filled = Decimal::ZERO;
+            let events = self.on_submit_from(
+                order.clone(),
+                ts,
+                reading,
+                true,
+                orders,
+                Some(&mut member_filled),
+            );
             // Pass one said every member was admissible, so a refusal here is
             // either the disclosed funds carve-out or a hole in the dry pass.
             // Which one it is decides whether this is a warning or a defect,
@@ -243,17 +259,6 @@ impl Engine {
             }) {
                 self.report_group_member_refusal(order, &reason, ts, orders);
             }
-            let member_filled: Decimal = events
-                .iter()
-                .filter_map(|event| match event {
-                    VenueMessage::OrderFilled(fill)
-                        if fill.client_order_id == order.client_order_id =>
-                    {
-                        Some(fill.last_qty)
-                    }
-                    _ => None,
-                })
-                .sum();
             if member_filled > Decimal::ZERO {
                 filled.push((order.clone(), member_filled));
             }
@@ -319,7 +324,7 @@ impl Engine {
         if let Err(reason) = self.derive_trailing_limit(&mut candidate) {
             return Some(reason);
         }
-        if let Err(reason) = self.validate_submit(&candidate, ts, false, group) {
+        if let Err(reason) = self.validate_submit(&candidate, ts, true, group) {
             return Some(reason);
         }
         None
@@ -411,6 +416,7 @@ impl Engine {
         reading: Option<MarketReading>,
         apply_divergences: bool,
         group: &[SubmitOrder],
+        booked_fill: Option<&mut Decimal>,
     ) -> Vec<VenueMessage> {
         if let Some(reason) = self.hedging_refusal(&order) {
             return vec![VenueMessage::OrderRejected {
@@ -842,6 +848,9 @@ impl Engine {
         // so this never perturbs a normal submit. An armed `DuplicateNextFill`
         // is left in place: it applies to a fill, and no fill was produced.
         if last_qty > Decimal::ZERO {
+            if let Some(booked_fill) = booked_fill {
+                *booked_fill = last_qty;
+            }
             let fill = self.commit_fill(
                 &order,
                 &venue_order_id,
@@ -2877,20 +2886,29 @@ impl Engine {
             }];
         }
 
-        // Neither kind of market order has a live limit price. A plain Market
-        // can remain open only as an inert partial-fill remainder, and giving
-        // that remainder a price must not turn it into a scannable limit.
+        // A market or market-on-trigger order has no live limit price. A
+        // partial-fill remainder may rest inert, and giving it a price must not
+        // turn it into a scannable limit. A trailing stop limit's price is
+        // derived from its trigger and offset, never consumer-stated.
         if price.is_some()
             && matches!(
                 self.open[pos].submit.order_type,
-                OrderType::Market | OrderType::StopMarket
+                OrderType::Market
+                    | OrderType::StopMarket
+                    | OrderType::MarketIfTouched
+                    | OrderType::TrailingStopMarket
+                    | OrderType::TrailingStopLimit
             )
         {
             return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
-                reason: if self.open[pos].submit.order_type == OrderType::StopMarket {
+                reason: if self.open[pos].submit.order_type == OrderType::TrailingStopLimit {
+                    "TrailingStopLimit price is derived and cannot be amended".into()
+                } else if self.open[pos].submit.order_type == OrderType::StopMarket {
                     "StopMarket order must not carry a price".into()
+                } else if self.open[pos].submit.order_type.is_conditional() {
+                    "a market-on-trigger order must not carry a price".into()
                 } else {
                     "Market order must not carry a price amend".into()
                 },
@@ -2968,6 +2986,33 @@ impl Engine {
             }];
         }
 
+        let lot = instrument.class.lot_size();
+        if lot > Decimal::ONE && !on_increment(new_total, lot) {
+            return vec![VenueMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: format!("quantity must be a multiple of the {lot}-share lot"),
+                ts_event: ts,
+            }];
+        }
+
+        let derived_price =
+            if trigger_price.is_some() && order.submit.order_type == OrderType::TrailingStopLimit {
+                let mut amended = order.submit.clone();
+                amended.trigger_price = trigger_price;
+                if let Err(reason) = self.derive_trailing_limit(&mut amended) {
+                    return vec![VenueMessage::OrderModifyRejected {
+                        client_order_id,
+                        venue_order_id: Some(venue_order_id),
+                        reason,
+                        ts_event: ts,
+                    }];
+                }
+                amended.price
+            } else {
+                None
+            };
+
         if let Some(new_price) = price
             && order.submit.post_only
             && matches!(order.resting, Resting::Limit { .. })
@@ -3000,7 +3045,12 @@ impl Engine {
         // is what `held_balances` will hold against; for everything else it
         // is the limit price. Spelled as `or` rather than unwrapped so the
         // validation degrades instead of panicking if the invariant loosens.
-        let effective_price = if order.submit.order_type == OrderType::StopMarket {
+        let effective_price = if order.submit.order_type == OrderType::TrailingStopLimit {
+            derived_price.or(order.submit.price)
+        } else if matches!(
+            order.submit.order_type,
+            OrderType::StopMarket | OrderType::MarketIfTouched | OrderType::TrailingStopMarket
+        ) {
             trigger_price.or(order.submit.trigger_price)
         } else {
             price.or(order.submit.price)
@@ -3265,6 +3315,9 @@ impl Engine {
             // price amend restarts a limit's band window.
             if let Some(new_trigger) = trigger_price {
                 order.submit.trigger_price = Some(new_trigger);
+                if let Some(derived_price) = derived_price {
+                    order.submit.price = Some(derived_price);
+                }
                 order.resting = Resting::Conditional {
                     stop_px: new_trigger,
                     toward: order.submit.order_type.triggers_toward(),
@@ -3274,6 +3327,11 @@ impl Engine {
             order.submit.quantity = new_total;
             order.leaves_qty = new_total - filled;
             order.ts_last = ts;
+            // Read back from the order rather than from the request: a
+            // quantity-only amend states no price and must still report the one
+            // the order rests at, and a trigger amend on a trailing stop limit
+            // must report the limit just rederived above. Reporting the request
+            // instead published `price: None` for every quantity-only amend.
             (order.submit.quantity, order.submit.price, order.leaves_qty)
         };
         self.refresh_open_hold(pos, &before);

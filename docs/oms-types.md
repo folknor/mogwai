@@ -48,9 +48,11 @@ far its trigger sits from the extreme the tape has reached, as on a
 `TrailingStopMarket`. `limit_offset` is how far its limit sits from that
 trigger, on the side the order can fill from - a sell rests at
 `trigger - limit_offset`, a buy at `trigger + limit_offset`. The venue derives
-the limit price from those and re-derives it every time the trigger ratchets, so
-never send a `price`: it is refused, because the first ratchet would overwrite
-it.
+the limit price from those and re-derives it every time the trigger ratchets and
+every time you amend the trigger, so never send a `price`: it is refused at
+submit and on a modify alike, because the first ratchet would overwrite it.
+Amend the trigger and the venue reports the rederived limit back on
+`OrderUpdated`.
 
 Use it over `TrailingStopMarket` when you want a floor on the exit. Normally the
 two behave alike, since a print that reaches the trigger is usually through the

@@ -425,7 +425,9 @@ settlement_ns = 172800000000000   # T+2, held unsettled for two days of sim time
 ```
 
 `lot_size` (default `1`, meaning odd lots are accepted) governs what may be
-submitted. It is deliberately not `size_increment`, which stays at one share:
+submitted, and equally what a resting order may be amended to: a modify that
+would put the order on an odd lot is refused exactly as the same submit would
+be. It is deliberately not `size_increment`, which stays at one share:
 a partial fill legitimately leaves an odd-lot remainder that the grid still has
 to represent.
 
