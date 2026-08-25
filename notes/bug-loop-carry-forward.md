@@ -2,9 +2,12 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current as of the
-`notes/bugs-venue-mechanics.md` arc, round 1, which closed findings 1 through 5
-of that document; findings 6 through 9 and the structural recommendation are a
-later round. The `notes/bugs-engine.md` arc below it is closed and judged sound.
+`notes/bugs-venue-mechanics.md` arc, round 2, which closed findings 6 through 9
+and ruled on the structural recommendation. That document is now deleted: every
+finding in it is closed, and the two rewrites it proposed are refused with
+reasons recorded below rather than deferred. The `notes/bugs-engine.md` arc
+below it is closed and judged sound. What is owed next is the close pass over
+the whole arc.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -82,6 +85,145 @@ later round. The `notes/bugs-engine.md` arc below it is closed and judged sound.
   for cancellation by the fresh `boats()` read above; closing it for the sweep
   would mean re-deriving `next_due` after the sleep, which changes the cadence
   schedule. Left alone deliberately.
+
+## Machinery agents may build on and must not break, from bugs-venue-mechanics round 2
+
+- `Rivers::last_trade_at_or_before` reports every materialization, positioning
+  and budget refusal as an error. A walk that finds a print on the last tick of
+  its budget returns that print before judging exhaustion. `None` now means only
+  that the reachable tape genuinely had no print at or before the instant.
+- `Rivers::ensure_reach` preserves `MaterializeRefusal`. Socket history derives
+  retryability from `is_venue_fault`, so a venue-owned synthesis failure is
+  retryable and a permanent resolution or river-cap refusal is not. Do not
+  flatten the type before that decision.
+- The fill golden records every resting limit's drawn trigger distance. Its
+  zero-width scenario must contain only zero offsets and its shipped-band
+  scenario must contain at least one non-zero offset, before the committed
+  artifact is compared or written. One-second fill latencies remain equal
+  between the two scenarios and are no longer asked to prove the band moved.
+- Risk enforcement resolves every extreme valuation before it mutates the
+  ledger. One unvaluable extreme refuses the whole policy span. After a lock
+  breach, the closing equity is still observed so the locked ledger's peak
+  ratchet agrees with the close; the first breach remains the action returned.
+- A ticket decrements a placed boat only when its `Arc` is the allocation the
+  registry currently holds under that sharing key. Passenger teardown ordering
+  still makes a mismatch unreachable, but a future violation cannot decrement
+  or remove a replacement boat.
+
+## Decisions from bugs-venue-mechanics round 2
+
+- No `TAPE_PROTOCOL_VERSION` bump is owed, settled independently by the
+  fix-and-commit pass rather than taken on the fix pass's word. Two things had
+  to hold and both do. First, the re-blessed artifact is not on the generation
+  path: `tests/golden/fill_distribution.json` is read only by its own
+  comparison in `fill_golden.rs` and is `include_str!`d by nothing, so no
+  generator can consume it. Second, the fill band's draw - which the bump rule
+  names explicitly, and which finding 7 sits directly on - did not move:
+  `draw_offset`, `draw_key` and `draw_trigger` are untouched, and the artifact
+  diff proves it, since every pre-existing field is byte-identical and the only
+  edits are the schema number and the added `trigger_offset_ticks` vector. Had
+  the draw moved, the latency and fill vectors would have moved with it. The
+  new observation calls `Engine::pending_scans`, which takes `&self`.
+  Re-blessing a golden that only observes generated behaviour is not the same
+  event as committing a changed generated artifact, and only the second owes a
+  bump.
+- `TAPE_PROTOCOL_VERSION` is not folded into `RiverKey`. It is a build identity,
+  and one process cannot hold rivers from two builds; the boatyard comment now
+  states that scope instead of claiming the compile-time constant is a key
+  field.
+- **The structural recommendation is refused, on the merits, and is not to be
+  relitigated.** Both halves were re-read at their sites by the fix-and-commit
+  pass and both proposals are wrong about the code they propose to replace.
+  - `apply_engine_pass_on_clock` returning "one snapshot taken after every
+    mutation" unconditionally would resurrect an account update that
+    `DropNextAccountUpdate` exists to suppress. The divergence works by there
+    being no `AccountState` in the phase's event vector at all, so the
+    presence check the recommendation calls a `retain` dance is carrying the
+    divergence semantics, not cleverness. Round 1 already took the half of the
+    proposal that was right - the value is recomputed at the end of the phase
+    rather than selected by vector position - and kept the half that is
+    load-bearing.
+  - `PriceExtremes` collapsing to a single `Mutex<Option<PriceSpan>>` rests on
+    the claim that "the lock is only touched when an extreme moves, so the
+    atomic-epoch optimization is buying approximately nothing". That claim is
+    false of the proposed replacement. The epoch is what lets the tape thread
+    hold its running extremes in its own `SpanWriter` stack and fold a print
+    without any lock; with the span behind a mutex and no writer-local state, a
+    print cannot know whether it moves an extreme without first locking to
+    read the span. The proposal therefore adds a mutex acquisition to every
+    trade on the venue's hottest path, and it would discard two barrier-pinned
+    regressions covering a race that was a real silent wrong answer.
+
+  The loop's standing rule is build rather than defer, and this is a refusal
+  rather than a deferral: nothing here is owed later.
+- The checkpoint stride and resident volatility window remain unchanged. Their
+  cross-crate and equal-budget premises are now named at the constants and call
+  site that rely on them.
+
+## Hazards this arc paid for, from bugs-venue-mechanics round 2
+
+- A budget check after a pull is not enough: it must return an answer found on
+  the final admitted tick before reporting exhaustion. The regression pins both
+  halves with the tape's opening quote and trade.
+- A cadence-level golden can be byte-identical across two mechanisms that differ
+  below its observation interval. Record the mechanism's direct output when the
+  downstream observable quantizes the distinction away.
+- A policy span must be valued before it is folded. Logging and skipping an
+  unvaluable member leaves a partially mutated ledger, which is the same
+  frontier defect as advancing over only the work that answered.
+- To bite a golden that records a drawn value, perturb the draw in its callee
+  and check which assertion fires. `draw_offset`'s `random_range(0..=band_ticks)`
+  is the lever: `band_ticks.min(0)` fires the shipped-band assertion and
+  `band_ticks.max(3)` fires the zero-width one, so both halves of the new gate
+  are pinned. That perturbation is also the proof the old schema-2 golden was
+  vacuous here - forcing every draw to zero leaves every schema-2 field of the
+  committed artifact byte-identical, because the banded and unbanded fill
+  outcomes already agreed.
+- A two-assertion test needs each assertion bitten with the other left passing,
+  or the first one masks the second. The budget regression was bitten twice:
+  the old `return Ok(None)` inside the drain loop for the refusal half, and
+  reordering the `drained == budget` bail ahead of the `last.is_some()` return
+  for the retained-print half. Reverting the loop shape alone only ever fires
+  the first assertion.
+
+## Least-examined after round 2, for the close pass
+
+Everything here was read and judged acceptable rather than missed, but it is
+where the next look is worth most.
+
+- **The typed refusal is checked but not classified, one layer out.** Making
+  `Rivers::ensure_reach` return `MaterializeRefusal` forces every caller to
+  handle the type, which is what closed finding 8 at the socket history site.
+  It does not force a caller to *classify*: the cheap escape is
+  `.map_err(anyhow::Error::new)`, and `http.rs` takes it at both `/trades` and
+  `/quotes`, where every refusal - a spent river cap included - still becomes
+  one `500`. That was already true before this round and the round did not
+  widen it, so it was left alone; but the operator HTTP surface is the same
+  lost classification finding 8 named, on a different route, and it is a real
+  open item rather than a settled one.
+- **The classification regression tests `Refusal::materialization`, not
+  `serve_page`.** The doctrine hazard round 1 hit three times. The call site is
+  one readable line and was audited by reading. A call-site regression was
+  considered and not laid: the only refusal that discriminates the fix from the
+  old unconditional `retryable: true` is `CapacityExhausted`, and reaching it
+  through `serve_page` means materializing all 256 rivers of
+  `MAX_MATERIALIZED_RIVERS`, each a real generator chain. `KeyMismatch` is a
+  venue fault and so answers `true` either way.
+- **The `Ticket::drop` identity guard ships with no regression, deliberately.**
+  A boat is removed only at `passengers == 0`, when no ticket remains, so no
+  live path can put a replacement `Arc` under a key a stale ticket still holds.
+  The guard turns an unenforced premise into a check and logs on violation;
+  constructing a witness would mean hand-building a `Slot::Placed` the registry
+  could not otherwise reach. Recorded as "cannot bite today" rather than left
+  looking gated.
+- **`last_trade_at_or_before`'s positioning refusal has no test.** The
+  `try_source_before_target` returning `None` branch now bails instead of
+  answering `Ok(None)`, and it is covered by the type change alone.
+- The `CHECKPOINT_K` cross-crate comment landed orphaned between that constant
+  and `MAX_MATERIALIZED_RIVERS`'s doc, reading as though it described the river
+  cap. Folded into `CHECKPOINT_K`'s own doc comment, with the reason the stride
+  is outside `TAPE_PROTOCOL_VERSION`'s reach spelled out. Worth remembering
+  that a bare `//` between two documented items attaches to neither.
 
 ## Machinery agents may build on and must not break, from the bugs-engine arc
 

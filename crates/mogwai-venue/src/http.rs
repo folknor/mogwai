@@ -1972,6 +1972,7 @@ pub(crate) async fn trades(
             .and_then(|river| {
                 rivers
                     .ensure_reach(&river, run_start_ns)
+                    .map_err(anyhow::Error::new)
                     .and_then(|_| bounded_trades(&river, start, end, limit, &rivers))
             })
             .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
@@ -2070,6 +2071,7 @@ pub(crate) async fn quotes(
             .and_then(|river| {
                 rivers
                     .ensure_reach(&river, run_start_ns)
+                    .map_err(anyhow::Error::new)
                     .and_then(|_| bounded_quotes(&river, start, end, limit, &rivers))
             })
             .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));

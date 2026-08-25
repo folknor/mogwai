@@ -7,9 +7,10 @@
 //!
 //! A river is a tape and is shared. Its identity is everything that mutates the
 //! water: symbol or preset, session or window shape, loop shape, seed, resolved
-//! bundle, market regime, generator havoc, and the tape protocol version. Speed
-//! is not in that list, because it changes delivery cadence and no generated
-//! value.
+//! bundle, market regime and generator havoc. The tape protocol version is a
+//! build identity rather than a key field: one process cannot contain rivers
+//! from two builds. Speed is not in that list, because it changes delivery
+//! cadence and no generated value.
 //!
 //! A passenger is one connected trader: its own account, ledger, orders and
 //! view, never shared, one per connection.
@@ -413,9 +414,16 @@ impl Drop for Ticket {
         let worker = {
             let mut boats = self.yard.locked();
             let remove = match boats.get_mut(&self.boat.key) {
-                Some(Slot::Placed(placed)) => {
+                Some(Slot::Placed(placed)) if Arc::ptr_eq(&placed.boat, &self.boat) => {
                     placed.passengers -= 1;
                     placed.passengers == 0
+                }
+                Some(Slot::Placed(_)) => {
+                    tracing::error!(
+                        symbol = %self.boat.symbol(),
+                        "a stale ticket matched a replacement boat; leaving the replacement untouched"
+                    );
+                    false
                 }
                 _ => false,
             };

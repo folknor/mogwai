@@ -105,6 +105,15 @@ pub(crate) struct Refusal {
     pub(crate) retryable: bool,
 }
 
+impl Refusal {
+    fn materialization(error: &crate::source::MaterializeRefusal) -> Self {
+        Self {
+            reason: format!("history could not be produced: {error:#}"),
+            retryable: error.is_venue_fault(),
+        }
+    }
+}
+
 /// What one page asks for. The river comes from the caller's own boat, which is
 /// why there is no symbol here to get wrong.
 pub(crate) struct PageRequest<'a> {
@@ -193,15 +202,12 @@ pub(crate) fn serve_page(rivers: &Rivers, request: &PageRequest<'_>) -> Result<P
     // Every river owes the whole warmup span before it can be served, and a
     // passenger's first history request is a first requester like any other.
     // Idempotent: a river already past the run origin walks nothing.
-    rivers.ensure_reach(key, run_start_ns).map_err(|error| {
-        // A synthesis failure is not an empty window, and saying so is the
-        // difference between a consumer retrying and a consumer believing the
-        // market was quiet.
-        Refusal {
-            reason: format!("history could not be produced: {error:#}"),
-            retryable: true,
-        }
-    })?;
+    // Keeping the refusal typed through this boundary makes a permanent
+    // request or capacity refusal non-retryable, while a failure by a river the
+    // venue already promised remains retryable.
+    rivers
+        .ensure_reach(key, run_start_ns)
+        .map_err(|error| Refusal::materialization(&error))?;
 
     let rows = match kind {
         HistoryKind::Trades => {
@@ -257,6 +263,20 @@ pub(crate) fn serve_page(rivers: &Rivers, request: &PageRequest<'_>) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialization_retryability_follows_the_typed_classification() {
+        let cap = Refusal::materialization(&crate::source::MaterializeRefusal::CapacityExhausted {
+            cap: 256,
+            count: 256,
+        });
+        assert!(!cap.retryable, "a spent river cap cannot change on retry");
+
+        let reach = Refusal::materialization(&crate::source::MaterializeRefusal::Reach(
+            anyhow::anyhow!("walk stopped"),
+        ));
+        assert!(reach.retryable, "a synthesis failure belongs to the venue");
+    }
 
     #[test]
     fn a_continuation_round_trips_through_its_token() {

@@ -267,6 +267,15 @@ fn generator(
 /// grid bounds an ordinary restore to a few milliseconds while the hard
 /// `MAX_CHECKPOINTS` cap still bounds retained generator clones; exceptionally
 /// long runs coarsen the grid as documented by `CheckpointIndex`.
+///
+/// Choosing this value at all is only safe because the tape does not depend on
+/// it. `CheckpointIndex::extend_toward` selects between whole-parent
+/// advancement and per-tick advancement from `k`, the remaining budget and the
+/// target, so a stride that changed the water would make the tape a function of
+/// this venue-side constant, outside anything `TAPE_PROTOCOL_VERSION` could
+/// catch. The two advancement paths are continuation-identical, and the gate on
+/// that premise lives in `mogwai-data`, in
+/// `compact_parent_advancement_matches_wire_frames_and_continuation`.
 pub(crate) const CHECKPOINT_K: usize = 8_192;
 /// How many distinct rivers one run may materialize.
 ///
@@ -907,9 +916,13 @@ impl Rivers {
     /// river pay only their new monotonic delta. Nothing pre-warms a non-boot
     /// river: doing so would multiply time-to-readiness by the number of
     /// configured shapes for a capability most runs never touch.
-    pub(crate) fn ensure_reach(&self, key: &RiverKey, target_ns: u64) -> anyhow::Result<usize> {
-        let river = self.river(key).map_err(anyhow::Error::new)?;
-        reach_river(&river, target_ns)
+    pub(crate) fn ensure_reach(
+        &self,
+        key: &RiverKey,
+        target_ns: u64,
+    ) -> Result<usize, MaterializeRefusal> {
+        let river = self.river(key)?;
+        reach_river(&river, target_ns).map_err(MaterializeRefusal::Reach)
     }
 
     /// A test's label-to-key resolution, named so it cannot be mistaken for the
@@ -990,24 +1003,30 @@ impl Rivers {
         key: &RiverKey,
         ts: u64,
     ) -> anyhow::Result<Option<Decimal>> {
-        let Ok(river) = self.river(key) else {
-            return Ok(None);
-        };
+        self.last_trade_at_or_before_with_budget(key, ts, crate::fills::SWEEP_DRAIN_BUDGET)
+    }
+
+    fn last_trade_at_or_before_with_budget(
+        &self,
+        key: &RiverKey,
+        ts: u64,
+        mut budget: usize,
+    ) -> anyhow::Result<Option<Decimal>> {
+        let river = self.river(key).map_err(anyhow::Error::new)?;
         reach_river(&river, ts)?;
-        let mut budget = crate::fills::SWEEP_DRAIN_BUDGET;
         let mut back = 0usize;
         loop {
             let Some((mut source, exhausted)) =
                 locked(&river.checkpoints).try_source_before_target(ts, back)
             else {
-                return Ok(None);
+                anyhow::bail!("river {} cannot position at or before {ts}", key.symbol());
             };
             let mut last = None;
             let mut drained = 0usize;
-            while let Some(tick) = source.next_tick() {
-                if drained >= budget {
-                    return Ok(None);
-                }
+            while drained < budget {
+                let Some(tick) = source.next_tick() else {
+                    break;
+                };
                 drained += 1;
                 let TickEvent::Trade(trade) = tick else {
                     continue;
@@ -1017,12 +1036,24 @@ impl Rivers {
                 }
                 last = Some(trade.price);
             }
-            if last.is_some() || exhausted {
+            if last.is_some() {
                 return Ok(last);
+            }
+            if drained == budget {
+                anyhow::bail!(
+                    "last-trade walk for {} exhausted its drain budget before finding a print at or before {ts}",
+                    key.symbol()
+                );
+            }
+            if exhausted {
+                return Ok(None);
             }
             budget = budget.saturating_sub(drained);
             if budget == 0 {
-                return Ok(None);
+                anyhow::bail!(
+                    "last-trade walk for {} exhausted its drain budget before finding a print at or before {ts}",
+                    key.symbol()
+                );
             }
             back = back.saturating_mul(2).max(1);
         }
@@ -1146,6 +1177,45 @@ mod river_tests {
                 Err(MaterializeRefusal::KeyMismatch { .. })
             ),
             "a key nothing issued is refused rather than silently resolved"
+        );
+    }
+
+    #[test]
+    fn a_last_trade_read_reports_an_unissued_key() {
+        let rivers = total_rivers();
+        let key = rivers.test_key("BTCUSDT").with_unresolvable_bundle();
+        let error = rivers
+            .last_trade_at_or_before(&key, TAPE_ORIGIN_NS)
+            .expect_err("an internal routing refusal is not a quiet tape");
+        assert!(
+            error.to_string().contains("not the key this run resolved"),
+            "the materialization classification survives to the caller: {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_last_trade_read_reports_a_budget_refusal_but_keeps_a_found_print() {
+        let rivers = crate::fills::test_rivers();
+        let key = rivers.test_key("BTCUSDT");
+        let mut source = rivers.history_source(&key, None).unwrap();
+        let first_trade = loop {
+            match source.next_tick().expect("the fixture prints") {
+                TickEvent::Trade(trade) => break trade,
+                TickEvent::Quote(_) => {}
+            }
+        };
+
+        let error = rivers
+            .last_trade_at_or_before_with_budget(&key, first_trade.ts_event, 1)
+            .expect_err("the opening quote spends a one-tick budget before the trade");
+        assert!(error.to_string().contains("drain budget"));
+
+        assert_eq!(
+            rivers
+                .last_trade_at_or_before_with_budget(&key, first_trade.ts_event, 2)
+                .expect("the trade fits exactly inside the budget"),
+            Some(first_trade.price),
+            "a walk that found its print on the final admitted tick keeps it"
         );
     }
 

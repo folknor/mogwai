@@ -624,10 +624,13 @@ reading the venue's wording. No consumer should hang a quarantine decision on
 our prose, and one correctly refused to. So the wire states it, and
 `mogwai-adapter` carries it across the boundary as its public
 `RETRYABLE_REJECT_PREFIX` on the reason - an identifier this repo versions and
-tests, not a sentence. Every refusal the venue issues today is retryable, which
-is the contract rather than a redundancy: an admission refusal means the venue
-was full, not that it said no. Absent decodes `false`, so a consumer reading an
-older venue takes the safe reading.
+tests, not a sentence. Every admission refusal the venue issues today is
+retryable, which is the contract rather than a redundancy: an admission refusal
+means the venue was full, not that it said no. Absent decodes `false`, so a
+consumer reading an older venue takes the safe reading. The claim is scoped to
+admission: `HistoryRejected` carries the same field and does say no, setting it
+`false` for a malformed request, an unreadable continuation, and a river cap
+already spent for the life of the process.
 
 Inbound frames and reassembled
 messages are capped at `MAX_INBOUND_MESSAGE_BYTES`, 64 KiB, so a dependency

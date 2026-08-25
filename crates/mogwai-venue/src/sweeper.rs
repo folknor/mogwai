@@ -932,24 +932,38 @@ fn enforce_policy(
         );
         return (emitted, originated, false);
     };
-    // The span's extremes first, in time order, then the close. A breach found
-    // at an extreme is the first verdict returned: the account was liquidated at
-    // that instant, so a later reading cannot un-breach it, and `observe`
-    // refuses to re-evaluate a breached ledger anyway.
-    let mut verdict = crate::risk::Verdict::Clear;
+    // Resolve every valuation before mutating the risk ledger. A span is one
+    // unit of policy evidence: consuming one extreme and silently skipping the
+    // other would publish a judgement over a path the venue could not value.
+    let mut readings = Vec::new();
     for (px, ts) in span.map(|span| span.in_time_order()).unwrap_or_default() {
-        let Some(equity) =
+        let Some(extreme_equity) =
             engine.valuation_at(&currency, &[(mogwai_protocol::Symbol::clone(symbol), px)])
         else {
-            continue;
+            tracing::warn!(
+                account = %account_state.account_id.as_str(),
+                %currency,
+                symbol = %symbol,
+                "cannot value a price extreme in this account's policy currency; risk is not enforced this pass",
+            );
+            return (emitted, originated, false);
         };
-        if let crate::risk::Verdict::Breached(breach) = ledger.observe(equity, ts) {
+        readings.push((extreme_equity, ts));
+    }
+
+    // The span's extremes first, in time order, then the close. The first
+    // breach remains the action, but the close is still observed so a lock's
+    // peak ratchet agrees with the last ledger reading.
+    let mut verdict = crate::risk::Verdict::Clear;
+    for (extreme_equity, ts) in readings {
+        if let crate::risk::Verdict::Breached(breach) = ledger.observe(extreme_equity, ts) {
             verdict = crate::risk::Verdict::Breached(breach);
             break;
         }
     }
+    let closing_verdict = ledger.observe(equity, to_ns);
     if verdict == crate::risk::Verdict::Clear {
-        verdict = ledger.observe(equity, to_ns);
+        verdict = closing_verdict;
     }
     drop(ledger);
     let crate::risk::Verdict::Breached(breach) = verdict else {
@@ -1588,7 +1602,11 @@ mod tests {
 
     /// The account for the tick-resolution tests: long one MNQ at 21,000 under
     /// a trailing drawdown, on a venue whose engine already holds the position.
-    async fn policed_account(run: &Arc<crate::run::Run>, amount: u64) -> Arc<crate::run::Account> {
+    async fn policed_account_with_action(
+        run: &Arc<crate::run::Run>,
+        amount: u64,
+        action: mogwai_protocol::risk::BreachAction,
+    ) -> Arc<crate::run::Account> {
         let account = AccountId::parse("RISK-001").unwrap();
         run.open_account(
             &account,
@@ -1598,7 +1616,7 @@ mod tests {
                     amount: Decimal::from(amount),
                     basis: mogwai_protocol::risk::TrailingBasis::PeakEquity,
                     lock_at_equity: None,
-                    on_breach: mogwai_protocol::risk::BreachAction::Terminate,
+                    on_breach: action,
                 }),
                 daily_loss_limit: None,
                 reset_minute_utc: 0,
@@ -1610,6 +1628,11 @@ mod tests {
         let account_state = run.account(&account);
         *account_state.engine.lock().await = engine_with_position();
         account_state
+    }
+
+    async fn policed_account(run: &Arc<crate::run::Run>, amount: u64) -> Arc<crate::run::Account> {
+        policed_account_with_action(run, amount, mogwai_protocol::risk::BreachAction::Terminate)
+            .await
     }
 
     /// The gap this closes. A spike that opened and closed entirely between two
@@ -1711,6 +1734,101 @@ mod tests {
         assert!(
             account_state.risk.lock().unwrap().is_locked(),
             "a terminating breach locks the account"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lock_breach_still_observes_the_closing_equity() {
+        let run = crate::run::test_run();
+        let account_state = policed_account_with_action(
+            &run,
+            500,
+            mogwai_protocol::risk::BreachAction::LockUntilReset,
+        )
+        .await;
+        let mut engine = account_state.engine.lock().await;
+        let mut events = Vec::new();
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        engine.mark(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_200),
+            )],
+            10,
+        );
+        let span = crate::extremes::PriceSpan {
+            high_px: Decimal::from(21_200),
+            high_ns: 9,
+            low_px: Decimal::from(20_600),
+            low_ns: 5,
+        };
+        let (_, _, terminated) = enforce_policy(
+            &account_state,
+            &mut engine,
+            &mut events,
+            &symbol,
+            Some(span),
+            10,
+            0,
+            0,
+        );
+        assert!(!terminated, "a lock breach does not terminate the account");
+        let state = account_state
+            .risk
+            .lock()
+            .unwrap()
+            .state(engine.valuation_in("USD").expect("valuable"));
+        assert_eq!(
+            state.peak_equity,
+            Decimal::from(10_400),
+            "the close ratchets the peak even after the earlier reading locks"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_unvaluable_extreme_refuses_the_whole_policy_span() {
+        let run = crate::run::test_run();
+        let account_state = policed_account(&run, 500).await;
+        let mut engine = account_state.engine.lock().await;
+        let mut events = Vec::new();
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        engine.mark(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_000),
+            )],
+            10,
+        );
+        let before = account_state
+            .risk
+            .lock()
+            .unwrap()
+            .state(engine.valuation_in("USD").expect("valuable"));
+        let span = crate::extremes::PriceSpan {
+            high_px: Decimal::MAX,
+            high_ns: 9,
+            low_px: Decimal::from(21_100),
+            low_ns: 5,
+        };
+        let (_, _, terminated) = enforce_policy(
+            &account_state,
+            &mut engine,
+            &mut events,
+            &symbol,
+            Some(span),
+            10,
+            0,
+            0,
+        );
+        assert!(!terminated);
+        let after = account_state
+            .risk
+            .lock()
+            .unwrap()
+            .state(engine.valuation_in("USD").expect("valuable"));
+        assert_eq!(
+            after.peak_equity, before.peak_equity,
+            "no reading from a partly unvaluable span may enter the ledger"
         );
     }
 

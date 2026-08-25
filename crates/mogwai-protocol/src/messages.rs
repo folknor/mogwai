@@ -1809,8 +1809,9 @@ pub enum VenueMessage {
     HistoryRejected {
         request_id: String,
         reason: String,
-        /// Whether asking again could succeed - a capacity refusal can, a
-        /// malformed window cannot.
+        /// Whether asking again could succeed. A venue-owned synthesis failure
+        /// may; a malformed request or a river cap already spent for process
+        /// life cannot.
         retryable: bool,
     },
     AccountState(AccountState),

@@ -146,6 +146,8 @@ impl MarketReadingCache {
             return cached.reading;
         }
         let resident = vol.and_then(|window| {
+            // This must stay the same budget `read_market` passes to the tape
+            // walk. The window may answer only where that walk would answer.
             window.read(
                 bucket_ns.saturating_sub(VOL_WINDOW_NS),
                 bucket_ns,

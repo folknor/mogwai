@@ -79,8 +79,9 @@
 //! origin, sweep, horizon, order count and stride, same ten cells at the same
 //! offsets, both sides still participating at the nearest rung, a majority of
 //! the nearest rung still filling, and the pathwise `unbanded >= banded`
-//! ordering intact at every rung. The banded half also remains byte-identical
-//! to the unbanded half, for the resolution reason set out below.
+//! ordering intact at every rung. The fill-outcome fields remain identical
+//! between scenarios for the resolution reason set out below; the direct
+//! trigger-offset witness now distinguishes them.
 //!
 //! # Why the committed artifact was re-blessed before that
 //!
@@ -125,12 +126,12 @@
 //! moved, not because fill timing regressed - the banded cells are now measured
 //! under a band that tracks volatility instead of one pinned to its ceiling.
 //!
-//! Read the re-blessed artifact before trusting its banded half. At `0.005` the
-//! five banded cells came out byte-identical to the five unbanded ones - same
-//! fill counts, same latency vectors, same pass counts. That is not a bug in the
-//! harness and it does not violate the `unbanded >= banded` property asserted
-//! below (equality satisfies it), but it does mean the banded half currently
-//! certifies only that the band pipeline runs, not that the band bites.
+//! At `0.005` the five banded cells have the same fill counts, latency vectors
+//! and pass counts as the five unbanded ones. The artifact therefore records
+//! the drawn trigger offset for every order as well: the zero-width cells must
+//! contain only zeroes and the shipped-band cells must contain a non-zero draw.
+//! That direct witness makes the band gate bite before one-second sweep cadence
+//! can quantize its effect away.
 //!
 //! The cause is resolution, not calibration. Latency here is quantized to
 //! `SWEEP_INTERVAL_NS`, one second, and one second of raw-fill tape carries
@@ -141,9 +142,9 @@
 //! because it was clamp-saturated at 200 ticks, which is precisely the state the
 //! re-calibration removed.
 //!
-//! So the two knobs that would restore discrimination are a finer
-//! `SWEEP_INTERVAL_NS` and a tighter offset ladder, both of which cost runtime
-//! and neither of which is taken here. `notes/todo.md` carries it as owed work.
+//! A finer `SWEEP_INTERVAL_NS` or tighter offset ladder would make fill latency
+//! itself discriminate, but neither is needed to certify the draw and both add
+//! runtime.
 //!
 //! # Why the coverage is smaller than the print-layer harness's
 //!
@@ -242,6 +243,10 @@ struct Cell {
     censored: usize,
     buy_filled: usize,
     sell_filled: usize,
+    /// The drawn trigger's distance from the stated limit, in price ticks, in
+    /// acceptance order. Unlike one-second fill latency, this observes the
+    /// band before sweep cadence can quantize its effect away.
+    trigger_offset_ticks: Vec<u32>,
     latency_ns: Vec<u64>,
     passes: Vec<u64>,
 }
@@ -281,6 +286,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
     let increment = def.price_increment;
     let mut meta = HashMap::new();
     let mut samples: HashMap<u32, Vec<(u64, u64, Side)>> = HashMap::new();
+    let mut trigger_offsets: HashMap<u32, Vec<u32>> = HashMap::new();
     for ts in (ORIGIN..=ORIGIN + HORIZON_NS).step_by(SWEEP_INTERVAL_NS as usize) {
         let i = ((ts - ORIGIN) / ACCEPT_STRIDE_NS) as usize;
         if i < total {
@@ -331,7 +337,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                 },
             );
             let order = SubmitOrder {
-                client_order_id: id,
+                client_order_id: id.clone(),
                 symbol: SYMBOL.into(),
                 position_id: None,
                 side,
@@ -359,6 +365,19 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             );
             let submitted = engine.process_with_market(Command::SubmitOrder(order), ts, reading);
             record_fills(&submitted, &meta, &mut samples);
+            let trigger = engine
+                .pending_scans()
+                .into_iter()
+                .find(|scan| scan.client_order_id == id)
+                .expect("a non-marketable golden limit rests with a scan trigger");
+            let offset_ticks_drawn = ((trigger.px - price).abs() / increment)
+                .to_string()
+                .parse::<u32>()
+                .expect("a band trigger is an integer number of ticks away");
+            trigger_offsets
+                .entry(offset_ticks)
+                .or_default()
+                .push(offset_ticks_drawn);
         }
         let scans = engine.pending_scans();
         if scans.is_empty() {
@@ -400,6 +419,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                     .iter()
                     .filter(|(_, _, side)| *side == Side::Sell)
                     .count(),
+                trigger_offset_ticks: trigger_offsets.remove(&offset_ticks).unwrap_or_default(),
                 latency_ns: values.iter().map(|(latency, _, _)| *latency).collect(),
                 passes: values.iter().map(|(_, passes, _)| *passes).collect(),
             }
@@ -448,7 +468,7 @@ fn render() -> String {
         profiles,
     );
     let golden = Golden {
-        schema: 2,
+        schema: 3,
         symbol: SYMBOL,
         data_origin_ns: ORIGIN,
         sweep_interval_ns: SWEEP_INTERVAL_NS,
@@ -473,6 +493,10 @@ fn render() -> String {
 fn assert_shape(rendered: &str) {
     let golden: serde_json::Value = serde_json::from_str(rendered).expect("rendered JSON");
     let cells = golden["cells"].as_array().expect("cells array");
+    assert_eq!(
+        golden["schema"], 3,
+        "the renderer and schema must move together"
+    );
     assert_eq!(cells.len(), 2 * OFFSETS.len());
     for (index, cell) in cells.iter().enumerate() {
         let expected_mult = if index < OFFSETS.len() {
@@ -497,7 +521,32 @@ fn assert_shape(rendered: &str) {
             cell["passes"].as_array().expect("passes").len(),
             filled as usize
         );
+        assert_eq!(
+            cell["trigger_offset_ticks"]
+                .as_array()
+                .expect("trigger offsets")
+                .len(),
+            samples as usize
+        );
     }
+    let unbanded_offsets = cells[..OFFSETS.len()].iter().flat_map(|cell| {
+        cell["trigger_offset_ticks"]
+            .as_array()
+            .expect("trigger offsets")
+    });
+    assert!(
+        unbanded_offsets.into_iter().all(|offset| offset == 0),
+        "the zero-width scenario must draw only zero-tick offsets"
+    );
+    let banded_offsets = cells[OFFSETS.len()..].iter().flat_map(|cell| {
+        cell["trigger_offset_ticks"]
+            .as_array()
+            .expect("trigger offsets")
+    });
+    assert!(
+        banded_offsets.into_iter().any(|offset| offset != 0),
+        "the shipped band must move at least one trigger in the golden population"
+    );
     // The nearest cell of each scenario: both predicate directions must
     // participate, and a majority of the sample must fill. "At least one fill"
     // would pass for a build that filled a single order or only buys; an
@@ -579,7 +628,7 @@ fn describe_mismatch(rendered: &str, expected: &str) -> String {
                 );
             }
         }
-        for field in ["latency_ns", "passes"] {
+        for field in ["trigger_offset_ticks", "latency_ns", "passes"] {
             let new_values = new_cell[field].as_array().expect("sample vector");
             let old_values = old_cell[field].as_array().map_or(&[][..], Vec::as_slice);
             if let Some((at, (new_value, old_value))) = new_values

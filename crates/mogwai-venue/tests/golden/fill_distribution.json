@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "symbol": "BTCUSDT",
   "data_origin_ns": 3600000000000,
   "sweep_interval_ns": 1000000000,
@@ -15,6 +15,13 @@
       "censored": 1,
       "buy_filled": 2,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
       "latency_ns": [
         1000000000,
         2000000000,
@@ -36,6 +43,13 @@
       "censored": 0,
       "buy_filled": 2,
       "sell_filled": 3,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -59,6 +73,13 @@
       "censored": 0,
       "buy_filled": 3,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -82,6 +103,13 @@
       "censored": 1,
       "buy_filled": 1,
       "sell_filled": 3,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -103,6 +131,13 @@
       "censored": 1,
       "buy_filled": 2,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
       "latency_ns": [
         3000000000,
         6000000000,
@@ -124,6 +159,13 @@
       "censored": 1,
       "buy_filled": 2,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        0,
+        0,
+        1,
+        2,
+        1
+      ],
       "latency_ns": [
         1000000000,
         2000000000,
@@ -145,6 +187,13 @@
       "censored": 0,
       "buy_filled": 2,
       "sell_filled": 3,
+      "trigger_offset_ticks": [
+        2,
+        3,
+        1,
+        1,
+        1
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -168,6 +217,13 @@
       "censored": 0,
       "buy_filled": 3,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        1,
+        3,
+        3,
+        3,
+        3
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -191,6 +247,13 @@
       "censored": 1,
       "buy_filled": 1,
       "sell_filled": 3,
+      "trigger_offset_ticks": [
+        2,
+        1,
+        1,
+        0,
+        3
+      ],
       "latency_ns": [
         1000000000,
         1000000000,
@@ -212,6 +275,13 @@
       "censored": 1,
       "buy_filled": 2,
       "sell_filled": 2,
+      "trigger_offset_ticks": [
+        2,
+        2,
+        3,
+        1,
+        0
+      ],
       "latency_ns": [
         3000000000,
         6000000000,
