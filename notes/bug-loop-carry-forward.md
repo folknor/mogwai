@@ -6,9 +6,13 @@ the close pass over the `notes/bugs-venue-mechanics.md` arc, which reviewed the
 whole two-commit arc and closed it; the record is at the bottom. That document
 is deleted: every finding in it is closed, and the two rewrites it proposed are
 refused with reasons recorded below rather than deferred. The bugs-engine arc
-below it is closed and judged sound. Round 1 of `notes/bugs-venue-serving.md`
-has landed on top of that; its findings 1 through 4 are closed and removed from
-that document, and 5 through 7 are untouched and owed to a later round.
+below it is closed and judged sound. Both rounds of
+`notes/bugs-venue-serving.md` are closed, and the exhausted document is
+removed. Round 2's own cold review found one regression the round had
+introduced - the admission tail's move into `on_upgrade` broke handshake
+linearization while closing a guard-scope hole - and the fix-and-commit pass
+settled it so both properties hold; the record is in the round-2 section
+below.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -298,6 +302,91 @@ that document, and 5 through 7 are untouched and owed to a later round.
   unresolved-request-id outcome; it is argued (the peer is not reading) and now
   stated in `finish_history_page`'s doc, but it is not tested and nobody has
   asked whether a lane can be momentarily saturated by a peer that is reading.
+
+## Machinery and decisions from bugs-venue-serving round 2
+
+- Completion is a latched terminal state. `Run::complete` uses
+  `watch::Sender::send_replace`, because `send` discards the value when no
+  receiver exists. The regression drives the real `Run` with zero receivers
+  and subscribes afterwards; its bite against `send` reaches the terminal-state
+  equality, not the preceding timeout assertion.
+- **The admission tail owes two properties at once, and the round's first fix
+  bought one by breaking the other.** Moving the tail into axum's `on_upgrade`
+  callback did make the work cancellation-proof, and it also returned the 101
+  with the commit still pending - so a client's second leg could reach
+  `reserve` while its own first admission was still `pending` and be answered
+  `409 Busy`. That is a regression against the supported two-socket
+  shared-callsign topology and against handshake linearization generally. The
+  shape that holds both: `ws::admit` spawns the tail as its own task and awaits
+  the `JoinHandle` before the upgrade response is built. Ownership sits with the
+  task doing the work, so a dropped HTTP future detaches rather than cancels
+  and the yielded `Passenger` is dropped by the runtime with its guards intact;
+  and the 101 still cannot be observed before the commit. Do not move the await
+  and do not remove the spawn - each alone is a defect.
+- `ws_upgrade` is now a thin wrapper over `ws::admit`, which returns
+  `Result<Passenger, Response>`. That split exists so the commit completes
+  inside a function that returns, which is also the only seam a test can hold:
+  `admit` returning IS the instant the 101 becomes available.
+- `ConnectionRegistry::commit` returns `Option<Committed>`. Its missing-entry
+  and stale arms are still unreachable while a live reservation exists, but
+  they no longer answer a `Committed` that installed nothing - a caller cannot
+  tell that apart from "installed, displacing nobody", and acting on it builds
+  an `Attach` for a connection the registry never had. Both arms log at error
+  and answer `None`; `commit_admission` passes it through, and the tail answers
+  a `503`. Both still set `reservation.committed`, because the pending they
+  found is not theirs to roll back.
+- The tail can now fail in two ways before the 101 and both are answered rather
+  than absorbed: a `JoinError` from a panicked tail is a `500`, and the
+  registry invariant is the `503` above. Both leave nothing stranded, because
+  everything the tail held is dropped as its task unwinds.
+- No socket regression can force cancellation of axum's internal HTTP handler
+  between the commit and response without a production scheduling hook. The
+  earlier abandoned-upgrade test records the same limitation, so the ownership
+  half of the fix is still gated by construction rather than by a test. The
+  linearization half is gated by
+  `a_second_leg_is_not_refused_by_the_first_legs_own_admission`.
+- The run clock and boat clock now share `config::delivery_clock`, the one
+  owner of the zero-speed substitution. This changes no clock value, and it is
+  gated by `a_zero_delivery_speed_still_builds_a_wall_rate_clock`, which bites
+  on both halves separately: dropping the substitution in `delivery_clock`
+  fires the unpaced-axis assertion, and letting `build_run_clock` spell the
+  rule itself fires the run-clock one. The hazard the gate names is that a
+  speed-0 `SimClock` answers `u64::MAX` from `wall_duration`, so a forgotten
+  substitution wedges every deadline on the venue and reports nothing.
+- A terminal tape fault now takes precedence over a simultaneous drain timeout.
+  The drain result is retained until the terminal fault latch has been read.
+  Untested: reaching it wants a venue that faults and then fails to drain,
+  which needs the socket-backed lifecycle rig rather than a unit test.
+- **The divergence control route stays unauthenticated, and the convention is
+  now written where an operator reads it** - `docs/havoc.md`, beside the
+  control-post request shape - rather than only in a source comment. It names
+  what an unauthenticated post can reach on somebody else's ledger and which
+  other behaviours lose their premise if a non-cooperating party is ever put on
+  the port.
+- **Detached history synthesis is checked against the code, not the argument,
+  and the refusal stands.** Both permits are moved into the `spawn_blocking`
+  closure and dropped by it after the walk and the serialization; the outer
+  spawned wrapper holds neither across an await, and there is no await between
+  acquiring the synthesis slot and moving it in. Dropping the wrapper's handle
+  does not cancel `spawn_blocking`, so the guard is owned by the task doing the
+  work in the guard-scope family's sense. What remains is the bound already
+  recorded: dead connections can occupy history slots until their synthesis
+  finishes.
+- No tape protocol bump is owed, verified rather than assumed. No file in
+  `mogwai-data`, `analysis`, or the committed fingerprint changed, and the
+  serving edits do not reach a generator constant, arrival clock, seed
+  derivation, fill-band draw or tape origin. `TAPE_PROTOCOL_VERSION` is 24.
+- **A flat test count is a finding, not a footnote.** The round-2 fix pass
+  reported work across three findings and the gate's count did not move by one,
+  because its only test edit rewrote an existing regression in place. Findings
+  6 and 7 had shipped with no coverage at all. Two tests were added here for
+  them. Read the count after any fix pass and ask what it should have moved by.
+- Least examined by this round: `serve_until_drained`'s fault-precedence path,
+  which is argued and unexercised; and whether an eviction that happens while
+  the tail's client vanishes mid-handshake leaves an incumbent closed for a
+  successor that never arrives. The second is unchanged by this round and is
+  inherent - the client did disconnect - but nobody has stated it as a
+  consumer-visible behaviour anywhere durable.
 
 ## Machinery agents may build on and must not break, from the bugs-engine arc
 

@@ -268,11 +268,7 @@ impl Boatyard {
             })
             .map_err(BoardRefusal::Placement);
         let boat = cursor.map(|cursor| {
-            let sim = SimClock {
-                sim_epoch_ns: self.origin_ns,
-                wall_anchor_ns: now_ns(),
-                speed: if speed == 0.0 { 1.0 } else { speed },
-            };
+            let sim = crate::config::delivery_clock(self.origin_ns, now_ns(), speed);
             let extremes = Arc::new(crate::extremes::PriceExtremes::default());
             let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(self.origin_ns));
             let (tape, worker) = Tape::start(

@@ -2124,21 +2124,85 @@ pub(crate) fn sim_duration_from_millis(ms: u64) -> u64 {
     ms.saturating_mul(1_000_000)
 }
 
+/// Build the clock behind a delivery speed, and the one owner of the zero-speed
+/// substitution.
+///
+/// Zero means unpaced delivery, and the clock behind it still advances its
+/// simulated axis at wall rate. The substitution lives here alone because the
+/// failure of forgetting it is silent and total: `SimClock::wall_duration`
+/// answers `u64::MAX` - around 584 years - for a speed-0 clock, so a reader
+/// that built one by hand would wedge the exec pump, the act delay, the
+/// passenger duration timer and the deadline task at once with no error
+/// anywhere. Both `build_run_clock` and `Boatyard::place` come through here;
+/// a third caller must too, rather than spelling the rule again.
+pub(crate) fn delivery_clock(sim_epoch_ns: u64, wall_anchor_ns: u64, speed: f64) -> SimClock {
+    SimClock {
+        sim_epoch_ns,
+        wall_anchor_ns,
+        speed: if speed == 0.0 { 1.0 } else { speed },
+    }
+}
+
 /// The run's clock. The epoch is fixed by config alone, while the wall anchor
 /// decides only when a tick is delivered. `speed == 0.0` is unpaced delivery,
 /// but the axis advances at wall rate for deadlines, sweeps and volatility.
 pub(crate) fn build_run_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result<SimClock> {
     validate_speed(cfg)?;
-    Ok(SimClock {
-        sim_epoch_ns: source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns),
-        wall_anchor_ns: boot_wall_ns,
-        speed: if cfg.speed == 0.0 { 1.0 } else { cfg.speed },
-    })
+    Ok(delivery_clock(
+        source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns),
+        boot_wall_ns,
+        cfg.speed,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The zero-speed substitution, pinned at its single owner and through the
+    /// run clock that consumes it.
+    ///
+    /// This is the doctrine's "one quantity in two places" shape: the boat
+    /// clock and the run clock both encoded the rule until they were folded
+    /// into `delivery_clock`, and nothing asserted the two spellings agreed.
+    /// The assertion that matters is the second one - a speed-0 clock whose
+    /// substitution was skipped answers `u64::MAX` from `wall_duration` and
+    /// stalls every deadline on the venue rather than reporting anything.
+    #[test]
+    fn a_zero_delivery_speed_still_builds_a_wall_rate_clock() {
+        let unpaced = delivery_clock(700, 900, 0.0);
+        assert_eq!(unpaced.sim_epoch_ns, 700);
+        assert_eq!(unpaced.wall_anchor_ns, 900);
+        assert!(
+            (unpaced.speed - 1.0).abs() < f64::EPSILON,
+            "an unpaced boat's axis must still advance at wall rate, got {}",
+            unpaced.speed
+        );
+        assert_eq!(
+            unpaced.wall_duration(1_000_000),
+            std::time::Duration::from_millis(1),
+            "a clock that kept speed 0 answers a 584-year wall duration and wedges every \
+             deadline on the venue"
+        );
+
+        let paced = delivery_clock(700, 900, 4.0);
+        assert!(
+            (paced.speed - 4.0).abs() < f64::EPSILON,
+            "a stated speed is carried through unchanged, got {}",
+            paced.speed
+        );
+
+        let cfg = Config {
+            speed: 0.0,
+            ..Config::default()
+        };
+        let run_clock = build_run_clock(&cfg, 900).expect("speed 0 is a legal configuration");
+        assert!(
+            (run_clock.speed - 1.0).abs() < f64::EPSILON,
+            "the run clock must take the same substitution, got {}",
+            run_clock.speed
+        );
+    }
 
     fn with_account(id: &str) -> Config {
         Config {

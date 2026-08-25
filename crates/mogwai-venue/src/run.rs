@@ -1621,20 +1621,25 @@ impl Run {
     /// one sends on a channel: doing that under the registry lock would make
     /// every consumer's teardown cost a registry acquisition. The caller closes
     /// them once this has returned.
+    ///
+    /// `None` carries the registry's own invariant failure through unchanged.
+    /// It cannot happen while the reservation is live, and the caller answers it
+    /// rather than being handed a guard for a connection that was never
+    /// installed - see `ConnectionRegistry::commit`.
     pub(crate) fn commit_admission(
         &self,
         reservation: &mut crate::registry::Reservation,
         callsign: Option<&str>,
         ride: Option<crate::boatyard::BoatKey>,
         claimed: bool,
-    ) -> (Attach, crate::registry::Committed) {
-        let committed = self.registry.commit(reservation, callsign, ride, claimed);
+    ) -> Option<(Attach, crate::registry::Committed)> {
+        let committed = self.registry.commit(reservation, callsign, ride, claimed)?;
         let attach = Attach {
             registry: Arc::clone(&self.registry),
             account_id: reservation.account_id().to_owned(),
             connection_id: committed.connection_id,
         };
-        (attach, committed)
+        Some((attach, committed))
     }
 
     /// Attach an account to the river a socket has just bound, and put it in a
@@ -1940,13 +1945,8 @@ impl Run {
     /// Announces the one planned terminal transition.  Receivers get the
     /// simulated instant and elapsed duration before the listener is drained.
     pub(crate) fn complete(&self, sim_now_ns: u64, elapsed_ns: u64) {
-        if self
-            .complete_tx
-            .send(Some((sim_now_ns, elapsed_ns)))
-            .is_err()
-        {
-            tracing::debug!("run completed after all websocket receivers closed");
-        }
+        self.complete_tx
+            .send_replace(Some((sim_now_ns, elapsed_ns)));
     }
 
     pub(crate) fn completion(&self) -> watch::Receiver<Option<(u64, u64)>> {
@@ -2286,10 +2286,10 @@ pub(crate) fn admit_for_test(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    pub(super) fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
+    pub(crate) fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
         run_with_reset(started_ns, warmup_ns, run_duration_ns, false)
     }
 
@@ -2370,8 +2370,9 @@ mod tests {
             .unwrap();
         let fresh = run.claim_account(&account, true, Some("new"), resetting);
         assert!(!Arc::ptr_eq(&old, &fresh), "the ledger itself was replaced");
-        let (attach, committed) =
-            run.commit_admission(&mut reservation, Some("new"), Some(key.clone()), true);
+        let (attach, committed) = run
+            .commit_admission(&mut reservation, Some("new"), Some(key.clone()), true)
+            .expect("a live reservation commits");
 
         let (lanes, _rx) = ExecLanes::detached_as(committed.connection_id);
         run.bind_lanes(lanes, account.as_str(), Some("new"));
@@ -2753,6 +2754,7 @@ mod tests {
             )
             .expect("nothing else is being admitted");
         run.commit_admission(&mut reservation, callsign, ride, true)
+            .expect("a live reservation commits")
     }
 
     /// Two passengers of one ledger may share one boat, and the first to leave

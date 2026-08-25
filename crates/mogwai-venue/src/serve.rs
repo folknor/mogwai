@@ -491,7 +491,7 @@ async fn serve_async(
     };
     let terminal_fault = Arc::new(std::sync::Mutex::new(None));
     let terminal_fault_for_shutdown = Arc::clone(&terminal_fault);
-    serve_until_drained(listener, app, passengers, planned_completion, async move {
+    let drain = serve_until_drained(listener, app, passengers, planned_completion, async move {
         tokio::select! {
             // A signal means the launcher ended the run, not that its declared
             // simulated duration completed. Do not publish a false RunComplete.
@@ -504,13 +504,14 @@ async fn serve_async(
             },
         }
     })
-    .await?;
+    .await;
     if let Some(fault) = *terminal_fault
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
     {
         anyhow::bail!("tape source fault: {}", describe_fault(fault));
     }
+    drain?;
     Ok(())
 }
 

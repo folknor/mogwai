@@ -48,6 +48,15 @@
 //! costs a live consumer nothing, where previously a placement failure could
 //! arrive after the eviction.
 //!
+//! Phase three runs in a task of its own, spawned by `ws::admit` and awaited
+//! before the upgrade response is built. Both halves are load-bearing and each
+//! alone is a defect. The task owns the reservation, the ticket and the
+//! connection guard, so an HTTP future dropped when a client goes away cannot
+//! cancel a handoff that has already evicted somebody; and awaiting it before
+//! the 101 is what keeps the handshake a linearization point, so a client
+//! opening its second leg the instant the first completes never sees its own
+//! account still reserved and answered `Busy`.
+//!
 //! # The ledger identity boundary
 //!
 //! A resetting admission replaces the account's ledger, and every check the
@@ -218,10 +227,8 @@ impl AccountEntry {
     fn settle_attendance(&mut self) {
         if self.attended() {
             self.frozen_since = None;
-        } else {
-            if self.frozen_since.is_none() {
-                self.frozen_since = Some(Instant::now());
-            }
+        } else if self.frozen_since.is_none() {
+            self.frozen_since = Some(Instant::now());
         }
     }
 }
@@ -432,25 +439,39 @@ impl ConnectionRegistry {
     /// opinion, and the default account exists for exactly that case. Evicting
     /// there would break the shape it serves, since one consumer opening two
     /// sockets on two symbols names no account on either and would evict itself.
+    ///
+    /// `None` means the exclusivity the reservation promises did not hold, and
+    /// it is the enforcement of an invariant rather than a refusal any request
+    /// can provoke: both arms that answer it are unreachable while a live
+    /// reservation exists. They answer `None` rather than an empty `Committed`
+    /// because a caller cannot distinguish "installed, displacing nobody" from
+    /// "installed nothing at all", and acting on the second as though it were
+    /// the first is what binds lanes the registry will never deliver to. An
+    /// unreachable arm that returns a success is a claim nothing checks; one
+    /// that returns `None` is a claim the caller has to answer.
     pub(crate) fn commit(
         &self,
         reservation: &mut Reservation,
         callsign: Option<&str>,
         ride: Option<BoatKey>,
         evicts: bool,
-    ) -> Committed {
+    ) -> Option<Committed> {
         let connection_id = self.next_connection.fetch_add(1, Ordering::Relaxed);
         let mut entries = self.locked();
         let Some(entry) = entries.get_mut(&reservation.account_id) else {
             // The account cannot vanish while a reservation is outstanding, so
-            // this is unreachable; treated as a lost commit rather than a panic
-            // because the caller is mid-upgrade and a refusal is recoverable.
+            // this is unreachable. It answers `None` rather than a `Committed`
+            // that installed nothing, because the caller cannot tell those
+            // apart: it would build an `Attach` for a connection the registry
+            // never had, bind lanes nothing delivers to, and ride a boat no
+            // sweeper can find. `committed` is still set, because the pending
+            // this reservation held is not here to roll back.
+            tracing::error!(
+                account = %reservation.account_id,
+                "admission commit found no account entry, which a live reservation forbids",
+            );
             reservation.committed = true;
-            return Committed {
-                displaced: Vec::new(),
-                connection_id,
-                resumed_from_freeze: false,
-            };
+            return None;
         };
         // Revalidate under the lock. The reservation is exclusive, so nothing
         // should have moved, and this is cheap enough to assert rather than
@@ -460,12 +481,15 @@ impl ConnectionRegistry {
         let stale = entry.pending.as_ref().map(|pending| pending.id) != Some(reservation.id)
             || entry.incarnation != reservation.incarnation;
         if stale {
+            // Same shape and the same answer: the pending slot belongs to
+            // somebody else now, so this reservation must neither install a
+            // connection nor roll back a reservation it does not own.
+            tracing::error!(
+                account = %reservation.account_id,
+                "admission commit found its reservation displaced, which exclusivity forbids",
+            );
             reservation.committed = true;
-            return Committed {
-                displaced: Vec::new(),
-                connection_id,
-                resumed_from_freeze: false,
-            };
+            return None;
         }
         // Sampled before this admission is installed, because installing it is
         // what makes the account attended.
@@ -535,11 +559,11 @@ impl ConnectionRegistry {
         });
         entry.handoffs += 1;
         entry.settle_attendance();
-        Committed {
+        Some(Committed {
             displaced,
             connection_id,
             resumed_from_freeze,
-        }
+        })
     }
 
     /// The connection reaches its reading boundary: bind its lanes, and retire
@@ -618,8 +642,9 @@ impl ConnectionRegistry {
             .collect()
     }
 
-    /// Whether this account is riding `key`, derived from its reading
-    /// connections rather than stored.
+    /// Whether this account holds a ride on `key`, derived from committed and
+    /// reading connections rather than stored. A committed ride counts because
+    /// the continuity handoff owns it before delivery begins.
     pub(crate) fn is_seated_on(&self, account_id: &str, key: &BoatKey) -> bool {
         let entries = self.locked();
         entries.get(account_id).is_some_and(|entry| {
@@ -819,7 +844,9 @@ mod tests {
     fn a_departed_ride_stops_refusing_a_new_cadence() {
         let registry = ConnectionRegistry::new();
         let mut first = registry.reserve("A", seat(), false, 1).unwrap();
-        let committed = registry.commit(&mut first, None, Some(ride(1.0)), true);
+        let committed = registry
+            .commit(&mut first, None, Some(ride(1.0)), true)
+            .expect("a live reservation commits");
         registry.release("A", committed.connection_id);
         assert!(registry.reserve("A", seat_at(2_000_000), false, 1).is_ok());
     }
@@ -899,10 +926,14 @@ mod tests {
         let mut first = registry.reserve("A", seat(), false, 1).unwrap();
         drop(registry.commit(&mut first, Some("leg"), None, true));
         let mut second = registry.reserve("A", seat(), false, 1).unwrap();
-        let committed = registry.commit(&mut second, Some("leg"), None, true);
+        let committed = registry
+            .commit(&mut second, Some("leg"), None, true)
+            .expect("a live reservation commits");
         assert!(committed.displaced.is_empty());
         let mut third = registry.reserve("A", seat(), false, 1).unwrap();
-        let committed = registry.commit(&mut third, Some("other"), None, true);
+        let committed = registry
+            .commit(&mut third, Some("other"), None, true)
+            .expect("a live reservation commits");
         // Neither incumbent had bound lanes, so nothing is handed back to
         // close; what matters is that they are no longer registered.
         assert!(committed.displaced.is_empty());

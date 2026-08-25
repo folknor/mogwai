@@ -148,6 +148,18 @@ successful post answers `202` with a JSON object whose `status` is `accepted`;
 report. A scenario driver never has to distinguish an empty body, prose and a
 debug rendering.
 
+The control plane is unauthenticated, and that is a convention the operator
+holds rather than a rule the venue enforces. Anyone who can reach the venue's
+port can post an arm naming any account, including one they never dialled: a
+fee surcharge on somebody else's ledger, a blackout on somebody else's view, a
+one-shot reject queued against somebody else's next submit. This is the same
+position an account id already occupies - it is a bearer token on a loopback
+venue - and the venue is written for a batch whose participants are all the
+operator's own agents. The consequence to hold on to is that putting a
+non-cooperating party on the same port removes a premise several other
+behaviours rest on, the pending-arm shed cap and the unordered application of
+concurrent arms among them.
+
 The control plane arms and never disarms. There is no clear: the route off an
 armed window is to re-arm it with a zero span, which is closed on every reader's
 clock, and it is scoped exactly like any other arm - naming an account lifts

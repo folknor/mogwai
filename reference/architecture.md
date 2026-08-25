@@ -104,6 +104,21 @@ Sampling the identity inside the reservation instead, or replacing the ledger
 after the commit, restores a window in which the check agrees with its own
 mutation.
 
+That whole tail - the ledger replacement, the commit, the displaced closes and
+the instrument registration - runs in a task of its own, spawned and then
+awaited before the upgrade response is built. Two properties have to hold at
+once and each one alone is a defect. The work is owned by the task doing it,
+because hyper drops the request future when a client goes away and a tail
+cancelled midway has already evicted somebody: a spawned task instead runs to
+completion, and the passenger it yields is dropped by the runtime when nobody
+takes it, releasing the attach, the ticket and the liveness guard in order. And
+the task is awaited before the 101, because the handshake is the consumer's
+only proof that its admission committed. The supported two-socket
+shared-callsign topology rests on that: a client opening its execution leg the
+instant its data leg upgrades must not find its own account still reserved and
+be answered a conflict. Returning the 101 with the tail still pending satisfies
+the first property and breaks the second.
+
 An unattended account freezes. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
 socket returning with the same id resumes it. This is a deliberate departure

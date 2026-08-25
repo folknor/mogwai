@@ -203,11 +203,11 @@ pub(crate) struct Passenger {
     /// never runs at all, so an upgrade that never reaches `handle_socket` still
     /// ends with nothing reading the account.
     pub(crate) attach: Option<crate::run::Attach>,
-    /// This passenger's claim on the process, taken in `ws_upgrade` before the
-    /// 101 is returned and dropped with the passenger, after the writer has
-    /// flushed its close.
+    /// This passenger's claim on the process, taken in `admit` before the 101 is
+    /// returned and dropped with the passenger, after the writer has flushed its
+    /// close.
     ///
-    /// Taken in the upgrade handler rather than at the top of `handle_socket`,
+    /// Taken in the admission rather than at the top of `handle_socket`,
     /// and the difference is a real window rather than tidiness. `handle_socket`
     /// runs in the task `on_upgrade` spawns, which is polled only AFTER hyper's
     /// connection future has already resolved at the 101 - so a guard taken
@@ -272,9 +272,38 @@ pub(crate) async fn ws_upgrade(
     Query(query): Query<SocketQuery>,
     State(state): State<AppState>,
 ) -> Response {
+    let passenger = match admit(state.clone(), query).await {
+        Ok(passenger) => passenger,
+        Err(refusal) => return refusal,
+    };
+    ws.max_message_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
+        .max_frame_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state, passenger))
+}
+
+/// Everything `/ws` decides, from the query to a fully admitted passenger, with
+/// a refusal response as the error.
+///
+/// Split out of `ws_upgrade` so the whole admission - including the commit -
+/// completes before the 101 is built, and so a test can hold the finished
+/// passenger and ask the registry what the upgrade already established. The
+/// handshake linearization the two-socket topology rests on is exactly the
+/// property that split states: when this returns `Ok`, the connection is
+/// committed.
+///
+/// The refusal is an `axum::Response` rather than a small error type because
+/// every one of them is already a status and a sentence written for the
+/// consumer, and there is exactly one per refused upgrade. Boxing it to satisfy
+/// the size lint would buy an allocation on a path that is about to open a
+/// socket or close a connection, and cost the refusals their one readable form.
+#[expect(
+    clippy::result_large_err,
+    reason = "one Response per refused upgrade, off any hot path"
+)]
+async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Response> {
     let symbol = match resolve_socket_symbol(query.symbol.as_deref(), &state.run.default_symbol) {
         Ok(symbol) => symbol,
-        Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
+        Err(body) => return Err((StatusCode::BAD_REQUEST, body).into_response()),
     };
     // Resolved before the instrument, because the instrument is registered on
     // this account's ledger. A malformed id is refused here rather than at
@@ -300,11 +329,11 @@ pub(crate) async fn ws_upgrade(
     if let Some(callsign) = query.callsign.as_deref()
         && let Err(reason) = mogwai_protocol::validate_callsign(callsign)
     {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             format!("callsign is not usable: {reason}"),
         )
-            .into_response();
+            .into_response());
     }
     let callsign = query.callsign.as_deref();
     // Nothing is claimed yet, and the order below is the whole point: every
@@ -319,11 +348,11 @@ pub(crate) async fn ws_upgrade(
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
             Ok(account_id) => (account_id, true),
             Err(error) => {
-                return (
+                return Err((
                     StatusCode::BAD_REQUEST,
                     format!("account id is not usable: {error}"),
                 )
-                    .into_response();
+                    .into_response());
             }
         },
         None => (state.run.default_account_id(), false),
@@ -338,7 +367,7 @@ pub(crate) async fn ws_upgrade(
     // claim returns, further down.
     let profile = match state.rivers.resolve_profile(&symbol) {
         Ok(profile) => profile,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => return Err((StatusCode::BAD_REQUEST, error.to_string()).into_response()),
     };
     // This account's funding, against the shape it is binding.
     //
@@ -374,14 +403,14 @@ pub(crate) async fn ws_upgrade(
             reset,
         )
     {
-        return (StatusCode::BAD_REQUEST, reason).into_response();
+        return Err((StatusCode::BAD_REQUEST, reason).into_response());
     }
     if !state
         .run
         .funded_in(&account_id, resetting, settlement)
         .await
     {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             format!(
                 "account {account} is not funded in {settlement}, which is what {symbol} settles \
@@ -389,15 +418,15 @@ pub(crate) async fn ws_upgrade(
                 account = account_id.as_str()
             ),
         )
-            .into_response();
+            .into_response());
     }
     let speed = query.speed.unwrap_or(state.cfg.speed);
     if !speed.is_finite() || speed < 0.0 {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             "speed must be finite and non-negative",
         )
-            .into_response();
+            .into_response());
     }
     // Resolved here, once, and then carried by the boat, the ticket and the
     // passenger: no serving path re-derives it, so none of them can reach water
@@ -410,7 +439,7 @@ pub(crate) async fn ws_upgrade(
         query.surge_children_mult.unwrap_or(1.0),
     ) {
         Ok(arm) => arm,
-        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+        Err(reason) => return Err((StatusCode::BAD_REQUEST, reason).into_response()),
     };
     let river = state.rivers.resolve_key(&profile, arm);
     // Phase one of the admission, and the reason the rest of this handler can
@@ -426,7 +455,7 @@ pub(crate) async fn ws_upgrade(
     // a boat.
     let speed_micros = match crate::boatyard::quantize_speed(speed) {
         Ok(speed_micros) => speed_micros,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => return Err((StatusCode::BAD_REQUEST, error.to_string()).into_response()),
     };
     let seat = crate::registry::Seat {
         river: river.clone(),
@@ -440,7 +469,7 @@ pub(crate) async fn ws_upgrade(
     ) {
         Ok(reservation) => reservation,
         Err(crate::registry::AdmissionRefusal::LedgerMoved) => {
-            return (
+            return Err((
                 StatusCode::CONFLICT,
                 format!(
                     "account {account} was reset while this upgrade was being decided, so its \
@@ -448,10 +477,10 @@ pub(crate) async fn ws_upgrade(
                     account = account_id.as_str()
                 ),
             )
-                .into_response();
+                .into_response());
         }
         Err(crate::registry::AdmissionRefusal::CadenceConflict(held)) => {
-            return (
+            return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
                     "account {account} is already seated on {symbol} at speed {held_speed}; \
@@ -461,17 +490,17 @@ pub(crate) async fn ws_upgrade(
                     marker = mogwai_protocol::control::CADENCE_CONFLICT_MARKER,
                 ),
             )
-                .into_response();
+                .into_response());
         }
         Err(crate::registry::AdmissionRefusal::Busy) => {
-            return (
+            return Err((
                 StatusCode::CONFLICT,
                 format!(
                     "account {account} has another connection being admitted; retry",
                     account = account_id.as_str()
                 ),
             )
-                .into_response();
+                .into_response());
         }
     };
     let ticket = match state
@@ -499,93 +528,149 @@ pub(crate) async fn ws_upgrade(
                 state
                     .run
                     .latch_materialize_fault(symbol.as_ref(), &failure.message);
-                return (
+                return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
                     format!(
                         "the venue could not materialize {symbol}, which its own config \
                          validated: {failure}. This run is faulted; see GET /health"
                     ),
                 )
-                    .into_response();
+                    .into_response());
             }
-            return (
+            return Err((
                 StatusCode::BAD_REQUEST,
                 format!("could not place boat for {symbol}: {failure}"),
             )
-                .into_response();
+                .into_response());
         }
     };
-    // The ledger side, and it happens before the commit deliberately. The
-    // reservation is still outstanding here, so no other admission can reserve
-    // across the replacement; the commit then advances the ledger identity in
-    // the same exclusive window. Together those two make the incarnation a real
-    // boundary rather than a check that agrees with its own mutation - see the
-    // module docs in `crate::registry`. Run this after the commit instead and a
-    // second socket can read the outgoing ledger, reserve the identity the
-    // commit already advanced to, and be admitted on checks nothing supports.
+    // Taken before the tail below, and therefore before the 101. See the field.
+    let alive = state.run.passenger_guard();
+    let callsign = query.callsign.clone();
+    let duration_ms = query.duration_ms;
+    // Kept behind, because the id itself moves into the tail and the two
+    // failure answers below have to name the account they could not admit.
+    let account_id_for_refusal = account_id.as_str().to_owned();
+    // Phase three, and how it runs matters as much as what it does. Two
+    // properties have to hold at once and each one alone is a defect.
     //
-    // Nothing below refuses, which is what makes the ordering safe: every
-    // fallible step is behind us, so the ledger cannot be discarded for a
-    // connection that then fails to arrive.
+    // It runs in a task of its own, because the work must be owned by the task
+    // that does it. Hyper drops this handler's future when the client goes
+    // away, and the tail evicts the incumbent, replaces a ledger and installs a
+    // connection; a future cancelled midway through that leaves an account
+    // claimed by nobody. A spawned task cannot be cancelled by the caller
+    // disappearing: it runs to completion, and the `Passenger` it yields is
+    // dropped by the runtime when nobody takes it, which releases the attach,
+    // the ticket and the liveness guard in the order `Passenger::drop` fixes.
     //
-    // `resetting` was evaluated once, above, and is handed to `claim_account`
-    // rather than re-derived, so this cannot decide to reset an account the
-    // funding check was taken against on the assumption that it would not.
-    let account_state = state
-        .run
-        .claim_account(&account_id, claimed, callsign, resetting);
-    // Phase three, and the sole linearization point of the whole upgrade. Every
-    // fallible step is behind us: the shape resolved, the account funded, the
-    // speed quantized, the arm normalized and the boat placed. So the commit
-    // installs this connection, selects whoever it displaces and takes the
-    // continuity handoff in one transaction under the registry lock.
-    //
-    // Nothing refuses after this point, which is the property the old ordering
-    // could not have. It evicted and then re-ran a cadence check against a
-    // ledger the eviction had just minted, so an upgrade losing that race
-    // refused a consumer whose incumbent it had already closed. There is no
-    // window here for that: the reservation held this account exclusively from
-    // before the placement, so no other upgrade can have moved the ledger
-    // underneath us.
-    let (attach, committed) = state.run.commit_admission(
-        &mut reservation,
-        callsign,
-        Some(ticket.boat().key()),
-        claimed,
-    );
-    // Outside the registry lock, deliberately: closing a lane sends on a
-    // channel, and the commit hands the displaced set out rather than closing
-    // it, so a send can never block while the registry mutex is held.
-    let displaced = state
-        .run
-        .close_displaced(account_id.as_str(), &committed.displaced);
-    if displaced > 0 {
-        tracing::info!(
-            account = %account_id.as_str(),
-            displaced,
-            reset = resetting,
-            "a new connection claimed an existing account",
-        );
+    // And it is awaited before the upgrade response is built, because the 101
+    // is the consumer's only proof that its admission committed. The supported
+    // two-socket shared-callsign topology depends on that: a client opening its
+    // second leg the instant the first handshake completes would otherwise find
+    // its own account still reserved and be answered a `409` by a connection it
+    // had already been told was admitted. Returning the 101 with the tail still
+    // pending is exactly that regression.
+    let tail = tokio::spawn(async move {
+        // The ledger side, and it happens before the commit deliberately. The
+        // reservation is still outstanding here, so no other admission can
+        // reserve across the replacement; the commit then advances the ledger
+        // identity in the same exclusive window, with no await between the two.
+        // Together those make the incarnation a real boundary rather than a
+        // check that agrees with its own mutation - see the module docs in
+        // `crate::registry`. Run this after the commit instead and a second
+        // socket can read the outgoing ledger, reserve the identity the commit
+        // already advanced to, and be admitted on checks nothing supports.
+        //
+        // Nothing below refuses, which is what makes the ordering safe: every
+        // fallible step is behind us, so the ledger cannot be discarded for a
+        // connection that then fails to arrive.
+        //
+        // `resetting` was evaluated once, above, and is handed to
+        // `claim_account` rather than re-derived, so this cannot decide to
+        // reset an account the funding check was taken against on the
+        // assumption that it would not.
+        let account_state =
+            state
+                .run
+                .claim_account(&account_id, claimed, callsign.as_deref(), resetting);
+        // The sole linearization point of the whole upgrade. Every fallible
+        // step is behind us: the shape resolved, the account funded, the speed
+        // quantized, the arm normalized and the boat placed. So the commit
+        // installs this connection, selects whoever it displaces and takes the
+        // continuity handoff in one transaction under the registry lock.
+        //
+        // Nothing refuses after this point, which is the property the old
+        // ordering could not have. It evicted and then re-ran a cadence check
+        // against a ledger the eviction had just minted, so an upgrade losing
+        // that race refused a consumer whose incumbent it had already closed.
+        // There is no window here for that: the reservation held this account
+        // exclusively from before the placement, so no other upgrade can have
+        // moved the ledger underneath us.
+        //
+        // The one thing it can answer that is not a success is the registry's
+        // own invariant failing, which a live reservation forbids. It is
+        // answered rather than papered over: a `Committed` that installed
+        // nothing would give this passenger an `Attach` for a connection the
+        // registry never had, lanes nothing delivers to and a ride no sweeper
+        // can find. The claim above has already run at that point, so a
+        // resetting admission leaves a fresh ledger with nobody on it - which
+        // is the correct outcome for an admission that did not happen, and
+        // still better than a socket that looks admitted and receives nothing.
+        let (attach, committed) = state.run.commit_admission(
+            &mut reservation,
+            callsign.as_deref(),
+            Some(ticket.boat().key()),
+            claimed,
+        )?;
+        // Outside the registry lock, deliberately: closing a lane sends on a
+        // channel, and the commit hands the displaced set out rather than
+        // closing it, so a send can never block while the registry mutex is
+        // held.
+        let displaced = state
+            .run
+            .close_displaced(account_id.as_str(), &committed.displaced);
+        if displaced > 0 {
+            tracing::info!(
+                account = %account_id.as_str(),
+                displaced,
+                reset = resetting,
+                "a new connection claimed an existing account",
+            );
+        }
+        // The ledger-side install, on the account the claim actually returned.
+        state
+            .run
+            .register_instrument(&account_state, &profile)
+            .await;
+        Some(Passenger {
+            symbol,
+            ticket,
+            duration_ms,
+            account_state,
+            presented_identity: callsign,
+            resumed_from_freeze: committed.resumed_from_freeze,
+            attach: Some(attach),
+            // Before the 101, not inside the spawned handler. See the field.
+            alive,
+        })
+    });
+    match tail.await {
+        Ok(Some(passenger)) => Ok(passenger),
+        Ok(None) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("account {account_id_for_refusal} could not be installed by the venue; retry"),
+        )
+            .into_response()),
+        // The tail panicked. Everything it held was dropped as the task
+        // unwound - the reservation rolled back, or the connection released by
+        // its own guard - so refusing here strands nothing, and no 101 is owed
+        // for an admission that did not finish.
+        Err(panicked) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the venue could not finish admitting this connection: {panicked}"),
+        )
+            .into_response()),
     }
-    // The ledger-side install, on the account the claim actually returned.
-    state
-        .run
-        .register_instrument(&account_state, &profile)
-        .await;
-    let passenger = Passenger {
-        symbol,
-        ticket,
-        duration_ms: query.duration_ms,
-        account_state,
-        presented_identity: query.callsign.clone(),
-        resumed_from_freeze: committed.resumed_from_freeze,
-        attach: Some(attach),
-        // Before the 101, not inside the spawned handler. See the field.
-        alive: state.run.passenger_guard(),
-    };
-    ws.max_message_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
-        .max_frame_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, passenger))
 }
 
 fn daily_reset_refusal(
@@ -691,7 +776,9 @@ async fn dispatch_command(
             // the same batch would otherwise have its own row dropped.
             //
             // Do not put an `.await` between here and `submit_produced`, and the
-            // reason is not style. `process_order_cmd` released the engine lock
+            // reason is not style. Teardown aborts this dispatcher, so a yield
+            // here could discard the local events after the engine mutation.
+            // `process_order_cmd` released the engine lock
             // before returning, so the order below is already visible to the
             // sweeper while its `OrderAccepted` is still unpublished. Publication
             // order is enqueue order and nothing else: `submit_produced` appends
@@ -1626,11 +1713,14 @@ mod tests {
     /// buggy shape too.
     #[tokio::test]
     async fn receiver_created_after_completion_observes_terminal_state() {
-        let (tx, _keep) = tokio::sync::watch::channel(None);
-        tx.send_replace(Some((123, 45)));
-        let mut late = tx.subscribe();
+        let run = crate::run::tests::run(1_000, 400, None);
+        // There are deliberately no receivers at the transition. This is the
+        // production call site, not a hand-built channel whose send primitive
+        // could drift from `Run::complete` again.
+        run.complete(123, 45);
+        let mut late = run.completion();
 
-        let mut awaiting = tx.subscribe();
+        let mut awaiting = run.completion();
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), awaiting.changed(),)
                 .await
@@ -1639,5 +1729,122 @@ mod tests {
         );
 
         assert_eq!(current_completion(&mut late), Some((123, 45)));
+    }
+
+    /// A venue over two configured shapes, funded in both their settlement
+    /// currencies, so a second passenger can board a river the first is not on.
+    ///
+    /// The boot shape is taken by name rather than off `instrument_defs`, which
+    /// walks a `HashMap`: with two shapes configured, the default symbol would
+    /// otherwise be a coin flip.
+    fn admission_state() -> crate::http::AppState {
+        let profiles = std::sync::Arc::new(crate::source::InstrumentProfiles::from_profiles(vec![
+            crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+            crate::config::profile_for_symbol("MNQ").expect("MNQ preset must resolve"),
+        ]));
+        let instrument = profiles
+            .configured("BTCUSDT")
+            .expect("the boot shape was just configured")
+            .def
+            .clone();
+        let balances = ["USDT", "USD"]
+            .into_iter()
+            .map(|currency| {
+                (
+                    currency.to_owned(),
+                    rust_decimal::Decimal::from(1_000_000_u32),
+                )
+            })
+            .collect();
+        let run = crate::run::Run::new(
+            instrument,
+            crate::source::Rivers::new(
+                crate::source::TapeIdentity {
+                    seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
+                    regime: None,
+                },
+                1_000,
+                profiles,
+            ),
+            balances,
+            mogwai_protocol::SimClock::identity(),
+            1_000,
+            400,
+            None,
+            mogwai_protocol::RunSeeds::from_run_seed(42),
+            8,
+            mogwai_protocol::OmsType::Netting,
+            200,
+            mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
+                .expect("the default account id is legal"),
+            false,
+            std::collections::HashMap::new(),
+            std::sync::mpsc::channel().0,
+        );
+        let rivers = std::sync::Arc::clone(&run.rivers);
+        crate::http::AppState {
+            run,
+            cfg: crate::config::Config::default(),
+            rivers,
+            pending_commands: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            history_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            history_slot_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
+
+    fn socket_query(query: &str) -> SocketQuery {
+        let uri: axum::http::Uri = format!("http://venue/ws?{query}")
+            .parse()
+            .expect("a legal uri");
+        axum::extract::Query::<SocketQuery>::try_from_uri(&uri)
+            .expect("the query must parse")
+            .0
+    }
+
+    /// The handshake is a linearization point: when `/ws` has an upgrade
+    /// response to give, that connection's admission has already committed.
+    ///
+    /// What rides on it is the supported two-socket shared-callsign topology. A
+    /// consumer that has received the 101 for its data leg may open its
+    /// execution leg in the very next instruction, and that second request must
+    /// not find its own account still reserved and be answered `409 Conflict`
+    /// by an admission it was already told had succeeded.
+    ///
+    /// The interleaving is forced by hand rather than threaded, because a
+    /// threaded version is a coin flip against its own defect: `admit`
+    /// returning IS the instant the 101 becomes available, so calling it again
+    /// on the same account right here is the second leg arriving before
+    /// anything else could possibly run. Detach the admission tail instead of
+    /// awaiting it - the shape this test exists to forbid - and the second call
+    /// is refused `Busy` every single time.
+    #[tokio::test]
+    async fn a_second_leg_is_not_refused_by_the_first_legs_own_admission() {
+        let state = admission_state();
+        let first = super::admit(
+            state.clone(),
+            socket_query("account=WYRD-820&callsign=alpha&symbol=BTCUSDT&speed=1"),
+        )
+        .await;
+        assert!(
+            first.is_ok(),
+            "the first leg must be admitted before this test asks anything"
+        );
+
+        let second = super::admit(
+            state.clone(),
+            socket_query("account=WYRD-820&callsign=alpha&symbol=MNQ&speed=1"),
+        )
+        .await;
+        if let Err(refusal) = second {
+            let status = refusal.status();
+            let body = axum::body::to_bytes(refusal.into_body(), 8192)
+                .await
+                .expect("a refusal carries a readable body");
+            panic!(
+                "the second leg of a shared callsign was refused {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        drop(first);
     }
 }
