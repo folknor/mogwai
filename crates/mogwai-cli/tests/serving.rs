@@ -2262,17 +2262,13 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     }
 }
 
-/// Market slippage is only real if the submit path actually takes a reading, and
-/// it has to take one on BOTH market paths - the priced one and the price-less
-/// one that used to return early with a stamped price and no reading at all. An
-/// engine that slips perfectly would otherwise never receive a reading in
-/// production while every engine-side unit test passed.
+/// Market slippage is only real if the submit path actually takes a reading. A
+/// price-less market order used to return early with a stamped price and no
+/// reading at all, so an engine that slips perfectly would otherwise never
+/// receive a reading in production while every engine-side unit test passed.
 ///
-/// The fill price cannot prove it on the price-less arm, which is why this test
-/// reads the venue's log. On the priced arm the price is evidence: the order
-/// states an absurd 9000000, the no-reading fallback fills at that stated price,
-/// and a fill near the tape is therefore only possible if the venue read. On the
-/// price-less arm there is no stated price to be absurd - `market_reading`
+/// The fill price cannot prove it, which is why this test reads the venue's log.
+/// There is no consumer-stated price on the wire: `market_reading`
 /// stamps the order with the last print either way, from the reading when there
 /// is one and from `fills::read_last` when there is not, and the engine's
 /// no-reading branch then fills at that same stamp. Both outcomes land on the
@@ -2283,19 +2279,16 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
 /// The one observable that separates them is the engine's own `warn`, `market
 /// order has no market reading; using its stated price`, emitted with the
 /// client order id. An attempt whose id never appears in it took a reading.
-/// The two evidences are cross-checked against each other on the priced arm,
-/// so neither the log nor the wire is trusted alone.
-///
 /// Retried, because `read_market` legitimately refuses at any instant whose
 /// trailing window carries fewer than `MIN_VOL_SAMPLES` returns, and the fitted
 /// BTCUSDT tape does that at a substantial fraction of instants. A refused
 /// reading is the documented fallback - stated price, no slippage, warn - so a
 /// single attempt would be a coin flip. What is pinned is that a reading is
-/// taken on both paths: every attempt warning would mean the path never reads at
-/// all, which is the defect this test exists for.
+/// taken on the wire path: every attempt warning would mean the path never reads
+/// at all, which is the defect this test exists for.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths() {
+async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
     const ATTEMPTS: usize = 8;
     /// The engine's no-reading fallback, verbatim from `orders.rs`.
     const NO_READING: &str = "market order has no market reading";
@@ -2313,13 +2306,15 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
         .await
         .expect("open the order socket");
 
-    for path in ["priced", "priceless"] {
-        let price = if path == "priced" {
-            r#","price":"9000000""#
-        } else {
-            ""
-        };
-        // (id, whether the fill landed on the tape rather than at 9000000).
+    // One arm, and a loop so a second costs nothing. It carried two until the
+    // wire started refusing a consumer-stated price on a market order: the
+    // priced arm sent `"price":"9000000"` and is now a `400` at the boundary,
+    // so the shape it exercised no longer exists to be exercised. What went
+    // with it is noted above - the log and the wire can no longer be
+    // cross-checked against each other here, because only the priced arm made
+    // the fill price an independent witness.
+    for path in ["priceless"] {
+        // (id, whether the fill landed near the tape).
         let mut attempts: Vec<(String, bool)> = Vec::new();
         for attempt in 0..ATTEMPTS {
             let id = format!("MKT-{path}-{attempt}");
@@ -2339,7 +2334,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             // been handed is its own knowledge and needs no route.
             let before_ns = drain_last_market_ts(&mut socket).await;
             let submit = format!(
-                r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01"{price},"time_in_force":"Gtc"}}"#,
+                r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
                 venue.symbol
             );
             socket
@@ -2461,23 +2456,6 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
              a reading at all",
             attempts.len()
         );
-        // The log and the wire must agree, which is what keeps this from being
-        // a test of the log alone. On the priced arm the two are independently
-        // observable: an attempt that did not warn took a reading, and a fill
-        // that took a reading cannot have landed on the order's own absurd
-        // 9000000. If they disagree, one of the two observables is lying and
-        // the other findings resting on either are worthless.
-        if path == "priced" {
-            for (id, on_the_tape) in &attempts {
-                let warned = warned.iter().any(|(warned_id, _)| warned_id == id);
-                assert_eq!(
-                    !warned,
-                    *on_the_tape,
-                    "{id}: the venue's log says a reading was {} while its fill says the opposite",
-                    if warned { "NOT taken" } else { "taken" }
-                );
-            }
-        }
     }
 }
 

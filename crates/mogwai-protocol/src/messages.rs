@@ -192,10 +192,11 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 /// Relaxing this for a URL reason would therefore relax order entry with it.
 /// The callers are `validate_submit_order` (and `validate_submit_group` through
 /// it), `mogwai-venue`'s `http.rs` and `source.rs`, `config.rs` for an
-/// instrument's `index_symbol`, and `mogwai-adapter`'s config check. `config.rs`
-/// does not apply it to an instrument's own `symbol`, which is a recorded
-/// asymmetry
-/// rather than an oversight.
+/// instrument's `index_symbol`, and `mogwai-adapter`'s config check. As of
+/// 2026-08-20 `config.rs` applies it to an instrument's own `symbol` too, which
+/// closed the last asymmetry: a config checked only for length could otherwise
+/// name a shape the venue serves and no consumer can trade or fetch, with both
+/// validators green and neither able to see the other's rule.
 pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
         // Bytes, not characters: the check is `symbol.len()`. The two agree
@@ -1072,7 +1073,9 @@ pub const MAX_GROUP_ORDERS: usize = MAX_LINKED_ORDERS + 1;
 ///   `parent_order_id` must name another member. A group naming an outsider
 ///   could not promise that admitting the group admits every sibling, which is
 ///   the whole guarantee - the outsider might be rejected, or might already be
-///   filled, and the consumer would have a bracket with a leg missing.
+///   filled, and the consumer would have a bracket with a leg missing. Parent
+///   links must also be acyclic: a cycle has no member that can fill first and
+///   release the others.
 /// - Every member is linked, and to the same list. An unlinked order in a group
 ///   frame is a standalone order asking for a guarantee that means nothing for
 ///   it; two list ids in one frame are two groups, and admitting them together
@@ -1086,7 +1089,18 @@ pub const MAX_GROUP_ORDERS: usize = MAX_LINKED_ORDERS + 1;
 ///   rather than by admission, so it cannot be part of a promise about
 ///   admission; and it is the one verdict the venue cannot reach before it has
 ///   already accepted the members beside it.
-pub fn validate_submit_group(orders: &[SubmitOrder]) -> Result<(), &'static str> {
+///
+/// `phase` is passed straight through to `validate_submit_order` for every
+/// member, and it is a required argument here for a reason this function is the
+/// only witness to: this is the one validator in the workspace with production
+/// callers on both sides of the stamp. `mogwai-venue`'s websocket boundary
+/// calls it `PreStamp`, and `mogwai-engine`'s `on_submit_group` calls it again
+/// `PostStamp`, after the venue has stamped every market member. A group whose
+/// entry is a market order is exactly the shape that distinguishes them.
+pub fn validate_submit_group(
+    orders: &[SubmitOrder],
+    phase: SubmitPhase,
+) -> Result<(), &'static str> {
     if orders.is_empty() {
         return Err("an order group must carry at least one order");
     }
@@ -1094,7 +1108,7 @@ pub fn validate_submit_group(orders: &[SubmitOrder]) -> Result<(), &'static str>
         return Err("order group exceeds MAX_GROUP_ORDERS");
     }
     for order in orders {
-        validate_submit_order(order)?;
+        validate_submit_order(order, phase)?;
         if matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok) {
             return Err(
                 "an order-group member cannot be immediate-or-cancel: a now-or-never order's fate \
@@ -1138,6 +1152,38 @@ pub fn validate_submit_group(orders: &[SubmitOrder]) -> Result<(), &'static str>
             .is_some_and(|parent| !names_member(parent))
         {
             return Err("an order group's parent must be a member of the group");
+        }
+    }
+    // Every parent names a member by this point. Following more than one edge
+    // per member can therefore happen only by revisiting a member, which would
+    // leave every order in that cycle held forever waiting on another held
+    // order. Check from every member so a cycle below an otherwise valid root
+    // cannot hide behind that root.
+    for order in orders {
+        let mut current = order;
+        for _ in 0..orders.len() {
+            let Some(parent_id) = current
+                .link
+                .as_ref()
+                .expect("checked above")
+                .parent_order_id
+                .as_ref()
+            else {
+                break;
+            };
+            current = orders
+                .iter()
+                .find(|member| &member.client_order_id == parent_id)
+                .expect("parent membership checked above");
+        }
+        if current
+            .link
+            .as_ref()
+            .expect("checked above")
+            .parent_order_id
+            .is_some()
+        {
+            return Err("an order group must not contain a parent cycle");
         }
     }
     Ok(())
@@ -1196,30 +1242,58 @@ pub enum Contingency {
     Ouo,
 }
 
+/// Which side of the venue's market-price stamp a submit is being judged on.
+///
+/// One `SubmitOrder` is validated twice in its life and the truth about its
+/// `price` is the opposite at each point, so the phase is a required argument
+/// on both submit validators rather than a convention a call site is asked to
+/// remember. A market order carries no price on the wire - the consumer does
+/// not get to choose the price it executes at - and carries the venue's
+/// synthesized price by the time the engine sees it. Reading a call site tells
+/// you which rule ran, and adding a caller forces the question.
+///
+/// It is deliberately not `Copy`-with-a-`Default`: there is no safe default.
+/// Guessing `PreStamp` post-stamp rejects every stamped market order, which is
+/// the defect that produced this type; guessing `PostStamp` pre-stamp lets a
+/// consumer name the price its own market order fills at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitPhase {
+    /// Exactly what the consumer put on the socket, before `mogwai-venue`
+    /// stamps anything. A `Market` order must carry no `price` here.
+    PreStamp,
+    /// After the venue has stamped a synthetic execution price onto every
+    /// `Market` order. A `Market` order must carry a `price` here, and a
+    /// still-priceless one is a venue bug rather than a consumer error.
+    PostStamp,
+}
+
 /// API-boundary guard for a `SubmitOrder`, mirroring `validate_conn_havoc` /
 /// `validate_market_regime` / `validate_divergence` / `validate_inbound_havoc`
 /// in style and message convention. `quantity` must be strictly positive, and
-/// a `Limit` order must carry a strictly positive `price` (a `Market` order's
-/// price is legitimately absent - nautilus `Market` orders carry no price).
+/// a `Limit` order must carry a strictly positive `price`.
 ///
-/// This is the crate's own gate, not a substitute for the venue-side check:
-/// `mogwai-engine`'s `validate_submit` is the authoritative, instrument-aware
-/// guard (grid alignment, instrument lookup, precision) and remains the last
-/// line of defense regardless of whether a caller runs this first.
+/// The `Market` price rule is the one rule here that depends on where in a
+/// submit's life it is asked, which is why `phase` is a required argument.
+/// `SubmitPhase::PreStamp` is the wire, exactly what the adapter puts on the
+/// socket: a nautilus `Market` order legitimately carries no price there, and a
+/// consumer-supplied one is refused, because the price a market order executes
+/// at is the venue's to synthesize and not the consumer's to name. The venue
+/// then stamps a synthetic execution price onto every `Market` order (on the WS
+/// carrier for both the singular and the group frame) before the engine ever
+/// sees it, so `SubmitPhase::PostStamp` requires the price the wire refused.
 ///
-/// The apparent disagreement with the engine - this validator accepts a
-/// priceless `Market` order while `mogwai-engine`'s `validate_submit` rejects
-/// one ("submit price required") - is a deliberate two-phase split, not a
-/// drift. This gate validates the pre-stamp wire, exactly what the adapter puts
-/// on the socket: a nautilus `Market` order legitimately carries no price there.
-/// The venue then stamps a synthetic execution price onto every Market order
-/// (on both the WS and HTTP carriers, failing loudly if synthesis fails) before
-/// the engine ever sees it, so by the time `validate_submit` runs the order
-/// always carries a price and a still-priceless one is a genuine post-stamp
-/// bug. The engine is the authoritative post-stamp gate; this is the honest
-/// pre-stamp one, and the two are consistent precisely because the stamp sits
-/// between them.
-pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
+/// Both directions of that rule matter and both have bitten. A priced market
+/// order admitted at the wire reaches the engine's no-reading fallback and
+/// fills at the consumer's own number; a stamped market order judged by the
+/// pre-stamp rule is refused for carrying exactly what the venue put on it,
+/// which silently rejected every market-entry bracket for one commit.
+///
+/// This is the crate's own gate either way, not a substitute for the
+/// venue-side check: `mogwai-engine`'s `validate_submit` is the authoritative,
+/// instrument-aware guard (grid alignment, instrument lookup, precision) and
+/// remains the last line of defense regardless of whether a caller runs this
+/// first.
+pub fn validate_submit_order(order: &SubmitOrder, phase: SubmitPhase) -> Result<(), &'static str> {
     validate_client_order_id(&order.client_order_id)?;
     // The same rule the URL-carried ingresses use, not a length check of its
     // own. An order-entry symbol used to be bounded only by `MAX_SYMBOL_LEN`,
@@ -1255,6 +1329,12 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         return Err("trigger_price must be > 0");
     }
     match order.order_type {
+        OrderType::Market if phase == SubmitPhase::PreStamp && order.price.is_some() => {
+            Err("Market order must not carry a price")
+        }
+        OrderType::Market if phase == SubmitPhase::PostStamp && order.price.is_none() => {
+            Err("Market order must carry the price the venue stamped")
+        }
         OrderType::Market if order.trigger_price.is_some() => {
             Err("Market order must not carry trigger_price")
         }
@@ -2245,7 +2325,7 @@ mod tests {
 
         for legal in ["MNQ", "BTCUSDT", "BTCUSDT.P", "BTCUSD-INV", "ES.c.0"] {
             assert!(
-                validate_submit_order(&submit(legal)).is_ok(),
+                validate_submit_order(&submit(legal), SubmitPhase::PreStamp).is_ok(),
                 "{legal} names an instrument this venue can serve and must be admitted"
             );
         }
@@ -2261,7 +2341,7 @@ mod tests {
             &"X".repeat(MAX_SYMBOL_LEN + 1),
         ] {
             let order = submit(illegal);
-            let refusal = validate_submit_order(&order)
+            let refusal = validate_submit_order(&order, SubmitPhase::PreStamp)
                 .expect_err(&format!("{illegal:?} must be refused at order entry"));
             // The group assertion is an equality, not an `is_err`. A group of
             // one unlinked order is refused for want of a link whatever its
@@ -2270,7 +2350,7 @@ mod tests {
             // per-member validator before any linkage rule, so the symbol's
             // refusal is the one that must come back.
             assert_eq!(
-                validate_submit_group(std::slice::from_ref(&order)),
+                validate_submit_group(std::slice::from_ref(&order), SubmitPhase::PreStamp),
                 Err(refusal),
                 "{illegal:?} must be refused through the group carrier for the same reason"
             );
@@ -2702,7 +2782,7 @@ mod tests {
             // illegal shape and a reader auditing the table for exhaustiveness
             // will believe that shape is legal.
             if let Command::SubmitOrder(order) = &decoded {
-                validate_submit_order(order).unwrap_or_else(|e| {
+                validate_submit_order(order, SubmitPhase::PreStamp).unwrap_or_else(|e| {
                     panic!("{label}: the fixture must be a submit the venue admits: {e}")
                 });
             }

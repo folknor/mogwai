@@ -1,13 +1,113 @@
 # Bug-loop carry-forward
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
-its own round. Every brief carries the relevant slice forward. Current as of
-the close pass over the `notes/bugs-venue-serving.md` arc, which reviewed the
-whole two-commit arc and closed it; the record is at the bottom. That document
-is deleted and both its rounds are closed. The bugs-venue-mechanics and
-bugs-engine arcs below it are closed and judged sound. Two bug documents
-remain to be worked: `notes/bugs-protocol-cli.md` and `notes/bugs-adapter.md`,
-which is why this carry-forward stays live.
+its own round. Every brief carries the relevant slice forward. Current as of round 1 of
+`notes/bugs-protocol-cli.md`, whose section is directly below. The
+bugs-venue-serving, bugs-venue-mechanics and bugs-engine arcs beneath it are
+closed and judged sound; the close-pass records are at the bottom.
+`notes/bugs-protocol-cli.md` still carries findings 5 through 8 and a
+structural observation for round 2, and `notes/bugs-adapter.md` has not been
+worked at all, which is why this carry-forward stays live. The
+bugs-protocol-cli arc also owes a close pass over its own commits once its
+rounds are done.
+
+## Machinery agents may build on and must not break, from bugs-protocol-cli round 1
+
+- **`SubmitPhase` is a required argument on both submit validators, and there
+  is no default.** `mogwai_protocol::validate_submit_order` and
+  `validate_submit_group` take `SubmitPhase::PreStamp` or
+  `SubmitPhase::PostStamp`. The market-price rule is the one rule that differs:
+  pre-stamp a `Market` order must carry no price, post-stamp it must carry the
+  one the venue put on it. Every other rule is phase-independent. The two
+  production call sites that matter are `mogwai-venue`'s `boundary_error`
+  (pre-stamp, both frames) and `mogwai-engine`'s `on_submit_group` (post-stamp,
+  the only production caller on the far side of the stamp). Do not add a
+  defaulted or inferred phase: guessing pre-stamp post-stamp rejects every
+  market order the venue itself priced, and guessing post-stamp pre-stamp lets
+  a consumer name the price its own market order fills at.
+- **`mogwai-venue`'s `stamp_market_price` is a named function, not a closure**,
+  precisely so a test can cross the phase boundary through the production code
+  instead of spelling the stamp rule a second time. It is the whole of the
+  transition between the two phases. A test that re-implements it pins the two
+  validators against a third opinion of what sits between them.
+- The parent-acyclicity walk in `validate_submit_group` starts from **every**
+  member, not from the first. A cycle hanging below a member with a legal
+  parentless root is invisible to a walk rooted at the frame's first order, and
+  the regression covers exactly that shape.
+- `SimClock::window_opening` is now `sim_ns` with no second clamp, and the
+  late-reader guarantee is `sim_ns`'s own pre-anchor branch: `wall_ns <=
+  wall_anchor_ns` returns `sim_epoch_ns`. Verified rather than substituted -
+  all three of `sim_ns`'s exits are at or above `sim_epoch_ns`, so the old
+  `.max(self.sim_epoch_ns)` could not fire on any input, while a reader
+  anchored after the arm genuinely does take the pre-anchor branch and get its
+  full window. If `sim_ns` ever grows an exit below its epoch, the guarantee
+  moves back out into `window_opening`.
+
+## Decisions and hazards from bugs-protocol-cli round 1
+
+- **The round's fix pass shipped a high-severity regression that a green
+  1448-test gate could not see, and the shape is worth remembering.** Finding
+  1's fix - refuse a consumer-supplied price on a market order - was correct at
+  the wire and was installed in a validator the engine calls again *after* the
+  venue stamps that very price on. Every market-entry bracket was rejected
+  whole, on the path `docs/order-lists.md` documents in as many words, and no
+  test in the workspace held a market member in a group at all. A validator
+  reached at two points in a message's life with different truths at each is
+  the structural defect; `SubmitPhase` is the fix, and the reason it is a
+  required argument rather than a comment.
+- **Finding 3 did not survive contact with the code and is closed without a
+  code change, on evidence rather than on the fix pass's word.**
+  `mogwai-venue`'s `config.rs` has applied `validate_wire_symbol` to an
+  instrument's own `symbol` since the 2026-08-20 ruling, and
+  `a_configured_symbol_is_held_to_the_alphabet_the_wire_enforces` gates it
+  against the wire validator's own verdict rather than a second copy of the
+  alphabet, with a negative half. That is exactly the finding's scope - a
+  configured symbol the venue serves and no consumer can trade or fetch - so
+  restoring the finding would record a gap that is not there. What was real is
+  the half the finding quoted: `validate_wire_symbol`'s own doc still said
+  "config.rs does not apply it to an instrument's own symbol, which is a
+  recorded asymmetry", eighteen months of a sentence describing a gate narrower
+  than the gate. Corrected. The vacuous-gate family's prose sub-shape survives a
+  fix to the code it describes, and nothing detects it.
+- Two tests were added, and the gate count moved from 1448 to 1450 - which is
+  what it should have moved by, and the round-2 lesson from the venue-serving
+  arc applied cleanly.
+  `mogwai-engine`'s `a_group_admits_the_market_member_the_venue_has_already_priced`
+  goes through `process_with_market`, so it pins which phase the *caller* names
+  rather than what the validator does when asked directly; `mogwai-venue`'s
+  `a_market_entry_bracket_survives_both_sides_of_the_price_stamp` carries a
+  bracket across the real `stamp_market_price` and asks both phases in turn.
+  Both were bitten on each assertion separately.
+- Bite-check hazard, seen twice in this round: a test that asserts a
+  validator's verdict and then asserts the boundary dispatches to it cannot
+  bite the second assertion by perturbing the validator - the first fires and
+  masks it. Perturb the dispatch instead, and note that emptying a `boundary_error`
+  arm outright fails to compile when the test module reaches the validator by
+  its full path, because the crate-level import goes unused. Swapping the
+  phase at the call site is the perturbation that reaches the dispatch
+  assertion without touching the callee.
+- **Coverage this round deliberately gave up.** `serving.rs`'s market-reading
+  socket test carried two arms, and the priced one - a market order stating an
+  absurd 9000000 - was the only place the venue's log and the wire were
+  cross-checked against each other, since a fill away from 9000000 proved
+  independently that a reading was taken. The wire now refuses that frame, so
+  the arm is gone and only the log witnesses the reading. The remaining loop is
+  one arm wide and says so at its head. Nobody has proposed a replacement
+  witness; a future round wanting one needs an observable other than the fill
+  price.
+- No `TAPE_PROTOCOL_VERSION` bump is owed, verified rather than assumed.
+  Nothing under `mogwai-data`, `analysis/` or the committed fingerprint changed,
+  and no edit reaches a generator constant, an arrival clock, a seed derivation,
+  the fill band's draw or the tape origin. Order validation is not the tape
+  generation path. `TAPE_PROTOCOL_VERSION` is 24.
+- Least examined by this round: `mogwai-adapter`'s `wire_submit` sets
+  `price: init.price.map(..)` for every type but `TrailingStopLimit`, so a host
+  that hands it an `OrderInitialized` with `order_type` Market and a price
+  would now earn a boundary refusal where it previously earned a fill at that
+  price. Nautilus's own `MarketOrder` cannot carry one, so this is unreachable
+  through the supported constructor and was left alone rather than given a
+  defensive arm - the venue's refusal is translated to `OrderRejected` and names
+  the reason, which is the better answer than silently dropping the price.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 

@@ -67,11 +67,14 @@ impl SimClock {
     }
 
     /// Opening instant for a wall-armed simulated window on this clock.
-    /// A reader whose epoch is later than the arm receives the full window
-    /// from its own epoch instead of inheriting a window in its past.
+    ///
+    /// `sim_ns` itself maps every wall instant at or before this clock's anchor
+    /// to `sim_epoch_ns`. That is the late-reader rule: a reader anchored after
+    /// the arm receives the full window from its own epoch. No second clamp is
+    /// needed here.
     #[must_use]
     pub fn window_opening(&self, wall_armed_ns: u64) -> u64 {
-        self.sim_ns(wall_armed_ns).max(self.sim_epoch_ns)
+        self.sim_ns(wall_armed_ns)
     }
 
     /// Return the wall instant at which the clock reaches `sim_ns`.

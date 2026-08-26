@@ -20,9 +20,10 @@ use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, Command, CommandClass, DEFAULT_HISTORY_LIMIT, InstrumentDef,
-    MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, TradeTick, VenueClock, VenueMessage,
-    control::Divergence, truncate_echoed_id, truncate_reason, validate_client_order_id,
-    validate_divergence, validate_modify_order, validate_request_id, validate_submit_order,
+    MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, SubmitPhase, TradeTick, VenueClock,
+    VenueMessage, control::Divergence, truncate_echoed_id, truncate_reason,
+    validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
+    validate_submit_order,
 };
 use serde::{Deserialize, Serialize};
 
@@ -232,6 +233,9 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
 /// The protocol-boundary verdict on one order-entry command: `Some(reason)`
 /// when it is malformed. Ids are length-checked here, alongside the numeric
 /// checks that were always here, because both are malformed-request failures.
+/// Every submit judged here is `SubmitPhase::PreStamp` by construction: this is
+/// the decode boundary, and `stamp_market_price` has not run yet. The engine
+/// re-runs the group validator `PostStamp` on the other side of that stamp.
 pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
     match cmd {
         // A linked order may not arrive alone on the wire, and this is the
@@ -250,14 +254,16 @@ pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
         // in-process API the group path itself is built on, and the venue's own
         // liquidation submits go through it. This is a wire rule, refused where
         // the consumer's choice of route is actually made.
-        Command::SubmitOrder(order) => validate_submit_order(order).err().or_else(|| {
-            order.link.is_some().then_some(
-                "a linked order must be submitted as part of a SubmitOrderGroup: sent alone, a \
-                 sibling can fill before the rest of the group is admitted",
-            )
-        }),
+        Command::SubmitOrder(order) => validate_submit_order(order, SubmitPhase::PreStamp)
+            .err()
+            .or_else(|| {
+                order.link.is_some().then_some(
+                    "a linked order must be submitted as part of a SubmitOrderGroup: sent alone, \
+                     a sibling can fill before the rest of the group is admitted",
+                )
+            }),
         Command::SubmitOrderGroup { orders } => {
-            mogwai_protocol::validate_submit_group(orders).err()
+            mogwai_protocol::validate_submit_group(orders, SubmitPhase::PreStamp).err()
         }
         Command::ModifyOrder {
             client_order_id,
@@ -1817,11 +1823,7 @@ async fn market_reading(
         // whose market entry took one price while a sibling took another would
         // have met two markets in one atomic admission, which is the property
         // the group frame exists to guarantee against.
-        let stamp = |order: &mut mogwai_protocol::SubmitOrder| {
-            if order.order_type == OrderType::Market && order.price.is_none() {
-                order.price = last_px;
-            }
-        };
+        let stamp = |order: &mut mogwai_protocol::SubmitOrder| stamp_market_price(order, last_px);
         let msg = match msg {
             Command::SubmitOrder(mut order) => {
                 stamp(&mut order);
@@ -1836,6 +1838,28 @@ async fn market_reading(
         return (msg, reading);
     }
     (msg, None)
+}
+
+/// Put the venue's synthesized execution price on a market order.
+///
+/// This is the whole of the transition between `SubmitPhase::PreStamp` and
+/// `SubmitPhase::PostStamp`, and it is a named function rather than a closure
+/// so a test can cross that boundary through the production code instead of
+/// spelling the rule a second time. A market order arrives priceless -
+/// `boundary_error` refuses a consumer-stated price - and leaves here carrying
+/// the last print, which is the price the engine then fills it at.
+///
+/// A `None` reading leaves the order priceless. That is not silent: the engine
+/// answers a priceless market member of a group with the post-stamp refusal,
+/// and a priceless standalone market order with `validate_submit`'s own "submit
+/// price required".
+fn stamp_market_price(
+    order: &mut mogwai_protocol::SubmitOrder,
+    last_px: Option<rust_decimal::Decimal>,
+) {
+    if order.order_type == OrderType::Market && order.price.is_none() {
+        order.price = last_px;
+    }
 }
 
 /// The `/operator/trades` and `/operator/quotes` query string, exactly as the
@@ -3413,6 +3437,149 @@ mod calendar_tests {
         let mut standalone = linked_leg("A", &[]);
         standalone.link = None;
         assert!(boundary_error(&Command::SubmitOrder(standalone)).is_none());
+    }
+
+    /// The websocket dispatcher must apply the pre-stamp market-price rule,
+    /// not merely leave it available as a protocol helper. A consumer-stated
+    /// price would otherwise bypass synthesis and reach the engine as the
+    /// market order's stated execution price.
+    #[test]
+    fn a_market_order_cannot_supply_the_price_the_venue_stamps() {
+        let mut order = linked_leg("MKT", &[]);
+        order.link = None;
+        order.order_type = OrderType::Market;
+        order.price = Some(Decimal::ONE);
+        let command = Command::SubmitOrder(order.clone());
+
+        assert_eq!(
+            mogwai_protocol::validate_submit_order(&order, SubmitPhase::PreStamp),
+            Err("Market order must not carry a price")
+        );
+        assert_eq!(
+            boundary_error(&command),
+            Some("Market order must not carry a price"),
+            "the websocket command boundary must dispatch through the validator"
+        );
+
+        order.price = None;
+        assert!(mogwai_protocol::validate_submit_order(&order, SubmitPhase::PreStamp).is_ok());
+        assert!(boundary_error(&Command::SubmitOrder(order.clone())).is_none());
+
+        // The other half of the phase split, and the half that shipped broken:
+        // the venue stamps the price it just refused, and the post-stamp rule
+        // has to admit exactly that. A single validator answering `PreStamp`
+        // here rejects every market order the venue itself priced.
+        order.price = Some(Decimal::ONE);
+        assert!(
+            mogwai_protocol::validate_submit_order(&order, SubmitPhase::PostStamp).is_ok(),
+            "the stamped price is what the engine is owed, not a refusal"
+        );
+        order.price = None;
+        assert_eq!(
+            mogwai_protocol::validate_submit_order(&order, SubmitPhase::PostStamp),
+            Err("Market order must carry the price the venue stamped"),
+            "a market order still priceless past the stamp is a venue bug, not a legal shape"
+        );
+    }
+
+    /// The documented market-entry bracket, carried across the stamp by the
+    /// production code that performs it.
+    ///
+    /// `docs/order-lists.md` states that "a market member takes the same
+    /// synthesized price as its siblings", and the group frame is validated
+    /// twice - once here at the wire, and again inside
+    /// `Engine::on_submit_group` - so the market member is priceless at the
+    /// first call and priced at the second. One validator answering the
+    /// pre-stamp rule at both refused every
+    /// such bracket for carrying the price the venue itself had just put on it,
+    /// with the whole suite green, because no test held a market member in a
+    /// group at all.
+    ///
+    /// The stamp is called, not re-spelled: a test that applied its own version
+    /// of the rule would pin the two validators against a third opinion of what
+    /// sits between them.
+    #[test]
+    fn a_market_entry_bracket_survives_both_sides_of_the_price_stamp() {
+        let mut entry = linked_leg("ENTRY", &["EXIT"]);
+        entry.order_type = OrderType::Market;
+        entry.price = None;
+        let exit = linked_leg("EXIT", &["ENTRY"]);
+        let orders = vec![entry, exit];
+
+        assert!(
+            boundary_error(&Command::SubmitOrderGroup {
+                orders: orders.clone(),
+            })
+            .is_none(),
+            "a market entry carrying no price is exactly what a consumer sends"
+        );
+
+        let mut stamped = orders;
+        for order in &mut stamped {
+            stamp_market_price(order, Some(Decimal::from(101)));
+        }
+        assert_eq!(
+            stamped[0].price,
+            Some(Decimal::from(101)),
+            "the premise of the second half: the venue did price the market member"
+        );
+        assert_eq!(
+            stamped[1].price,
+            Some(Decimal::from(100)),
+            "and it left the limit sibling's own price alone"
+        );
+        assert_eq!(
+            mogwai_protocol::validate_submit_group(&stamped, SubmitPhase::PostStamp),
+            Ok(()),
+            "the engine judges the group the venue priced, so the stamped price is legal there"
+        );
+    }
+
+    /// A parent cycle is self-contained but has no member that can release:
+    /// every member remains held waiting on another held member. Pin both the
+    /// group validator and the websocket command boundary that must call it.
+    #[test]
+    fn an_order_group_cannot_contain_a_parent_cycle() {
+        let mut a = linked_leg("A", &["B"]);
+        let mut b = linked_leg("B", &["A"]);
+        a.link.as_mut().unwrap().parent_order_id = Some("B".into());
+        b.link.as_mut().unwrap().parent_order_id = Some("A".into());
+        let orders = vec![a, b];
+
+        assert_eq!(
+            mogwai_protocol::validate_submit_group(&orders, SubmitPhase::PreStamp),
+            Err("an order group must not contain a parent cycle")
+        );
+        assert_eq!(
+            boundary_error(&Command::SubmitOrderGroup {
+                orders: orders.clone(),
+            }),
+            Some("an order group must not contain a parent cycle"),
+            "the websocket command boundary must dispatch through the group validator"
+        );
+
+        let mut rooted = orders;
+        rooted[0].link.as_mut().unwrap().parent_order_id = None;
+        assert!(mogwai_protocol::validate_submit_group(&rooted, SubmitPhase::PreStamp).is_ok());
+        assert!(
+            boundary_error(&Command::SubmitOrderGroup { orders: rooted }).is_none(),
+            "an acyclic parent chain remains legal"
+        );
+
+        // A cycle that does not touch the first member. The walk has to start
+        // from every member, not from the frame's first one: a search rooted at
+        // `ROOT` alone terminates on its first step and reports the whole group
+        // acyclic, with the pair below it held forever.
+        let root = linked_leg("ROOT", &["X"]);
+        let mut x = linked_leg("X", &["Y"]);
+        let mut y = linked_leg("Y", &["X"]);
+        x.link.as_mut().unwrap().parent_order_id = Some("Y".into());
+        y.link.as_mut().unwrap().parent_order_id = Some("X".into());
+        assert_eq!(
+            mogwai_protocol::validate_submit_group(&[root, x, y], SubmitPhase::PreStamp),
+            Err("an order group must not contain a parent cycle"),
+            "a cycle below a legal root is still a cycle"
+        );
     }
 
     /// A group is self-contained, and the boundary is where that is enforced:

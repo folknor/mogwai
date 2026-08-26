@@ -168,7 +168,14 @@ impl Engine {
     /// already accepted and possibly filled; and an `Ioc`/`Fok` member is a
     /// now-or-never order whose fate admission does not decide. `mogwai-venue`
     /// runs the same validator at the boundary, so nothing arriving over the
-    /// wire changes verdict - what changes is that a caller reaching
+    /// wire changes verdict - with one deliberate exception, which is why the
+    /// call below names `SubmitPhase::PostStamp`. The venue stamps a synthesized
+    /// price onto every market member between the two calls, so the pre-stamp
+    /// rule (a market order must not carry a price) is false of every group that
+    /// reaches here, and the post-stamp rule - that it must - is what holds. A
+    /// market-entry bracket is the shape that separates the two, and judging one
+    /// here by the pre-stamp rule rejects it for carrying exactly what the venue
+    /// put on it. What changes is that a caller reaching
     /// `process_with_market` directly (a test, a bench, a future gateway) can no
     /// longer break the group open. It is called rather than copied: one arm of
     /// a validator re-spelled here would read as the rule's home while
@@ -201,7 +208,9 @@ impl Engine {
 
         // Before the divergence arm: a malformed group is not a submit the
         // author armed against, and spending the arm on one would hide it.
-        if let Err(reason) = mogwai_protocol::validate_submit_group(orders) {
+        if let Err(reason) =
+            mogwai_protocol::validate_submit_group(orders, mogwai_protocol::SubmitPhase::PostStamp)
+        {
             return reject_all(reason, None);
         }
 

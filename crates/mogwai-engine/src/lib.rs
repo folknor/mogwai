@@ -728,9 +728,10 @@ impl Engine {
     /// The window names no axis of its own: it is a wall arming instant plus a
     /// simulated span, so one arm means the same number of simulated
     /// milliseconds to a slow boat and a fast one. The late-boarder rule opens
-    /// it at `max(sim.sim_ns(armed), sim.sim_epoch_ns)`, so a boat whose anchor
-    /// is later than the arm gets the full span from its own epoch instead of a
-    /// window that already closed in its past.
+    /// it at `sim.sim_ns(armed)`, whose pre-anchor branch returns
+    /// `sim.sim_epoch_ns`, so a boat whose anchor is later than the arm gets the
+    /// full span from its own epoch instead of a window that already closed in
+    /// its past.
     pub(crate) fn fee_surcharge_multiplier_for(&self, sim: SimClock, ts: u64) -> Decimal {
         self.fee_surcharge.map_or(Decimal::ONE, |window| {
             let opening = sim.window_opening(window.wall_armed_ns);
@@ -3089,7 +3090,7 @@ mod tests {
     /// verdict nobody chose.
     #[test]
     fn post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine() {
-        use mogwai_protocol::validate_submit_order;
+        use mogwai_protocol::{SubmitPhase, validate_submit_order};
         let types = [
             OrderType::Market,
             OrderType::Limit,
@@ -3183,13 +3184,25 @@ mod tests {
                     submit
                 }
             };
+            // The two gates sit on opposite sides of the venue's market-price
+            // stamp, so the same order wears a different price shape at each.
+            // The wire is asked the priceless shape a consumer actually sends;
+            // the price is put back before `process`, which is what the venue's
+            // stamp does between them. Everything else the case varies is held
+            // constant across the pair.
             submit.post_only = true;
-            let wire = validate_submit_order(&submit);
+            if ty == OrderType::Market {
+                submit.price = None;
+            }
+            let wire = validate_submit_order(&submit, SubmitPhase::PreStamp);
             assert_eq!(
                 wire.is_ok(),
                 legal,
                 "the wire gate must admit post_only on exactly the resting-limit types: {ty:?}"
             );
+            if ty == OrderType::Market {
+                submit.price = Some(Decimal::from(100));
+            }
             let mut engine = banded(14);
             let out = engine.process(Command::SubmitOrder(submit), 10);
             if legal {
@@ -3228,7 +3241,7 @@ mod tests {
         both.post_only = true;
         both.time_in_force = TimeInForce::Ioc;
         assert_eq!(
-            validate_submit_order(&both).unwrap_err(),
+            validate_submit_order(&both, SubmitPhase::PreStamp).unwrap_err(),
             POST_ONLY_REFUSAL,
             "the wire gate checks post-only before the conditional-IOC rule"
         );
@@ -6707,67 +6720,75 @@ mod tests {
     /// was silently dropped would believe its stop moves.
     #[test]
     fn the_new_order_fields_are_refused_where_they_mean_nothing() {
-        use mogwai_protocol::validate_submit_order;
+        use mogwai_protocol::{SubmitPhase, validate_submit_order};
         let mut trailing = trailing_stop("T3", Side::Sell, 90, 10);
         trailing.trail_offset = None;
-        assert!(validate_submit_order(&trailing).is_err());
+        assert!(validate_submit_order(&trailing, SubmitPhase::PreStamp).is_err());
 
         let mut fixed = stop_order("S1", Side::Sell, OrderType::StopMarket, 90, None);
         fixed.trail_offset = Some(Decimal::from(10));
-        assert!(validate_submit_order(&fixed).is_err());
+        assert!(validate_submit_order(&fixed, SubmitPhase::PreStamp).is_err());
 
         // A trailing stop limit owes both distances, and the limit price is the
         // venue's to derive - a consumer-stated one would be overwritten by the
         // first ratchet, so it is refused rather than silently replaced.
         let sound = trailing_stop_limit("TL9", Side::Sell, 90, 10, 2);
-        assert!(validate_submit_order(&sound).is_ok());
+        assert!(validate_submit_order(&sound, SubmitPhase::PreStamp).is_ok());
 
         let mut no_gap = sound.clone();
         no_gap.limit_offset = None;
         assert!(
-            validate_submit_order(&no_gap).is_err(),
+            validate_submit_order(&no_gap, SubmitPhase::PreStamp).is_err(),
             "TrailingStopLimit owes a limit_offset"
         );
 
         let mut no_trail = sound.clone();
         no_trail.trail_offset = None;
         assert!(
-            validate_submit_order(&no_trail).is_err(),
+            validate_submit_order(&no_trail, SubmitPhase::PreStamp).is_err(),
             "it owes a trail_offset too, like every trailing order"
         );
 
         let mut stated = sound.clone();
         stated.price = Some(Decimal::from(88));
         assert!(
-            validate_submit_order(&stated).is_err(),
+            validate_submit_order(&stated, SubmitPhase::PreStamp).is_err(),
             "the limit price is derived, so stating one is refused"
         );
 
         let mut zero = sound.clone();
         zero.limit_offset = Some(Decimal::ZERO);
         assert!(
-            validate_submit_order(&zero).is_err(),
+            validate_submit_order(&zero, SubmitPhase::PreStamp).is_err(),
             "a zero gap is a limit AT the trigger, which is a stop-limit"
         );
 
         let mut elsewhere = stop_order("S2", Side::Sell, OrderType::StopLimit, 90, Some(88));
         elsewhere.limit_offset = Some(Decimal::from(2));
         assert!(
-            validate_submit_order(&elsewhere).is_err(),
+            validate_submit_order(&elsewhere, SubmitPhase::PreStamp).is_err(),
             "limit_offset means nothing on a fixed stop-limit"
         );
 
+        // `order` builds a Market submit already carrying a price, which is the
+        // post-stamp shape. These two cases ask the wire, so they carry the
+        // wire's shape: a Market order reaches the socket priceless.
         let mut gtd = order("G1", 1);
+        gtd.price = None;
         gtd.time_in_force = TimeInForce::Gtd;
-        assert!(validate_submit_order(&gtd).is_err(), "Gtd needs an expiry");
+        assert!(
+            validate_submit_order(&gtd, SubmitPhase::PreStamp).is_err(),
+            "Gtd needs an expiry"
+        );
         gtd.expire_time = Some(10);
-        assert!(validate_submit_order(&gtd).is_ok());
+        assert!(validate_submit_order(&gtd, SubmitPhase::PreStamp).is_ok());
 
         let mut day = order("D1", 1);
+        day.price = None;
         day.time_in_force = TimeInForce::Day;
         day.expire_time = Some(10);
         assert!(
-            validate_submit_order(&day).is_err(),
+            validate_submit_order(&day, SubmitPhase::PreStamp).is_err(),
             "a day order's expiry comes from the calendar, not the consumer"
         );
     }
@@ -6776,14 +6797,14 @@ mod tests {
     /// Ioc or Fok, which cannot wait for anything.
     #[test]
     fn a_conditional_may_expire_but_may_not_be_immediate() {
-        use mogwai_protocol::validate_submit_order;
+        use mogwai_protocol::{SubmitPhase, validate_submit_order};
         let mut stop = stop_order("S2", Side::Sell, OrderType::StopMarket, 90, None);
         stop.time_in_force = TimeInForce::Day;
-        assert!(validate_submit_order(&stop).is_ok());
+        assert!(validate_submit_order(&stop, SubmitPhase::PreStamp).is_ok());
         stop.time_in_force = TimeInForce::Ioc;
-        assert!(validate_submit_order(&stop).is_err());
+        assert!(validate_submit_order(&stop, SubmitPhase::PreStamp).is_err());
         stop.time_in_force = TimeInForce::Fok;
-        assert!(validate_submit_order(&stop).is_err());
+        assert!(validate_submit_order(&stop, SubmitPhase::PreStamp).is_err());
     }
 
     // --- Equity conventions --------------------------------------------------
@@ -7690,6 +7711,72 @@ mod tests {
         assert!(
             e.open.is_empty(),
             "nothing is left resting beside the filled entry"
+        );
+    }
+
+    /// A market entry in a group is admitted, and this is the call site that
+    /// decides it rather than the validator underneath.
+    ///
+    /// `on_submit_group` runs `validate_submit_group` a second time, after
+    /// `mogwai-venue` has stamped a synthesized price onto every market member,
+    /// so it must ask the post-stamp question. Asking the pre-stamp one instead
+    /// refuses the member for carrying the very price the venue put on it, and
+    /// the whole group with it: `docs/order-lists.md`'s market-entry bracket
+    /// stops working while every unit test of the validator still passes.
+    ///
+    /// It goes through `process_with_market` deliberately. A direct call to the
+    /// validator proves nothing about which phase this caller names, which is
+    /// exactly how the defect reached a green gate.
+    #[test]
+    fn a_group_admits_the_market_member_the_venue_has_already_priced() {
+        let mut e = linked_engine();
+        // The shape `stamp_market_price` hands the engine: a market order
+        // carrying the last print rather than a consumer's own number.
+        let mut entry = order("ENTRY", 1);
+        entry.price = Some(Decimal::from(200));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
+        );
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(400));
+        let exit = linked(
+            exit,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
+        );
+
+        let out = e.process_with_market(
+            Command::SubmitOrderGroup {
+                orders: vec![entry, exit],
+            },
+            1,
+            Some(away_reading()),
+        );
+        let rejected: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                VenueMessage::OrderRejected { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "a stamped market entry is the documented bracket, not a refusal: {rejected:?}"
+        );
+        let accepted: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                VenueMessage::OrderAccepted {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            accepted,
+            ["ENTRY", "EXIT"],
+            "both legs are admitted, in the order they were sent: {out:?}"
         );
     }
 
@@ -8726,20 +8813,20 @@ mod tests {
     /// The shapes the venue refuses, each for a reason it can state.
     #[test]
     fn linkage_shapes_the_venue_cannot_honour_are_refused() {
-        use mogwai_protocol::validate_submit_order;
+        use mogwai_protocol::{SubmitPhase, validate_submit_order};
 
         let base = limit_order("X", 1);
         let self_linked = linked(
             base.clone(),
             link_of(mogwai_protocol::Contingency::Oco, &["X"], None),
         );
-        assert!(validate_submit_order(&self_linked).is_err());
+        assert!(validate_submit_order(&self_linked, SubmitPhase::PreStamp).is_err());
 
         let empty_oco = linked(
             base.clone(),
             link_of(mogwai_protocol::Contingency::Oco, &[], None),
         );
-        assert!(validate_submit_order(&empty_oco).is_err());
+        assert!(validate_submit_order(&empty_oco, SubmitPhase::PreStamp).is_err());
 
         let market_child = linked(
             order("M", 1),
@@ -8751,7 +8838,7 @@ mod tests {
         // 2026-08-19 fix pass came to believe neither rule existed and started
         // installing a second copy in `Engine::validate_submit`.
         assert_eq!(
-            validate_submit_order(&market_child).unwrap_err(),
+            validate_submit_order(&market_child, SubmitPhase::PreStamp).unwrap_err(),
             "a Market order cannot be an order-list child: a released child rests, and a market \
              order has nothing to rest on",
             "a market child has nothing to rest on once released"
@@ -8764,7 +8851,7 @@ mod tests {
             link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
         );
         assert_eq!(
-            validate_submit_order(&ioc_child).unwrap_err(),
+            validate_submit_order(&ioc_child, SubmitPhase::PreStamp).unwrap_err(),
             "an order-list child cannot be immediate-or-cancel: it must outlive the submit that \
              placed it to be released at all",
             "a now-or-never child would expire before its parent ever fills"
@@ -8773,7 +8860,11 @@ mod tests {
         // linked order may legally travel: `boundary_error` refuses a linked
         // standalone `SubmitOrder` outright.
         assert!(
-            mogwai_protocol::validate_submit_group(std::slice::from_ref(&ioc_child)).is_err(),
+            mogwai_protocol::validate_submit_group(
+                std::slice::from_ref(&ioc_child),
+                SubmitPhase::PreStamp
+            )
+            .is_err(),
             "the group route runs the same per-member validation"
         );
 

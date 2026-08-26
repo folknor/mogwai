@@ -38,7 +38,10 @@ consumer cannot build a safety argument on which path a consumer happened to tak
 What a group frame must satisfy, refused at the protocol boundary and again by
 the exchange core itself - the same validator, called from both, so the
 guarantee below is a property of the venue rather than of the route a frame
-took to reach it:
+took to reach it. The two calls sit on either side of the market-price stamp
+and differ on that one point: at the boundary a market member must carry no
+price, and by the time the core sees it, it carries the one the venue
+synthesized.
 
 - **Self-contained.** Every `linked_order_ids` entry and every
   `parent_order_id` names another member. Admitting the group and admitting
@@ -160,6 +163,16 @@ child is held, not triggered.
   refused at the protocol boundary, so they are refused on every route a linked
   order can legally take: a linked bare `SubmitOrder` is refused for being bare,
   and every member of a `SubmitOrderGroup` is validated individually.
+- **A market order carrying a `price`.** The price a market order executes at
+  is the venue's to synthesize from the tape, so naming one is refused rather
+  than ignored - a consumer whose stated price was quietly dropped, or quietly
+  honoured, would be wrong about what it bought either way. Send a market entry
+  with no `price` field and read the fill.
+- **A parent cycle.** Two members naming each other as parent, or any longer
+  ring, is self-contained and passes every other rule while being permanently
+  inert: each member waits for a fill that waits for it. A cycle anywhere in
+  the frame is refused, including one hanging below a member that has a legal
+  parentless root of its own.
 - `Oco` or `Ouo` naming nothing. It would silently behave like a standalone
   order, which a consumer discovers only by watching a stop it thought was reaped
   go on to fill.

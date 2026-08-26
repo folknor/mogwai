@@ -69,7 +69,8 @@ impl HavocWindow {
     /// Judged on the reader's own clock.
     ///
     /// The late-boarder rule: the opening instant is
-    /// `max(sim.sim_ns(wall_armed_ns), sim.sim_epoch_ns)`. Projecting the
+    /// `sim.sim_ns(wall_armed_ns)`, whose pre-anchor branch returns the reader's
+    /// own `sim_epoch_ns`. Projecting the
     /// arming instant through the clock of a boat anchored later than the arm
     /// would put the window in that boat's past, where it never opens - arm a
     /// blackout, connect 50 ms later, and the blackout silently does not
