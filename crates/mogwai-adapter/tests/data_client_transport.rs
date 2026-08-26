@@ -361,6 +361,11 @@ async fn request_quotes_uses_the_live_history_route() {
             break;
         }
     }
+    let ends = state.history_ends.lock().expect("history ends mutex");
+    assert!(
+        ends.first().is_some_and(Option::is_some),
+        "an end-less quote request must pin its window from the clock before the first page"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

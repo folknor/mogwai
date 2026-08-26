@@ -270,6 +270,12 @@ pub struct StubState {
     /// than re-asking from the start, which a row-level assertion cannot
     /// distinguish from a client that paged correctly by luck.
     pub history_requests: Mutex<Vec<(mogwai_protocol::HistoryKind, Option<String>)>>,
+    /// The stated end on each history request, recorded separately so a test
+    /// can distinguish an adapter-pinned window from the stub's own cutoff.
+    pub history_ends: Mutex<Vec<Option<u64>>>,
+    /// Deliberately violate targeted-order semantics for adapter-side identity
+    /// checks by returning rows without applying the requested order id.
+    pub ignore_order_query_filter: AtomicBool,
     /// JSON body of `GET /clock`. Unset serves [`IDENTITY_CLOCK_JSON`], a real
     /// decodable envelope at speed 1 with a zero river floor, which is what a
     /// venue that has just booted looks like. A test exercising the off-river
@@ -1187,6 +1193,11 @@ pub fn history_reply(message: &Command, state: &StubState) -> VenueMessage {
         .lock()
         .expect("history requests mutex")
         .push((*kind, continuation.clone()));
+    state
+        .history_ends
+        .lock()
+        .expect("history ends mutex")
+        .push(*end);
 
     if state.fail_trades.load(Ordering::Relaxed) {
         return VenueMessage::HistoryRejected {
@@ -1283,9 +1294,10 @@ pub fn venue_query_reply(message: &Command, state: &StubState) -> Option<VenueMe
                 .expect("venue orders mutex")
                 .iter()
                 .filter(|info| {
-                    client_order_id
-                        .as_ref()
-                        .is_some_and(|id| info.client_order_id == *id)
+                    state.ignore_order_query_filter.load(Ordering::Relaxed)
+                        || client_order_id
+                            .as_ref()
+                            .is_some_and(|id| info.client_order_id == *id)
                         || (client_order_id.is_none() && (!open_only || info.status.is_open()))
                 })
                 .cloned()

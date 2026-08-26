@@ -38,7 +38,7 @@ use nautilus_common::{
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
-    enums::{ContingencyType, OmsType, OrderStatus, TriggerType},
+    enums::{ContingencyType, OmsType, OrderStatus, OrderType, TriggerType},
     events::OrderEventAny,
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId,
@@ -830,10 +830,18 @@ async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
 }
 
 /// The order-init shapes the venue cannot honor, each refused before any
-/// `OrderSubmitted`. Table-driven because the three are one rule - the venue
+/// `OrderSubmitted`. Table-driven because the four are one rule - the venue
 /// refuses what it cannot serve rather than serving something else quietly -
 /// and because each is built by mutating a legal init, which is the only way
 /// to produce shapes nautilus' own factory will not assemble.
+///
+/// The priced-market row is the shape whose refusal used to be the venue's
+/// alone: the adapter forwarded the price and let the decode boundary answer,
+/// which needs a live socket and reports an adapter-visible defect as a venue
+/// rejection. `wire_submit` now runs the venue's own `validate_submit_order` at
+/// `SubmitPhase::PreStamp`, so the whole table is refused by one rule table
+/// rather than two, and the closing assertion below - that nothing reached the
+/// venue - covers it too.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn unsupported_init_shapes_are_refused_before_submitted() {
@@ -872,7 +880,30 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
         init
     };
 
+    // `order_type = Market` beside a price. `MarketOrder`'s own constructors
+    // cannot produce this, but `SubmitOrder::new` takes an arbitrary
+    // `OrderInitialized` whose fields are all `pub`, so a host reaches it
+    // through nautilus' public API with nothing in the way. The trigger fields
+    // are cleared because the legal init is a stop: left on, the frame would be
+    // refused for carrying a trigger and the price rule would never be reached.
+    let priced_market = {
+        let mut init = legal.clone();
+        init.order_type = OrderType::Market;
+        init.trigger_price = None;
+        init.trigger_type = None;
+        init.price = Some(Price::from("95.00"));
+        init
+    };
+
     for (label, init, needles) in [
+        (
+            "a priced market order",
+            priced_market,
+            [
+                "malformed for MOGWAI",
+                "Market order must not carry a price",
+            ],
+        ),
         (
             "a mark-price trigger",
             mark_price,

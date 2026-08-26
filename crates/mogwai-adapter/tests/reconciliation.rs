@@ -444,6 +444,34 @@ async fn query_order_emits_an_order_status_report() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn targeted_order_queries_refuse_a_wrong_venue_row() {
+    let fixture = fixture().await;
+    fixture
+        .state
+        .ignore_order_query_filter
+        .store(true, Ordering::Relaxed);
+
+    let singular = fixture
+        .client
+        .generate_order_status_report(&GenerateOrderStatusReport::new(
+            UUID4::new(),
+            UnixNanos::from(20),
+            None,
+            Some(ClientOrderId::from("O-404")),
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("query completes");
+    assert!(
+        singular.is_none(),
+        "a row for O-1 must not answer the singular query for O-404"
+    );
+}
+
 /// Reconciliation of a conditional order, over both order-status carriers.
 ///
 /// The existing guard above proves venue truth reaches nautilus at all. It

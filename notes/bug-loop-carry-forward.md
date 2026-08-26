@@ -2,18 +2,99 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current through
-round 1 of `notes/bugs-adapter.md`, whose decisions are directly below. The
+round 2 of `notes/bugs-adapter.md`, whose decisions are directly below. The
 bugs-protocol-cli, bugs-venue-serving, bugs-venue-mechanics and bugs-engine arcs
-are all closed and judged sound; the close-pass records are at the bottom. The
-adapter arc is live: findings 1 through 5 are closed, and findings 6 through 10
-are round 2's, untouched and verbatim in the document.
+are all closed and judged sound; the close-pass records are at the bottom.
+
+The adapter arc is the last document of the five-document arc, and all ten of
+its findings are now closed - `notes/bugs-adapter.md` is deleted as exhausted.
+What is still owed is the close pass over this arc, which is what this file is
+kept alive for. The round-2 fix pass deleted this file believing the arc
+finished at its own commit; it does not. Delete it when the close pass has run
+and whatever still binds has been folded into `reference/test-doctrine.md`.
 
 What the adapter arc should carry from the protocol/CLI arc: the round-2 fix
 pass closed a finding by writing a sentence into `reference/architecture.md`,
 and the sentence was false about the very path the finding named. Both halves
 of that matter - a durable claim is owed the same verification as a code
 change, and closing a "the ordering happens to be safe" finding with prose
-closes nothing.
+closes nothing. Round 2 of this document repeated the first half of that
+mistake and was caught: finding 10 was closed with a doc comment at
+`wire_submit` whose central factual claim - that a host cannot build the
+malformed event - was false.
+
+## Machinery agents may build on and must not break, from bugs-adapter round 2
+
+- **`wire_submit` runs the built frame through
+  `mogwai_protocol::validate_submit_order` at `SubmitPhase::PreStamp` before
+  returning it.** That is the venue's own decode-boundary verdict -
+  `mogwai_venue::http::boundary_error` calls the same function at the same
+  phase - and it is deliberately not a second copy of the rule table. Do not
+  replace it with a hand-written check of any single rule, and do not move it
+  after the announcement: the AE8 ordering has conversion fail before any
+  event is emitted or any mirror record exists, which is what makes the refusal
+  an `OrderDenied` with no stray `Submitted` behind it. The one behaviour it
+  does not replicate is the wire's standalone-linked-order refusal, which lives
+  in `boundary_error` beside the call rather than inside the validator.
+- **`VenueQuery::order_status` discards rows whose `client_order_id` is not the
+  one a targeted query named.** Central on purpose: `query_order` reads
+  `orders.first()` and `generate_order_status_report` filters only by venue
+  order id and instrument, so both singular paths would otherwise rest a
+  probe's correctness entirely on the other end's filter. An untargeted query
+  passes `None` and keeps every row, which is what the mass-status generator
+  needs.
+- **`request_quotes` pins its window end exactly as `request_trades` and
+  `request_bars` do**, from the authoritative run clock and only when
+  `data_origin_ns` is `Some` - that is, only when `/clock` was really fetched.
+  The three now say one thing; a future window-pinning change owes all three.
+- **Both client configs refuse `dial_timeout_secs = 0`** through the shared
+  `validate_dial_timeout`, with one message. The test asserts the two configs
+  separately and both halves bite separately; keep it that way if a third
+  config ever appears.
+
+## Decisions and hazards from bugs-adapter round 2
+
+- **Finding 10 is settled, at the code, and must not be reopened.** The
+  question was whether a host-stated price on a `Market` order should be
+  dropped, forwarded to earn a venue refusal, or refused locally. Two passes
+  argued for forwarding on the premise that the shape is unreachable through
+  nautilus's supported API. The premise is false and was checked at the source:
+  `MarketOrder`'s own constructors cannot produce it, and
+  `MarketOrder::from(OrderInitialized)` asserts the price is absent, but the
+  adapter never receives a `MarketOrder` - it receives
+  `SubmitOrder::order_init`, and `SubmitOrder::new` takes an arbitrary
+  `OrderInitialized` whose every field is `pub`. The shape is reachable through
+  public API with nothing in the way. Settled by refusing at the adapter
+  boundary through the venue's own validator, which is neither a silent drop nor
+  a round trip, and by the priced-market row in
+  `adapter_smoke::unsupported_init_shapes_are_refused_before_submitted`. A
+  comment is not a gate; this is now one.
+- **`track_task`'s insert-time pruning is ruled cosmetic, with reasons, and the
+  ruling is recorded so the next round does not re-derive it.** The concern was
+  that a bound argued from when insertions happen is the shape that had to be
+  enforced with a type one document earlier. It is not that shape here:
+  `track_task` retains only unfinished handles on every insert, so residency is
+  bounded by the peak number of tasks in flight, never by the length of the run.
+  The worst case is a handful of finished `JoinHandle`s sitting until the next
+  spawn, and `stop()` drains the vec outright. There is no workload that grows
+  it without bound, so there is nothing to fix.
+- **The socket suites still assert socket counts rather than the fate of
+  in-flight work across a stop, and that is the right split.** Round 1's
+  machinery is gated at the unit seam instead - `lifecycle`'s
+  `UndeliveredGuard` drop test, `exec`'s `report_undelivered_command` tests, and
+  `data`'s `stopping_the_data_client_retires_its_command_sender_and_its_history_waiters`.
+  A socket-level version would have to open the window between enqueue and
+  write, which is a bet on the scheduler and exactly what the doctrine forbids.
+  Do not file this as a gap again without naming a defect the unit gates cannot
+  see.
+- **Every one of round 2's five tests was bite-checked, each assertion
+  separately.** The two `dial_timeout` halves were perturbed one call site at a
+  time and each named its own config; the poisoned-mirror test was perturbed
+  twice, once at the lock and once at the clear, and fired a different assertion
+  each time; the targeted-query filter was perturbed once and bit at both the
+  unit and the socket level. The workspace count moved 1461 to 1465, which is
+  those four new tests exactly - the fifth change added an assertion to an
+  existing test rather than a test.
 
 ## Machinery agents may build on and must not break, from bugs-adapter round 1
 

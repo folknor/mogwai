@@ -387,6 +387,29 @@ impl MogwaiExecutionClient {
     /// One nautilus `OrderInitialized` as this venue's wire submit, linkage and
     /// all. Shared by the single-order and order-list paths so the two cannot
     /// disagree about what a leg means.
+    ///
+    /// A host-stated price on a `Market` order is never dropped here, and never
+    /// left for the socket to discover either. `MarketOrder`'s own constructors
+    /// cannot produce one - `MarketOrder::from(OrderInitialized)` asserts the
+    /// price is absent - but that is not the event this method receives:
+    /// `SubmitOrder::new` takes an arbitrary `OrderInitialized`, every field of
+    /// which is `pub`, so `order_type = Market` beside `price = Some(..)` is
+    /// reachable through nautilus's public API with nothing to stop it. Dropping
+    /// the price would hide that; forwarding it alone would make the refusal
+    /// depend on a live socket and arrive as a venue rejection for an event the
+    /// adapter could already see was malformed.
+    ///
+    /// So the built frame is run through `validate_submit_order` at
+    /// `SubmitPhase::PreStamp` before it leaves - the venue's own decode-boundary
+    /// verdict (`mogwai_venue::http::boundary_error` calls the same function at
+    /// the same phase), not a second copy of its rule table that could drift from
+    /// it. A malformed init therefore fails conversion, which by the AE8 ordering
+    /// above returns before any event is emitted or any mirror record exists, and
+    /// nautilus denies the order with the venue's own reason on it.
+    ///
+    /// The `TrailingStopLimit` exception below is different in kind: nautilus has
+    /// a stated limit field that mogwai deliberately represents as an offset, so
+    /// dropping it is a representation change rather than a discarded refusal.
     fn wire_submit(
         &self,
         client_order_id: &ClientOrderId,
@@ -403,7 +426,7 @@ impl MogwaiExecutionClient {
                 "cross-instrument triggers are unsupported: MOGWAI triggers from the order instrument's tape"
             );
         }
-        Ok(mogwai_protocol::SubmitOrder {
+        let wire = mogwai_protocol::SubmitOrder {
             client_order_id: client_order_id.to_string(),
             symbol: symbol_from_instrument(instrument_id),
             position_id: position_id.map(|id| id.to_string()),
@@ -440,7 +463,16 @@ impl MogwaiExecutionClient {
             time_in_force: convert::wire_time_in_force(init.time_in_force)?,
             expire_time: init.expire_time.map(|ts| ts.as_u64()),
             link: convert::wire_order_link(init)?,
-        })
+        };
+        if let Err(reason) =
+            mogwai_protocol::validate_submit_order(&wire, mogwai_protocol::SubmitPhase::PreStamp)
+        {
+            anyhow::bail!(
+                "this OrderInitialized is malformed for MOGWAI: {reason}. Fix the event the \
+                 strategy submitted; the venue refuses this frame at its decode boundary"
+            );
+        }
+        Ok(wire)
     }
 
     /// Mirror the order locally and tell nautilus it is on its way.
@@ -626,6 +658,7 @@ impl VenueQuery {
         client_order_id: Option<String>,
         open_only: bool,
     ) -> anyhow::Result<OrderStatusSnapshot> {
+        let target = client_order_id.clone();
         let request_id = UUID4::new().to_string();
         let reply_rx = self.register_ws_query(
             |pending, tx| drop(pending.orders.insert(request_id.clone(), tx)),
@@ -636,10 +669,25 @@ impl VenueQuery {
                 open_only,
             },
         )?;
-        self.await_reply(reply_rx, &request_id, |pending, id| {
-            pending.orders.remove(id);
-        })
-        .await
+        let mut snapshot = self
+            .await_reply(reply_rx, &request_id, |pending, id| {
+                pending.orders.remove(id);
+            })
+            .await?;
+        // The frontier rule applied to an answer: a targeted query resolves one
+        // order's in-flight state, so a row for any other order is discarded
+        // here rather than handed on as that order's truth. Central on purpose -
+        // `query_order` reads `orders.first()` and
+        // `generate_order_status_report` filters only by venue order id and
+        // instrument, so neither singular path re-checks the identity it asked
+        // for. The venue does filter correctly today; this is the adapter
+        // declining to rest a probe's correctness on the other end's filter.
+        if let Some(target) = target {
+            snapshot
+                .orders
+                .retain(|info| info.client_order_id == target);
+        }
+        Ok(snapshot)
     }
 
     async fn fill_history(&self, client_order_id: Option<String>) -> anyhow::Result<FillSnapshot> {
@@ -1032,10 +1080,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // and its watermark makes the new passenger's first account snapshot
         // look stale.
         self.stop()?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        let mut state = lock_recover(&self.state, "exec state");
         *state = ExecState::default();
         Ok(())
     }
@@ -3554,6 +3599,26 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 mod tests {
     use super::*;
 
+    fn test_client() -> MogwaiExecutionClient {
+        let config = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+        let core = ExecutionClientCore::new(
+            config.trader_id,
+            ClientId::from("MOGWAI-EXEC"),
+            *MOGWAI_VENUE,
+            OmsType::Netting,
+            config.account_id,
+            config.account_type,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(
+                nautilus_common::cache::Cache::default(),
+            )),
+        );
+        MogwaiExecutionClient::new(core, config).expect("test client builds")
+    }
+
     /// A mirror seeded with one order in `status`, plus the context that reads
     /// it. `ts_last` is 20 so a rejection stamped earlier can be seen to leave
     /// it alone.
@@ -3600,6 +3665,38 @@ mod tests {
             .get(&ClientOrderId::from("O-1"))
             .expect("order remains mirrored");
         (record.status, record.ts_last)
+    }
+
+    #[test]
+    fn reset_clears_a_poisoned_execution_mirror() {
+        let mut client = test_client();
+        lock_recover(&client.state, "test state").orders.insert(
+            ClientOrderId::from("O-OLD"),
+            OrderRecord {
+                strategy_id: nautilus_model::identifiers::StrategyId::from("S-1"),
+                instrument_id: InstrumentId::from("BTCUSDT.MOGWAI"),
+                order_side: OrderSide::Buy,
+                order_type: OrderType::Limit,
+                status: OrderStatus::Accepted,
+                venue_order_id: Some(VenueOrderId::from("V-OLD")),
+                ts_last: UnixNanos::from(20),
+                seen_trades: std::collections::HashSet::new(),
+            },
+        );
+        let state = Arc::clone(&client.state);
+        let poison = std::thread::spawn(move || {
+            let _guard = state.lock().expect("state starts healthy");
+            panic!("poison the execution mirror");
+        });
+        assert!(poison.join().is_err(), "the poison thread must panic");
+
+        client
+            .reset()
+            .expect("reset must recover the mirror lock and clear it");
+        assert!(
+            lock_recover(&client.state, "test state").orders.is_empty(),
+            "the prior passenger's order must not survive reset"
+        );
     }
 
     /// Every nautilus `OrderStatus`, against both rejection origins.
@@ -3876,6 +3973,64 @@ mod tests {
         assert!(
             lock_recover(&pending, "pending queries").orders.is_empty(),
             "send failure must not retain a waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_targeted_query_discards_a_row_for_another_order() {
+        let (ws_tx, mut ws_rx) = unbounded_channel();
+        let pending = Arc::new(Mutex::new(PendingQueries::default()));
+        let query = VenueQuery {
+            ws_cmd: Some(ws_tx),
+            pending: Arc::clone(&pending),
+            timeout_secs: 1,
+        };
+        let task =
+            tokio::spawn(
+                async move { query.order_status(Some("O-WANTED".to_owned()), false).await },
+            );
+        let ExecWsCommand::QueryOrders { request_id, .. } =
+            ws_rx.recv().await.expect("the query is dispatched")
+        else {
+            panic!("targeted order_status dispatched the wrong command kind")
+        };
+        let reply = lock_recover(&pending, "pending queries")
+            .orders
+            .remove(&request_id)
+            .expect("the correlated waiter exists");
+        reply
+            .send(OrderStatusSnapshot {
+                request_id,
+                orders: vec![OrderStatusInfo {
+                    client_order_id: mogwai_protocol::ClientOrderId::from("O-OTHER"),
+                    venue_order_id: mogwai_protocol::VenueOrderId::from("V-1"),
+                    symbol: Symbol::from("BTCUSDT"),
+                    position_id: None,
+                    side: mogwai_protocol::Side::Buy,
+                    order_type: mogwai_protocol::OrderType::Limit,
+                    time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                    status: mogwai_protocol::WireOrderStatus::Accepted,
+                    quantity: Decimal::ONE,
+                    filled_qty: Decimal::ZERO,
+                    price: Some(Decimal::from(100)),
+                    trigger_price: None,
+                    ts_triggered: None,
+                    reduce_only: false,
+                    post_only: false,
+                    ts_accepted: 1,
+                    ts_last: 1,
+                }],
+                ts_event: 1,
+            })
+            .expect("the query task still owns the receiver");
+
+        let snapshot = task
+            .await
+            .expect("query task joins")
+            .expect("query succeeds");
+        assert!(
+            snapshot.orders.is_empty(),
+            "the targeted query must not return O-OTHER as O-WANTED"
         );
     }
 }

@@ -234,10 +234,11 @@ impl MogwaiDataClientConfig {
     /// # Errors
     ///
     /// Returns an error if the mogwai venue URL is empty or is not a
-    /// `ws://`/`wss://` URL with a host (D.4), or if any armed havoc knob is
-    /// out of range.
+    /// `ws://`/`wss://` URL with a host (D.4), if `dial_timeout_secs` is zero,
+    /// or if any armed havoc knob is out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
+        validate_dial_timeout(self.dial_timeout_secs)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
         validate_speed(self.speed)?;
@@ -455,10 +456,11 @@ impl MogwaiExecClientConfig {
     /// # Errors
     ///
     /// Returns an error if the mogwai venue URL is empty or is not a
-    /// `ws://`/`wss://` URL with a host (D.4), or if any armed havoc knob is
-    /// out of range.
+    /// `ws://`/`wss://` URL with a host (D.4), if `dial_timeout_secs` is zero,
+    /// or if any armed havoc knob is out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
+        validate_dial_timeout(self.dial_timeout_secs)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
         validate_speed(self.speed)?;
@@ -694,6 +696,14 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_dial_timeout(dial_timeout_secs: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        dial_timeout_secs > 0,
+        "dial_timeout_secs must be greater than zero; zero expires every dial immediately"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +737,31 @@ mod tests {
             ..MogwaiExecClientConfig::default()
         };
         exec.validate().unwrap();
+    }
+
+    #[test]
+    fn both_configs_refuse_a_zero_dial_timeout() {
+        let data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            dial_timeout_secs: 0,
+            ..MogwaiDataClientConfig::default()
+        };
+        let exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            dial_timeout_secs: 0,
+            ..MogwaiExecClientConfig::default()
+        };
+
+        let data_error = data.validate().expect_err("zero cannot bound a data dial");
+        assert_eq!(
+            data_error.to_string(),
+            "dial_timeout_secs must be greater than zero; zero expires every dial immediately"
+        );
+        let exec_error = exec.validate().expect_err("zero cannot bound an exec dial");
+        assert_eq!(
+            exec_error.to_string(),
+            "dial_timeout_secs must be greater than zero; zero expires every dial immediately"
+        );
     }
 
     #[test]

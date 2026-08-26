@@ -994,7 +994,10 @@ impl DataClient for MogwaiDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
-        let end = date_to_unix_nanos(request.end);
+        // One request owns one fixed window. See `request_trades` for why an
+        // absent caller end is pinned only when this client read the run clock.
+        let end = date_to_unix_nanos(request.end)
+            .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
         if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
             tracing::error!(error = %err, "request_quotes: refusing an off-river window; answering empty");
             drop(sink.send(DataEvent::Response(DataResponse::Quotes(

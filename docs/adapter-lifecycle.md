@@ -136,6 +136,33 @@ Treat it as "probably not accepted" rather than "certainly not accepted", and
 let reconciliation settle the rest - the venue-truth reports on reconnect are
 what resolve the remainder.
 
+## An order the venue would refuse is refused here first
+
+Every order command the execution client builds is run through the venue's own
+protocol-boundary verdict - `mogwai_protocol::validate_submit_order` at
+`SubmitPhase::PreStamp`, the same function the venue's decode boundary calls -
+before the frame leaves the process. A frame that fails it never reaches the
+socket, and `submit_order` (or `submit_order_list`, for the whole list) returns
+an error naming the venue's own reason, which nautilus turns into an
+`OrderDenied` rather than an `OrderRejected`.
+
+This is a difference a host can observe, and it is the one worth stating: the
+verdict is the venue's either way, but it arrives without a round trip and
+without depending on a live socket. Nothing legal is refused by it, because the
+adapter and the venue are running one rule table rather than two.
+
+What reaches it in practice is an `OrderInitialized` assembled by hand. A
+`MarketOrder` built through nautilus's own constructors cannot carry a price,
+but `SubmitOrder::new` takes any `OrderInitialized`, every field of which is
+public, so `order_type = Market` beside a price is reachable through nautilus's
+public API. Such an event is a host defect; the adapter neither drops the price
+nor forwards it, it names it.
+
+Configuration is refused the same way and at the same distance from the venue:
+`validate()` on either client config rejects `dial_timeout_secs = 0`, which
+would otherwise expire every dial before a socket could open and report a local
+config error as an unreachable venue.
+
 ## The data client has the same shape, without the guard
 
 `MogwaiDataClient`'s sink is resolved the same way, from the same kind of

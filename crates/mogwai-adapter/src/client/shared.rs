@@ -373,10 +373,10 @@ impl HavocFilter {
                 continue;
             }
             let delay = self.delay_for(&msg);
-            out.push((msg.clone(), delay));
             if self.draw(self.duplicate_prob) {
-                out.push((msg, delay));
+                out.push((msg.clone(), delay));
             }
+            out.push((msg, delay));
         }
         out
     }
