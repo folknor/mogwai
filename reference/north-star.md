@@ -121,6 +121,13 @@ preference loses. Every demand for measurement names the decision the result
 would change. The budget that matters is minutes of owner attention at real
 forks.
 
+The vocabulary is decided the same way and more narrowly. Only the owner
+admits a glossary entry, so an agent meeting a load-bearing word with no
+definition escalates and never writes one - a definition invented to unblock
+a task becomes the target the code is then built toward, which is the whole
+failure the glossary exists to prevent. Vocabularies that want writing down
+and are not that word belong in `reference/`.
+
 ## What this is not
 
 Not a claim pipeline. Not a market-impact model. Not an authentication

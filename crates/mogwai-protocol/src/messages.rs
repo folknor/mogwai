@@ -2136,6 +2136,28 @@ pub struct AccountState {
     pub positions: Vec<Position>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub margins: Vec<PostedMargin>,
+    /// What the venue is enforcing against this account, as of the last equity
+    /// evaluation. Present on every frame a policed account receives; `None`
+    /// for an unpoliced account, which has no budget to report.
+    ///
+    /// Here so a strategy can size against its own remaining drawdown, which is
+    /// what a real prop trader reads off the firm's dashboard. Before this the
+    /// numbers existed only on `GET /account`, whose stated audience is the
+    /// evaluator judging a finished run - so a strategy driving the venue
+    /// through a nautilus host could not reach them at all.
+    ///
+    /// As stale as the last sweep, and deliberately so: `equity` inside it is
+    /// the figure the last risk evaluation used, not one recomputed for this
+    /// frame. Recomputing per frame would price a mark walk into the order
+    /// path, and would publish a budget the enforcement had not acted on. It
+    /// carries the same staleness the account's marks already do.
+    ///
+    /// Optional on the wire because it is additive: a decoder built before this
+    /// field ignores it and sees exactly what it saw before. That is safe here
+    /// in a way it is not for a terminal frame - a missing budget is a strategy
+    /// that does not size against it, never a false transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<crate::risk::RiskState>,
     pub ts_event: u64,
 }
 
@@ -2156,8 +2178,53 @@ pub struct Balance {
     pub total: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     pub free: Decimal,
+    /// Everything this currency is not free to spend, summed. Exactly
+    /// `total - free`, and exactly what the venue's own funds check subtracts,
+    /// which is the property that must not break: a snapshot disagreeing with
+    /// the engine's `free_balance` would be worse than either number alone.
+    ///
+    /// Three unrelated things sum into it, and they have opposite remedies, so
+    /// the sum alone cannot tell a consumer what would release the money. That
+    /// is what [`Balance::held`] is for. This field keeps the sum because
+    /// consumers already read it and because the sum is genuinely the right
+    /// answer to "how much can I not spend".
     #[serde(with = "rust_decimal::serde::str")]
     pub locked: Decimal,
+    /// What `locked` is made of. Absent only on a frame from a venue that
+    /// predates the breakdown; present and summing to `locked` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<HeldBreakdown>,
+}
+
+/// The three senses that sum into [`Balance::locked`], separated because a
+/// consumer watching `locked` rise cannot otherwise tell which of them moved
+/// or what would release it.
+///
+/// They release on unrelated events, which is the whole reason this exists:
+/// an order hold frees when the order is cancelled or fills, maintenance
+/// collateral frees when the position is closed or the mark moves, and an
+/// unsettled credit frees when its settlement instant arrives and nothing the
+/// consumer does can hurry it.
+///
+/// The three are computed from the same fold that produces `locked`, so they
+/// sum to it by construction rather than by a second traversal that could
+/// disagree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeldBreakdown {
+    /// Funds reserved against resting orders. Released by cancelling or
+    /// filling them.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub orders: Decimal,
+    /// Maintenance collateral posted against open marked positions - futures,
+    /// perpetuals, inverses, and an equity whose margin policy makes it a
+    /// Reg-T margin account. Released by closing the position, and it moves on
+    /// its own as the mark moves.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub margin: Decimal,
+    /// Sale proceeds the account owns but cannot spend until their settlement
+    /// instant. Released by the passage of simulated time alone.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub unsettled: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

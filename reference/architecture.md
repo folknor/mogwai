@@ -1,9 +1,23 @@
 # mogwai architecture
 
+How the venue is built and why. Four subjects in order: the venue's runtime
+shape and its account model; accounts, risk, instruments and valuation; the
+boatyard, clocks, delivery and history; and the generator, the tape identity and
+the fingerprint. The workspace map is last.
+
+The headings were added on 2026-08-26 to a document that had carried two in
+1,400 lines. They are section markers over prose that was written to be read
+straight through, so a section is an entry point rather than a self-contained
+unit: several state a rule and then spend paragraphs on the case that made the
+rule necessary, and that second half is usually the part worth reading. Nothing
+was moved, cut or reworded in that pass.
+
 Mogwai is a fake venue. A direct launcher starts one foreground process and
 receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
 generated rivers, and one ledger per account.
+
+## Two topologies
 
 Two topologies are supported, and both are required. The default is the per-run
 venue: a consumer given no address spawns its own ephemeral venue, owns it for
@@ -17,6 +31,8 @@ with the standing premise that resource cost shapes no decision here. The
 venue's semantics are identical either way; what differs is how many processes
 carry them.
 
+## Rivers, accounts and passengers
+
 A river is a generated sequence and is shared; an account owns its ledger,
 risk state and freeze stamp; a passenger is one connected trader riding one
 boat and dying with its socket. The
@@ -28,6 +44,8 @@ passenger, so a socket presenting it again resumes that ledger rather than
 opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
 token.
+
+## Delivery is attributed, not broadcast
 
 Delivery is attributed, not broadcast, which is what makes the per-account
 ledger worth having on the wire as well as in memory. A sweep executes one engine
@@ -45,6 +63,8 @@ serves one ledger per run has no reason to read it. If a consumer's own adapter
 skips that comparison on the strength of the one-ledger-per-run premise, the
 shared-venue topology breaks the premise, so the venue is what has to be right.
 
+## Callsigns and eviction
+
 An account is read under one callsign. A second socket presenting an existing
 account id under a different or absent callsign evicts the incumbent, because a
 ledger read and written by two unrelated parties is one ledger with two notions
@@ -59,6 +79,8 @@ state intact - which is what makes a killed worker able to come back to its own
 book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
 readiness record reports which way the venue is set so a launcher never has to
 infer it.
+
+## Close codes carry no meaning; close reasons do
 
 The close code does not carry the meaning; the reason does. `1000` is the
 ordinary code for any graceful close, and this venue sends it for three
@@ -81,6 +103,8 @@ peer fails the connection over: the close carrying the discriminator would never
 arrive, and a consumer that sees a bare EOF instead classifies nothing and redials
 into the loop. Every `CloseSpec` constructor trims to that budget, after
 composing its prefix, so the terminal survives and only the detail is spent.
+
+## What order an upgrade does its work in
 
 Eviction is the last thing an upgrade does. Every refusal `/ws` can make - an
 unresolvable shape, an account unfunded in the settlement currency, a
@@ -118,6 +142,8 @@ shared-callsign topology rests on that: a client opening its execution leg the
 instant its data leg upgrades must not find its own account still reserved and
 be answered a conflict. Returning the 101 with the tail still pending satisfies
 the first property and breaks the second.
+
+## Freeze, resume, retirement and the TTL
 
 An unattended account freezes. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
@@ -225,6 +251,8 @@ That exists for the ephemeral single-consumer venue, where making the one consum
 name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
+## The account id on a snapshot is a label
+
 The account id on a snapshot is a label, and a consumer keeps its own. A venue
 may hold several ledgers, and `/ws?account=` names one, but one connection sees
 exactly one of them. The account a connection carries is the only account on that socket, so nothing
@@ -250,6 +278,8 @@ The assertion that belongs on this path is the configured id, and it bites;
 lives. The scope is the connection, and that is where the argument would break:
 if a socket ever carried several ledgers, the id becomes a key and this whole
 paragraph is what has to change first.
+
+## Risk policy, and why the venue enforces it
 
 An account may carry a risk policy, which the venue enforces rather than
 reports. This is a risk-policy layer and not a funded-account feature: a live
@@ -301,6 +331,8 @@ The thresholds, the ratcheted peak and the remaining budget are published on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
+## The order-type surface
+
 The order-type surface is complete rather than curated, and as of 2026-08-18 it
 is complete in fact and not only in intent: Market, Limit, StopMarket,
 StopLimit, TrailingStopMarket, TrailingStopLimit, MarketIfTouched,
@@ -329,6 +361,8 @@ once. When the tape gaps past both, the trigger fires and the limit is not
 reachable, so the order rests instead of dumping into the hole - where a
 trailing stop market would have taken whatever the gap offered. Which of those
 a strategy wants is a real choice and the venue makes it for nobody.
+
+## Order lists, linkage, and atomic admission
 
 Order lists are a primitive, not a workaround. A linkage is a group id plus a
 rule that each member carries - one-cancels-the-other, one-triggers-the-other,
@@ -405,6 +439,8 @@ carve-out, reported as an error and asserted on in debug builds. The
 discrimination is deliberately not a match on the reason text, which would pin
 the check to today's wording and stay silent about a refusal added tomorrow.
 
+## Conditionals, trails, and tick resolution without per-tick evaluation
+
 A stop and a touched order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs
 away. A touched order enters - buy below, sell above - and fires when price comes
@@ -456,6 +492,8 @@ consuming the publisher's future extremes. The regeneration reads the same
 realization the tape thread published, so a surged river's extremes are the
 surged ones.
 
+## Time in force, and why an expiry is not a cancel
+
 Time-in-force covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
 - both can wait for a trigger - but never Ioc or Fok, which cannot wait for
 anything. Expiry is a time-driven pass with nothing to do with triggers: a Gtd
@@ -477,6 +515,8 @@ collapsing it at the last seam that could keep it. This reported `Canceled`
 until 2026-08-18, on the argument that no consumer matched the difference; that
 is the argument the order-type completeness ruling overturned, since the venue's
 surface is not sized against a consumer's current catalog.
+
+## The six instrument classes
 
 The ledger models six instrument classes, split by settlement shape rather
 than by asset class, because the shape is what decides how holding one moves the
@@ -511,6 +551,8 @@ ledger.
   L is non-linear and a long is not the mirror of a short. `InstrumentDef`
   carries the one implementation of both forms, so realized and unrealized can
   never disagree.
+
+## Equity accounts, margin, and holds
 
 An equity is a cash account or a margin account, and the margin policy is which.
 That distinction is what decides what an equity account may do, and it is
@@ -563,6 +605,8 @@ policy rather than multiplying `maintenance_per_contract` by a contract count,
 which read a notional-basis fraction as a per-contract amount and left a
 leveraged account unable to breach at any price.
 
+## Funding, valuation and the policy currency
+
 Funding is checked per account at bind. The venue's `[balances]` is only what an
 unnamed account opens with, so a consumer that named its own funding cannot be
 checked at boot. It is still knowable with no order at all, so a socket binding
@@ -611,6 +655,8 @@ symbol. Evaluation is therefore exact for an account on one river and bounded by
 mark cadence across rivers, which is a property of the model to know about rather
 than a defect to hide.
 
+## Symbol resolution, the river cap, and what `/instruments` advertises
+
 Symbol resolution is total over wire-legal labels. Configured profiles are
 held directly and other profiles are memoized without a cap. The permanent,
 expensive checkpoint chains are capped instead: creation of the 257th river is
@@ -627,6 +673,8 @@ does. The engine's instrument set grows on the same demand: `Run::ensure_instrum
 registers a def and installs its margin policy and fee schedule the first time
 a socket binds that symbol or an order names it, guarded on the registration
 having been new so re-binding never resets a live configuration.
+
+## The route surface
 
 The venue exposes `/health`, `/account`, `/accounts`, `/instruments`, `/clock`,
 `/operator/trades`, `/operator/quotes`, `/control/divergence`, and `/ws`. A
@@ -651,6 +699,8 @@ and engine in socket arrival order even when their modeled act latencies differ.
 The queue and a process-wide permit bound parsed command work before it reaches
 the blocking pool or engine mutex, and a full bound is a visible
 `AdmissionRejected` the engine never sees.
+
+## The two output-byte admissions
 
 There are two output-byte admissions on the order path, they answer different
 questions, and only one of them is the malformed-versus-capacity contract.
@@ -702,6 +752,8 @@ admission: `HistoryRejected` carries the same field and does say no, setting it
 `false` for a malformed request, an unreadable continuation, and a river cap
 already spent for the life of the process.
 
+## The upgrade query string is the whole binding
+
 Inbound frames and reassembled
 messages are capped at `MAX_INBOUND_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
@@ -745,6 +797,8 @@ the first market frame delivered after it. The declaration is positional, which
 is why it rides the market stream rather than the priority lane - a diagnostic
 that overtook the backlog would name a boundary the reader had not reached.
 
+## Declared feed gaps, and what is not one
+
 Only unarmed loss is declared. A frame withheld by an armed `GoDark` or
 `StallData` window is not loss, so a hole discovered while one is open is held
 back until delivery resumes rather than announced into a blackout. The venue does
@@ -764,6 +818,8 @@ label, not from the shape the label resolves to, so a run serving several
 symbols serves several genuinely different rivers. A run stays a pure function
 of `(seed, config)`; a river is a pure function of `(seed, label, resolved
 bundle)`. The seeding rules are set out with the run seed below.
+
+## How an order rests, triggers and fills
 
 Execution output that no command asked for is delivered to the account it
 concerns, not broadcast: a submitting connection claims its order at acceptance,
@@ -812,6 +868,8 @@ rather than prevented, and every fill is judged only against the tape - and a
 linked sibling is reaped by the venue's own rule rather than by one order
 meeting another.
 
+## The boatyard: rivers, boats, tickets and placement
+
 Live pacing is owned by the boatyard. A river is deterministic checkpointed
 water keyed by symbol and its resolved bundle digest. A boat is one positioned
 cursor, one OS pacing thread, one clock and one broadcast ring on that river.
@@ -851,6 +909,8 @@ cancels its worker and joins it away from the registry mutex. Other cadences
 on the same river stay. Rivers and their bounded checkpoint sets remain for
 process life so later history does not depend on eviction timing.
 
+## Placement on demand, and who pays for a cold river
+
 There is no exception to placement on demand. Every river is boatless until a
 passenger boards it, and no river is materialized before readiness. `serve` used
 to warm the default label's whole span before writing its readiness line and then
@@ -884,6 +944,8 @@ and it is the faulted river with the smallest symbol - deterministic across
 polls, unchanged in wire shape, and enough to answer whether any river faulted.
 `docs/cli.md` states what a poller should do with it.
 
+## Clocks: the venue's reference against a boat's
+
 The venue also retains a wall-to-sim reference, but it is not a placed boat's
 clock. It bounds history for a boatless river, drives the venue deadline, and
 stamps the venue-scoped pulled account ledger. A boated river instead answers
@@ -906,6 +968,8 @@ exogenous: orders never move it and there is no queue competition. Fifty agents
 submitting the same buy against the same water receive the same fill without
 changing one another's result. Transport havoc remains a property of what a
 passenger sees.
+
+## Generator havoc forks the river
 
 Generator havoc is river identity. A passenger whose resolved config carries a
 generator arm boards a different river than one without it, and nothing mutates
@@ -950,6 +1014,8 @@ coordinate rather than opening at the boarding instant, because two passengers
 carrying the same arm a second apart would otherwise ask for different water and
 every late boarding would fork a river of its own. The base is the run origin,
 which is where the old boatless handler already stamped its window.
+
+## History is read over the socket
 
 History is read over the socket. A poll names a symbol and no passenger, so once
 a label names several rivers it names none of them - and every proposed selector
@@ -1006,6 +1072,8 @@ wall arming instant and a
 simulated span rather than one boat's absolute deadline, and every passenger
 judges it on its own clock.
 
+## The fill sweeper
+
 The fill sweeper is one task on an earliest-deadline schedule over the placed
 boats, keyed by boat identity rather than by allocation address, each boat
 re-armed on its own clock and floored in wall time so an accelerated run cannot
@@ -1021,6 +1089,8 @@ per-boat list there is an anonymous boat-discovery surface enumerating every
 other account's symbols and cadences, which is what `/clock` was cut back to
 remove. The account-scoped row carries no speed, because one ledger carries one
 cadence per river and the symbol therefore names the seat on its own.
+
+## The tape identity, and what each bump changed
 
 An instrument is a bundle of knobs, not one fixed shape. Five classes are
 selectable, split by settlement shape and set out in full above: spot, equity,
@@ -1124,6 +1194,8 @@ untouched. The
 version constant is a process identity that advances whenever a change could
 move a tape; it is not a claim that every tape moved.
 
+## The synthetic top of book
+
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on
 the drifted latent mid. Every child in the parent sweep shares that book. Parent
@@ -1151,6 +1223,8 @@ something stronger than the venue promises, and it will lose that bet at boot;
 drain to a deadline instead. `scripts/smoke.py` did exactly that and flaked
 twice in one day before it was corrected.
 
+## The generator's volatility process and its three rails
+
 The volatility innovation is standardized to unit variance before it reaches
 that recursion. The `a0` derivation has always assumed this, but the innovation
 was a raw Student-t whose variance is `df / (df - 2)`, so the true condition was
@@ -1169,6 +1243,8 @@ against a measured maximum-strength envelope, not a fitted market quantity: as a
 log return it permits about +5.13 and -4.88 percent in a single event, and it
 does not bound cumulative movement over many events.
 
+## Two structural fidelity limits no parameter can remove
+
 Two structural fidelity limits of the generated futures river are stated here
 because no parameter can remove them. First, the calendar-driven baseline has
 no automatic reopen jump: a real session reopen prints a discrete gap where
@@ -1183,6 +1259,8 @@ volatility by hourly factors, so within-hour structure (the opening minutes'
 concentration at the cash open, the settlement flurry) is smeared uniformly
 across each hour; the profile reproduces hour-scale contour, not
 minute-scale texture.
+
+## Fingerprint ranges diagnose; mechanism validation gates
 
 Fingerprint ranges are corpus-labelled observations. They select defaults and
 produce operator diagnostics, but never admit or reject an instrument. A
@@ -1202,6 +1280,8 @@ The dimensionless `tick_return / vol_scalar` and its squared random-walk crossin
 estimate are exposed as diagnostics for deriving event-price repetition; they
 do not pretend to model sweep stepping, bounce, recentering, or explicit repeat
 draws by themselves.
+
+## A future's ledger, calendars and fees
 
 A future's ledger is single-currency and collateralized. There is no base leg:
 a fill moves the position and the VWAP, a quantity-reducing fill books
@@ -1242,6 +1322,8 @@ markets work: real schedules vary by account tier and real CME margin varies by
 product, volatility, portfolio and time. A fixed per-contract margin and a
 fixed schedule are declared simplifications of the venue's model, not
 descriptions of the market's.
+
+## Seeding, the tape origin, and the two durations
 
 A run draws one 64-bit seed at launch, or takes it from config, and every
 random stream in the run - each river's tape generator and the fill band -
@@ -1296,6 +1378,8 @@ fired. When both deadlines fall in the same instant the run wins, because a
 finished run is the stronger fact and the one that stays true for a consumer
 deciding whether to redial.
 
+## History refusals, and what bounds a page
+
 The history endpoints refuse rather than return an empty page on every
 impossible request, so a refusal is never mistaken for a span nothing traded
 in. A start before the tape origin or past the ceiling is a 400; so is a
@@ -1330,6 +1414,8 @@ forward claim is worth something, and a run that read its own future would look
 clean and not be. Repairing one passenger's own gap would need tape identity an
 anonymous route does not carry.
 
+## The adapter's side of the wire
+
 The protocol crate owns every JSON type shared by venue and adapter. The adapter
 uses its websocket for market data, execution and history alike: warmup and backfill
 are pulled with `QueryHistory` on the socket that boarded, in bounded pages
@@ -1352,6 +1438,8 @@ registers an unconfigured symbol, so only a read taken after the socket is up
 can see it - behind a watch-gated readiness barrier that black-holes delivery
 until the reseed says go, and a failed reseed tears the connection down rather
 than wedging the delivery pump.
+
+## Raw fills, and how the fill band was calibrated
 
 The generated river carries BBO updates and raw fills, not aggregated trades. One parent
 match event updates the latent market once and emits a same-side sweep of one
@@ -1382,6 +1470,8 @@ roughly 1.3x in RMS, the selection is unchanged: `0.001` reads median 0 and p90
 1, `0.002` median 1 and p90 3, `0.005` median 4 and p90 8, `0.010` median 9 and
 p90 16. `0.005` is still the smallest multiplier satisfying the median rule, so
 neither the band nor the fill golden's banded half needed to move.
+
+## The three tiers of a market reading
 
 Reading the market at a submit pays one of three tiers. Acceptance-time
 readings are memoized on the boat - one memo per boat, bucketed by fill-sweep

@@ -14,21 +14,30 @@ comment in the code, or (b) added to an existing or new `../reference/` document
 Or both. There are no exceptions - a ruling recorded only here is a ruling the
 next bug hunter re-derives from scratch.
 
-**Where an entry here also appears in `notes/bugs.md`, bugs.md is the source of
-truth.** The 2026-08-24 extraction copied entries rather than moving them, the
-two copies drifted, and the reconciliation ruling (2026-08-26) is that every
-correction lands in bugs.md and only there: a copy surviving here is
-unmaintained, and a section verified as fully duplicated is deleted here rather
-than kept in parallel.
+`notes/bugs.md` and `notes/bugs-engine.md` were adjudicated entry by entry on
+2026-08-26 and deleted. Everything that survived that pass is below; everything
+that did not was either closed by a ruling, already answered at its own code
+site, or was never work in the first place. This file is now the only backlog.
 
-That sweep is finished as of 2026-08-26. Every section was compared entry by
-entry against bugs.md; nine were full duplicates and are gone, four were mixed
-and keep only the entries the extraction never took, and the handful of clauses
-a copy here carried that bugs.md did not - the shared-exchange provenance behind
-C13, the upstream emitter's remedy, and five broadarrow items whose closing path
-had been summarized away - were moved into bugs.md before the copy was deleted.
-What remains below is what bugs.md does not carry. Anything added here later
-that also belongs there is a new drift, not a survivor of the extraction.
+## How to read an entry here
+
+Two rules earned the hard way during that adjudication, both of which cost
+real owner attention before they were written down.
+
+**Read the code site before the entry's prose.** Four entries were still asking
+a question the code had already answered, in a doc comment at the exact site the
+entry named: the launcher's Ctrl-C trade, the adapter's account-label mismatch,
+`havoc.data` being refused rather than dropped, and the reconciliation test's
+scope. An entry that names a symbol is a pointer to that symbol's own
+documentation first and a claim second.
+
+**An entry earns its place only if something in this tree could change to close
+it.** A true observation about where our repository ends is not a defect. Three
+entries were deleted for this: we cannot prove a third-party framework calls our
+code, we cannot detect a widened conformance tolerance without new measurement,
+and a lint cannot separate an assertion message from a wire payload. Each was
+correct and none was work. Where such a limit is worth recording, it is recorded
+at the site it constrains, not here.
 
 ## The gate that blocks other work
 
@@ -48,10 +57,7 @@ that also belongs there is a new drift, not a survivor of the extraction.
   - whatever the cut admits at Asia bars 1112-1113 - carried in from the segment
     data, and possibly a cut-criteria question for the owner rather than a bug.
 
-  Nothing further is built on the composed tape until a re-render passes. In
-  particular the serving wiring is a real refactor: `CheckpointIndex` is typed on
-  `GeneratedSource`, so a composed river means generalizing the checkpoint and
-  resume path.
+  Nothing further is built on the composed tape until a re-render passes.
 
   London and the two NY charts are unviewed and unprobed, so whether the defect
   is Asia-specific or general is open. Regenerating one end to end (substitute
@@ -70,18 +76,330 @@ that also belongs there is a new drift, not a survivor of the extraction.
   these charts are composed tape time, not a calendar: a composed tape starts at
   unix ns 0 and elides the hours between sessions.
 
+- **A composed river has no checkpoint chain, so a distant seek is linear in
+  ticks.** The residue of the composed-source work, and blocked behind the gate
+  above rather than independent of it. `SegmentSource::seek_to` no longer caps
+  the walk - a cap there turned distance into a latched terminal fault, which
+  would have made a window on a composed river fail silently - so a far target is
+  reachable and simply costs the whole walk. The composed level and the sampling
+  draw are both path-dependent, so no segment can be skipped without composing a
+  different river.
+
+  `GeneratedSource` had the same shape and `CheckpointIndex` fixed it: snapshot
+  every K ticks, resume from the snapshot before the target, replay the residual.
+  The composer wants the same thing, and `Rivers::place_cursor` shows how a
+  caller consumes it.
+
+  Currently unreachable rather than fixed, and deliberately fenced.
+  `crates/mogwai-venue/tests/composed_source_guard.rs` fails the build if any
+  source under `mogwai-venue/src` names `SegmentSource` or the
+  `mogwai_data::segment` module, and its message states what is owed before the
+  wiring may land - a checkpoint chain for the composer, or a bounded placement -
+  and says to delete the guard in the same change. Do not delete the guard
+  without paying what its message asks. The type-level barrier is real but is not
+  the rule: `CheckpointIndex` holds a `GeneratedSource` concretely, so
+  generalizing it to a boxed `TickSource` would remove the guarantee without
+  removing anything that reads as one.
+
+## The order path
+
+One entry, because these are one problem seen from four sides. This is the
+largest open correctness item in the repository.
+
+- **Market orders do not cross a book, and in a quiet market that makes
+  execution better rather than worse.** Established 2026-08-26 by reading the
+  fill path end to end.
+
+  What a real exchange does: a market buy lifts the best offer and, if its size
+  exceeds the top level, walks down the book level by level. Slippage is the
+  arithmetic consequence of depth against order size, not a draw. In a quiet
+  market the spread widens and depth thins, so execution gets *worse*.
+
+  What mogwai does. `orders.rs`'s market branch fills at `stated_px` plus a band
+  drawn from a trailing volatility reading, and for a price-less market submit
+  `stated_px` is the last print the venue stamped on via `fills::read_last`. When
+  the trailing window carries fewer than `MIN_VOL_SAMPLES` returns, `read_market`
+  refuses, the band is zero, and the order fills at exactly the last print with
+  no slippage at all. `fills.rs` calls a zero band "the most permissive fill
+  regime the venue has".
+
+  Three things are wrong at once, and the third is the serious one:
+
+  - The fill is centred on the last *trade*, never on the offer. The last print
+    may have occurred at the bid, so a market buy gives away the half-spread on
+    every order at every instant, not only quiet ones.
+  - Depth is never consulted. `bid_sz` and `ask_sz` exist and a 1-lot and a
+    500-lot are treated identically.
+  - The sign is inverted. Quiet means fewer samples, a refused reading, a zero
+    band, and therefore a *perfect* fill - where a real quiet market is where
+    execution is worst. And this is not an edge case:
+    `serving.rs`'s own comment records that the fitted BTCUSDT tape falls under
+    `MIN_VOL_SAMPLES` "at a substantial fraction of instants".
+
+  The tape already carries what is needed and the fill path discards it.
+  `QuoteTick` in `messages.rs` has `bid_px`, `ask_px`, `bid_sz` and `ask_sz`, it
+  is published to consumers and it is what `/quotes` answers from. The only two
+  places `fills.rs` touches a quote read it as
+  `TickEvent::Quote(quote) => (quote.ts_event, None)` - take the timestamp,
+  discard the payload. There is no `bid`, `ask` or `spread` anywhere in that
+  file. So the venue quotes a bid and an offer to the strategy and then fills
+  that strategy's market order without looking at either.
+
+  Why it matters more than its size suggests: the north-star says a forward run
+  proves execution robustness and nothing else. Systematically optimistic fills
+  are the one failure that makes a forward test worse than useless, because it
+  reports success.
+
+  Refusing the order is not the escape route. A refused reading is the routine
+  case rather than a fault, so refusing would refuse a substantial fraction of
+  every market order a strategy sends - a venue that declines an order type
+  because its own estimator was quiet.
+
+  The work, roughly in order: fills consult the BBO and cross the spread;
+  slippage comes from walking `bid_sz`/`ask_sz` against order size; the
+  volatility band retires or is demoted to whatever it is genuinely good for.
+  This moves generated execution behaviour, so it owes the realism gates, a
+  rendered chart under the owner's eye, and a tape protocol version bump.
+
+  Three former entries fold in here:
+
+  - **The synthetic top of book is uncalibrated.** Quoted width, top sizes and
+    trade displacement are placeholder constants pending CME TBBO. The layer has
+    existed since tape protocol 7; what is absent is the calibration. This stops
+    being a nice-to-have the moment fills read the book, because the fill price
+    then depends on those constants being real. Blocking, not adjacent.
+  - **Nothing on the wire says whether a submit took a market reading**, which
+    forces `serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
+    to key on the venue's `warn` text - not a wire contract, and reworded by
+    anyone touching the engine's fallback path without a test noticing. The
+    proposed fix was an optional field on `OrderFilled` carrying the reading's
+    instant. Do not ship that first: it buys visibility into behaviour that is
+    probably wrong. With a book, "did it take a reading" stops being the
+    question.
+  - **The price-span-per-inferred-match-event measurement.** How wide the fill
+    band should be for a triggered stop has never been computed, and the sweep
+    tail quoted elsewhere (up to 2,213 aggTrade rows in one inferred event on
+    BTC) counts rows rather than distinct prices, so it does not establish how
+    far a marketable order walks. Measuring the right width for a band we intend
+    to retire is work aimed at the wrong target. If the band survives in some
+    reduced role, this measurement comes back.
+
+- **The order path refolds all holds whenever a margin-equity sell is
+  involved.** `rest_open`, `take_open` and `refresh_open_hold` each trigger a
+  full `rebuild_order_holds_excluding(None)` refold when a margin-equity sell is
+  in play, so those accounts go from constant time to linear in open orders on
+  the order path. Correct, and the price of moving the cover allocation into the
+  aggregate, but it is a hot path.
+
+  Parked against the book-crossing work above rather than on its own, because
+  that is what turns this into a measurable question: a venue walking depth
+  against order size has a real workload to profile, so "is the refold actually a
+  bottleneck" acquires an answer instead of a guess.
+
+  Round 8 tried to cache it and refused. The reasoning, recorded so it is not
+  re-derived: exact constant-time mutation is not available, because both the
+  max-resting-price rule and the exclusive-group max-leg fold are maxima over a
+  live multiset, and deleting a current maximum needs the next one, which a
+  scalar running max cannot supply. An exact logarithmic index is feasible - an
+  ordered multiset per group plus one over resting sell prices, mutated on rest,
+  take, amend, fill and cancel - and it is not cheap in the way that matters: it
+  adds release-critical state that all five transitions must maintain, and that
+  state has to be reconstructible from `OpenBook` alone. The asymmetry that
+  decides it is that `reconcile_order_holds` panics only under
+  `cfg(debug_assertions)`, so a drifting cache fails loudly in a test run and
+  silently corrupts margin in release. A slow correct fold beats a fast unproven
+  one until an index arrives with a release-checkable reconstruction.
+
+  Whatever is done must preserve what round 1 and round 2 established: the
+  incremental cache and a fresh fold stay in exact agreement, and
+  `margin_equity_sell_holds` deliberately counts a price-less resting sell for
+  its quantity while contributing no price, so the two folds cannot disagree even
+  on an order no wire path can currently rest.
+
+## Tape research v2
+
+Several parked items are waiting on one thing: what tape research v2 turns out
+to be. Recording that here so each stops looking independently stalled.
+
+The standing owner ruling that governs this whole cluster, because it keeps
+being re-filed by fresh readers: **tape fidelity is not a prerequisite for
+exchange machinery.** All the machinery of a real exchange can be built against
+the tapes we have. Better tapes are gated on v2 regardless, so an unfitted
+instrument class is not a finding and does not need re-reporting.
+
+- **Nothing has been fitted for equity, perpetual or inverse.** A symbol
+  configured as one is served the default tape wearing a different shape. The
+  intake sequence is what makes a preset honest and none has been run. Note that
+  MES is already a stated stopgap borrowing the MNQ fit, so this is not the only
+  preset in borrowed clothes.
+
+  The intake half, formerly a separate entry: candidate symbols for the missing
+  session classes are a perp like ETHUSDT.P, a second CME future like MGC, and
+  AAPL for cash-equity hours. Terabytes of DBN data are already downloaded on
+  another host, and the Databento account holds about twelve months of MNQ, ES
+  and MES tbbo plus mbp-1 server-side, re-fetchable by job id at no new cost.
+  Whether BTC and ETH genuinely differ enough to warrant different values is
+  unsettled - the measured 2.8x dispersion across three crypto majors suggests
+  so, and one month of one venue cannot settle it. The evidence asymmetry stays
+  relevant to preset authors: BTC, ETH and SOL have trade-level archives while
+  MNQ and MES had 15-second bars and nothing else, so a CME preset's cadence is
+  derived arithmetic and its clustering comes from nowhere. Re-derive the
+  asymmetry from the DBN bulk download now on disk before repeating it.
+
+- **The 86 MB and 57 MB build tax, and the dead protocol code.**
+  `analysis/mnq-measure-12a.json` is 86,147,079 bytes and is `include_str!`d at
+  six sites, three of them outside `cfg(test)`, so three copies are baked into
+  the shipped binary. The three non-test sites are
+  `mogwai-cli/src/ordered_counts.rs` (`run_with` and `run_with_rows`) and
+  `mogwai-cli/src/count_curve.rs::reference`; the test-only three are in
+  `mogwai-lab`'s `arrival_control.rs` and `arrival_screen.rs`.
+  `analysis/mnq-arrival-screen.json` is 57,044,526 bytes and is parsed in full by
+  `arrival_envelope_diagnostic.rs`'s
+  `committed_screen_selects_the_twenty_a3_only_failures`, which is not ignored,
+  so every `brokkr check` reads it.
+
+  Both are terminal outputs of the closed 12b protocol. They cannot be removed
+  without deciding the larger question they sit inside: roughly 25,000 lines
+  across `mogwai-lab` and `mogwai-cli` are the compiled machinery of the closed
+  arc (the arrival screen, control and envelope family, `measure12a`,
+  `aggregate`, `stage_m` and its Tier 2 limb, `count_curve`, `ordered_counts`,
+  `slow_geometry`, `tick_composition`, `select_windows`), and the binary still
+  advertises them as supported subcommands.
+
+  Owner call, deferred until v2's shape is known, since a successor may want some
+  of the corpus-side machinery. Do not delete without a ruling. A split into a
+  runtime read rather than `include_str!` was proposed and declined on the same
+  grounds: it is a separate decision from the one being deferred, and taking it
+  now prejudges nothing usefully.
+
+- **The absolute-rate conflict, unverified.** The claim that the shipped arrival
+  path carries a 5.5 to 7.0 percent absolute-rate conflict against the observed
+  July month. It exists only as prose in `notes/tape-research-v1.md`; no test or
+  artifact in the tree bears on it, `ARRIVAL_MEAN_CAL` is unchanged, and a
+  Jensen-gap explanation was refuted in closed form. It also cannot name the
+  decision a measurement would change, which is the standing bar for running one.
+  Very likely moot under v2. Treat as unverified prose, not an established
+  defect - it has been read as the latter more than once.
+
+  The other two thirds of the original finding are closed and should not be
+  re-filed from the old note: the `children_mean` clamp is repaired with the fix
+  documented at the branch in `begin_event`, and the `ARRIVAL_MEAN_CAL` leak onto
+  the integrated frame is gated by
+  `the_arrival_mean_calibration_stays_off_the_integrated_frame`, with
+  `GeneratedSource::active_mean_s` giving the calibrated side an observable so
+  both halves are stated as exactly as each other.
+
+- **Numerical stability in `AutoCorr`.**
+  `crates/mogwai-lab/src/characterize/mod.rs`. Its `acf()` guards zero variance
+  with `if var <= 0.0`, which catches zero and any negative residue but not a
+  positive one, so a series constant at an irrational value (the fixture case is
+  `abs(log return)` constant at ln2) can leave a tiny positive residue from
+  `sumsq / n - mean * mean`, slip the guard, and return an ACF that came out of
+  catastrophic cancellation rather than measurement. Both branches substitute a
+  number where the honest answer is that the quantity is undefined for a constant
+  series.
+
+  Deliberately not fixed. `AutoCorr` also computes the F1 duration ACFs and is
+  bit-exact against `analysis/cadence.json` (`duration_acf_lag1`
+  0.32204142581620676, `duration_acf_lag5` 0.22388204486699373), the lineage the
+  fingerprint's cadence half rests on. A fix returns an explicit unavailable
+  rather than zeros, uses a relative rather than absolute variance floor, and
+  probably Welford or two-pass accumulation - all of which move numbers, so the
+  real work is the cadence-impact analysis and possibly a refit. Since a refit is
+  exactly what v2 does anyway, fixing it there costs nothing extra; fixing it now
+  buys a refit for a case no real corpus produces.
+
+- **Whether the protocol-12b Stage A refinement pass should run at all.**
+  Deferred by the owner 2026-08-09 rather than settled, so the frozen pass stands
+  and the budgets were raised to fund it.
+
+  For cutting: refinement is 29,200 s of the 35,526 s Stage A cost model, 82
+  percent, and its entire product is a finer loss ordering over cells that Stage
+  B then truncates to `STAGE_B_CELL_CAP = 24` per family. It cannot rescue a
+  family whose coarse admissible region is empty, because it subdivides around
+  that region's own boundary cells. And `SELECTION_INDIFFERENCE = 0.01` already
+  declares losses inside that margin as not separating candidates, so a
+  half-spacing lattice buys precision the selection is defined not to use.
+  Cutting drops Stage A to about 6,326 s. Against: the selected point would sit
+  on the coarse lattice, and nobody has shown the coarse spacing is fine enough
+  for the mechanism to be found at all.
+
+  Not the same question as `STAGE_B_CELL_CAP`, which earns its place: a Stage B
+  cell is a full month-scale walk per seed at about 250 s, so an uncapped
+  1,508-cell region genuinely is tens of hours. Changing `REFINEMENT_DEPTH` or
+  `REFINEMENT_CELL_CAP` is a section 17 amendment against the contract of record.
+
+- **The protocol-12b section 5.5 rescale contradicts the shipped preset
+  convention.** That section freezes the negative control's re-centring as
+  "rescale the 24 values to sum to 1, which the `SessionProfile` schema
+  requires", and the schema requires no such thing: nothing in `config.rs` or
+  `session.rs` enforces sum-to-one, and the shipped MNQ `intensity_hour` sums to
+  23.862306, a mean-one curve. It moves no generated rate either way, since
+  `SessionModulator::new` divides by an exposure-weighted normalizer so a common
+  factor cancels at every instant. What it cost is readability, and it will cost
+  the same again at any later reader comparing the two curves elementwise. Fixing
+  the frozen sentence is a section 17 amendment through review, not an edit.
+
 ## Venue and protocol
 
+- **`RunComplete` reports slightly less than the declared duration, and nothing
+  on the wire lets a consumer tell.** The deadline is judged on the venue clock
+  while `ws.rs` re-derives every announcement on the receiving socket's boat
+  clock, so the announcement trails by the placement gap times `speed`. Both
+  halves are deliberate and stated in `reference/clock.md`. `RunComplete` carries
+  only `sim_now_ns` and `elapsed_ns`, and the variant's own doc states the
+  consequence: `elapsed_ns` is the span that boat covered, not the run's declared
+  duration.
+
+  What is open is whether a consumer should be able to distinguish "the run
+  served its whole duration and my boat was placed late" from "the run was cut
+  short". Nobody has asked for the distinction.
+
+  Two shapes if it is ever wanted, with their costs. A new field on `RunComplete`
+  carrying the venue's own elapsed beside the socket's: cheap, but an old decoder
+  ignores it and commits the same false transition, which is the reasoning the
+  `PassengerDurationComplete` landing already recorded for preferring a new tag.
+  A second tag the way that landing took: fails loudly on an old decoder, but
+  costs every consumer a third terminal frame to classify on top of `RunComplete`
+  and `PassengerDurationComplete`. The status quo misleads nobody who reads the
+  variant doc, only somebody who assumes.
+
+  Adjacent and previously untracked: `RunComplete` is also emitted on the
+  already-complete-at-boarding path, where `elapsed_ns` measures from the boat
+  epoch, so a passenger boarding a finished run reports the boat's whole span as
+  its own elapsed. The variant doc calls this intended.
+
 - Refusal texts spell their bounds out instead of naming the constant.
-  Re-verified 2026-08-24 and half of the original finding is closed:
-  `messages::validate_wire_symbol` now says bytes and a test pins the refusal
-  text against `MAX_SYMBOL_LEN`, so moving the constant fails loudly. What is
-  left is cosmetic: the bound is still spelled `32` inline on the refusal a
-  client sees at the venue's front door, and four divergence texts in the same
-  module have the shape too - count at the production sites, since the module's
-  tests carry the same strings as expected values. Both refusals return
-  `&'static str`, so fixing means changing the return type or reaching for a
-  `const` formatter, which is why neither was fixed in passing.
+  Half of the original finding is closed: `messages::validate_wire_symbol` now
+  says bytes and a test pins the refusal text against `MAX_SYMBOL_LEN`, so moving
+  the constant fails loudly. What is left is cosmetic: the bound is still spelled
+  `32` inline on the refusal a client sees at the venue's front door, and four
+  divergence texts in the same module have the shape too - count at the
+  production sites, since the module's tests carry the same strings as expected
+  values. Both refusals return `&'static str`, so fixing means changing the
+  return type or reaching for a `const` formatter, which is why neither was fixed
+  in passing.
+
+- **Two places the boat implementation diverges from what the glossary says a
+  boat is.** Raised by round 7's cold review, and recorded here in the correct
+  direction: the glossary states the end state, so where these differ the code
+  owes the change and the glossary entry is not stale.
+
+  - The Boat entry says "passengers asking for the same river and the same speed
+    share one boat". Two accounts dealt identical bounds now get two boats. They
+    read byte-identical water from the same instant, so nothing observable
+    distinguishes them, but the boatyard is no longer satisfying the sentence.
+  - The Boat entry says "a boat is an implementation cache with no semantics of
+    its own". A named boat's end bound is the passenger's completion, which is a
+    semantic the hull now carries - and the Passenger entry already says a
+    passenger holds its own declared duration, so the bound belongs to the
+    passenger.
+
+  Ruled 2026-08-26: placement does not earn a glossary entry, and these two are
+  not urgent. The analysis behind the window itself is settled and correct - a
+  named window is a placement and not a river, provably, because the window never
+  enters `RiverKey`, so seed derivation, tape origin and the generated value at
+  any instant are the same either way.
 
 ## Engine
 
@@ -93,15 +411,78 @@ that also belongs there is a new drift, not a survivor of the extraction.
   the serving path over it is the one thing no venue does. Open only as a
   known-covered case.
 
-## Data and generator
+- **An unvaluable policed account keeps trading with its risk rules
+  unenforced.** Reframed 2026-08-26 after an owner ruling, and the reframing is
+  the important part.
 
-- Generator havoc must fork the river. The tape machinery deliberately mutates a
-  canonical boatless river instead, with the pinned control-boundary snapshot,
-  the coarsen exemption and the walk-back floor built to make non-forking
-  correct, so the gap has known size and known work to undo. The seated-boat
-  refusal standing in for the fork names a remedy no route exposes, and its gate
-  reads boat presence in the non-awaiting form, so it is vacuous against a
-  concurrent board.
+  The wrong framing, which this entry carried for a long time: valuation is
+  "one hop only", so an account holding ETH under a USD policy with only ETHUSDT
+  and BTCUSD listed is unvaluable rather than valued through a chain, and a rate
+  surface would fix it.
+
+  Why that is wrong. What decides the value of 1 ETH is the tape and nothing
+  else: the ETHUSDT river last printed a number, and that number is denominated
+  in USDT because that is the instrument. Chaining to USD requires converting
+  USDT to USD, which no river prices. The only way to complete the chain is to
+  assume one USDT is one USD - an opinion about the world that the venue has
+  never measured, is in no fingerprint, and would be fabricating. A rate surface
+  is not a missing feature; it is a mechanism for inventing prices, and every
+  price it invented would flow into a liquidation decision. The one-hop rule is
+  the venue declining to hold a view it has not earned, which is the same
+  discipline as `read_market` returning `None` when a reading would be untrue
+  rather than imprecise.
+
+  So the defect is not "how do we value the unvaluable". It is what the venue
+  does when it genuinely cannot value an account. Today `sweeper.rs` logs
+  "cannot value this account in its policy currency; risk is not enforced this
+  pass" and moves on, so a policed account keeps trading with its rules switched
+  off, one pass at a time, with a warn as the only trace. Against the north-star
+  - a strategy that would have been liquidated must actually be liquidated - that
+  is the sharp end.
+
+  The owner ruling on the shape: it must be a required config setting, and if the
+  venue cannot deterministically compute everything correctly from what the user
+  specified, it dies screaming at boot rather than degrading at runtime.
+
+  The refinement that makes that buildable, since the venue cannot enumerate at
+  process start what symbols it will be asked to serve: **boarding is the boot
+  moment.** At boarding the venue knows both halves - the account and its policy
+  currency, and the exact instrument this passenger will trade - and a strategy
+  is single-instrument by settled premise, so that one symbol is the whole of
+  what this passenger can make the account hold. The check is therefore decidable
+  deterministically at connect. If a policed account's policy currency cannot
+  reach the bound instrument, the boarding is refused with a named reason.
+  Nothing is enumerated in advance, nothing is declared, serve-anything is
+  untouched: the symbol is still served to anyone who asks, it just cannot be
+  bound by that account under that policy. From the user's chair that is boot -
+  the connection fails immediately, before a single order, rather than forty
+  minutes into a run. It also cannot take the process down, which matters on a
+  venue serving fifty accounts.
+
+  This completes a rule the front door already half-enforces: `run.rs` and
+  `risk.rs` already refuse a policed account that *opens* holding anything other
+  than its policy currency. Opening and boarding are the only two ways currency
+  enters, so the two checks together close it, and the sweeper's warn becomes
+  unreachable rather than load-bearing.
+
+  Note when implementing: `reference/architecture.md` records that an order whose
+  shape would leave a holding nothing prices is already refused at entry by name,
+  so the entry-time guard exists and this is narrower than "nothing stops it".
+  Establish exactly what that guard covers before adding a second one.
+
+  Two smaller residues of the original entry: the mark is as stale as the last
+  sweep, inherited from the margin ledger; and the ledger-generality ruling still
+  wants shares, leverage and funding payments, each of which needs a holding
+  valued in a currency it is not denominated in.
+
+- **`Balance.locked` conflates three things** - order holds, maintenance
+  collateral and unsettled credits - in one wire number with opposite remedies.
+  An order hold frees on cancel, maintenance collateral frees on closing the
+  position, an unsettled credit frees when it settles, and a consumer watching
+  `locked` rise cannot tell which happened or what would release it. Two scopes
+  recommend a split; `Account::unsettled`'s doc in `mogwai-engine` argues the
+  conflation is fine. Owner has said this gets resolved; the ruling on what to do
+  is still owed.
 
 ## Adapter
 
@@ -137,18 +518,16 @@ that also belongs there is a new drift, not a survivor of the extraction.
   while `mogwai_protocol::validate_submit_order` requires a `MarketToLimit`
   submit to carry a price, because on this venue the limit the remainder rests
   at is the consumer's to state. So a factory-built market-to-limit is refused
-  at `SubmitPhase::PreStamp` - since the bugs-adapter arc that refusal lands
-  locally as an `OrderDenied` before any event is emitted; before it, the venue
-  refused the identical frame at its decode boundary, so no verdict changed.
-  The workaround is host-side: set `price` on the `OrderInitialized` by hand
-  before `SubmitOrder::new`, which for this one type is the contract rather
-  than a defect (documented in `docs/adapter-lifecycle.md`). Closing it
-  properly is a cross-repository question: either nautilus grows a stated-limit
-  form of the type, or the adapter would need a limit it cannot invent - it has
-  no reading to price one from, and guessing would name the number the venue
-  exists to own. No adapter test submits a `MarketToLimit` today, which is how
-  the gap stayed invisible; a test pinning the refusal's reason would at least
-  make it loud.
+  at `SubmitPhase::PreStamp` - the refusal lands locally as an `OrderDenied`
+  before any event is emitted. The workaround is host-side: set `price` on the
+  `OrderInitialized` by hand before `SubmitOrder::new`, which for this one type
+  is the contract rather than a defect (documented in
+  `docs/adapter-lifecycle.md`). Closing it properly is a cross-repository
+  question: either nautilus grows a stated-limit form of the type, or the
+  adapter would need a limit it cannot invent - it has no reading to price one
+  from, and guessing would name the number the venue exists to own. No adapter
+  test submits a `MarketToLimit` today, which is how the gap stayed invisible; a
+  test pinning the refusal's reason would at least make it loud.
 
 - **`perpetual`'s four funding fields are still dropped silently at
   `convert::instrument_any`.** `funding_interval_ns`, `funding_rate`,
@@ -159,7 +538,312 @@ that also belongs there is a new drift, not a survivor of the extraction.
   to build is a publisher on that channel rather than a bail. Nothing has been
   built for it and nothing warns, which is the part worth remembering.
 
-- `HavocSpec.data` (`Option<MarketRegime>`) appears to have no reader on the
-  adapter side now that the `Subscribe` carrier is retired, so an operator
-  setting `[havoc.data]` may be arming a field nothing consumes - the
-  looks-armed-and-is-not shape. Wants a verdict: route it or refuse it.
+- **`DuplicateNextFill` may certify nothing against a nautilus host - recheck at
+  the next pin.** At nautilus 0.62.0, `commit_fill` emits `fill.clone()` with the
+  `trade_id` included, and `ExecutionEngine::validate_fill_for_order` calls
+  `Order::is_duplicate_fill`, which matches `trade_id`, `order_side`, `last_qty`
+  and `last_px` together and bails with a warning before `Position::apply`. So
+  the arm is swallowed in silence and exercises nothing.
+
+  Owner reports, unverified, that an upstream fix has landed for the next
+  nautilus release. That changes the calculus rather than settling it, so the
+  action is to re-verify at the next pin bump and decide then:
+
+  - Keeping the shared id models a retransmitting venue and makes the arm a test
+    of the consumer's deduplication. If nautilus now surfaces the duplicate
+    rather than swallowing it, this becomes the right answer and needs no change.
+  - Minting a fresh `trade_id` per emitted fill models a phantom execution, which
+    a correct consumer books twice - the divergence the arm's own doc describes,
+    "doubles the wire event, not the truth". Minting shifts every subsequent
+    venue trade id, so it owes a re-bless of the exact-equality transcripts.
+
+  Both readings are recorded at the emission site in `mogwai-engine`'s
+  `commit_fill`.
+
+- `HavocSpec.data` was resolved and needs no entry: `config.rs`'s
+  `validate_havoc` refuses the field outright with a named error telling the
+  operator to use the offline `gen` command or configure the venue's river, and a
+  test pins the refusal text. Recorded here only because the "may be arming a
+  field nothing consumes" claim outlived its fix twice.
+
+## Tests and tooling
+
+- **Triage every test for parallel safety, and kill every fixed duration and
+  wait.** `[test.profiles.gate]` and `[test.profiles.dev]` both sit at
+  `test_threads = 8`, a measured compromise rather than a resolution: at 16 the
+  run goes red as a wrong answer rather than a watchdog timeout, so the ceiling
+  is set by our least robust test rather than by the machine.
+
+  The triage is done and its result is the load-bearing part, because the raw
+  count was hiding the shape. The often-quoted "73 sleep sites" is a count over
+  the whole of `crates/`, and about forty-four are production pacing - the
+  launcher's owner loop, the adapter clock and reconnect ladder, the boat and
+  sweeper cadences - which price no test. The test and test-support sites number
+  thirty-one: sixteen under `mogwai-cli/tests`, fifteen under
+  `mogwai-adapter/tests`. Of those:
+
+  - **Eighteen are poll intervals inside a deadline-bounded loop.** The wanted
+    shape already: the loop ends on a condition, the deadline is the failure
+    path, and the sleep only decides how often the condition is asked about. Not
+    a gate cost. Leave them.
+  - **Six are negative-observation windows** - the adapter's blackout, stranger
+    socket and dial-cap watches, `havoc.rs`'s "the data client must never ship
+    divergences" window, its bound-to-another-run disconnect watch, and
+    `serving.rs`'s settle before reading the absence of a market-reading warn.
+    The assertion is that something does not happen for a span, so the duration
+    is the subject rather than a bet on it. Shortening one weakens the test.
+    Leave them, and do not let a later sweep mistake them for convertible.
+  - **Three are cases where the duration is the thing under test.**
+  - **Two were converted** and the convertible class is now empty.
+  - **Two are blocked**, on a decision or a missing seam: `serving.rs`'s
+    market-reading gate spaces attempts 500 ms apart and that spacing is the
+    whole flake margin of the assertion below it, so moving it changes the test's
+    statistics; and `data_client_transport.rs`'s segmented-head test sleeps 20 ms
+    so the reader observes two reads rather than one, where the condition is "the
+    reader has consumed the first segment" and no seam exposes it.
+
+  So the gate's ceiling does not come from sleeps. The concentration the 164s
+  profile found is declared `--duration` runs and reconnect ladders spending
+  their attempts - durations a test asked the venue for. Aim there: a lifecycle
+  test's declared duration, and whether the ladder's attempt spacing can be a
+  parameter the test passes.
+
+  One number in this entry is unsupported and should be re-run rather than
+  inherited: the claim that a serial lane for the socket-backed tests floors at
+  74s against the flat setting's 53s appears nowhere in `brokkr.toml`. The file
+  records the serial-versus-8 story and the cliff at 16; the 74/53 pair does not
+  appear. The other figures - 164s, 1,608 tests, the top-20 concentration - are
+  in the gate profile's own comment.
+
+  Anything called settled here needs repeated runs: `test_threads = 8` went red
+  after three green runs at 8, having already gone red at 16, and three passes
+  are not evidence about an intermittent race.
+
+- **A budget-carrying test cannot be routed into the `timing` sweep
+  automatically, and the fix is a brokkr-level feature.** `brokkr.toml` states
+  the policy - a latency assertion is `#[ignore]`d at the source, listed in the
+  gate's `skip`, and named in the `timing` sweep's `only` - and the tool enforces
+  it in one direction: an `only` entry the gate does not skip is an orphaned
+  pair, and a filter matching nothing is dead. The converse, that every
+  budget-carrying test appears in some `only`, is not a syntactic property, so a
+  plain `#[test]` asserting 50 ms in the parallel dev lane is admitted silently.
+
+  The crude mechanization was checked rather than assumed away and does not work:
+  a scan for `Duration::from_` inside an `assert!` would flag the eighteen poll
+  intervals and six negative-observation windows above, so it would fire on
+  twenty-four correct sites to catch one wrong one, get suppressed on its first
+  run, and then mean nothing.
+
+  What would change it is a marker at the source rather than a scan of it: a
+  budget-carrying test declaring itself, so the tool has something to enumerate
+  instead of something to guess. That is a brokkr feature and a new convention;
+  mogwai's side is only adopting it once brokkr can enumerate it.
+
+## Documentation
+
+- **`reference/architecture.md` is about 1,400 lines with two headings.** It does
+  roughly four jobs - the venue's runtime shape and account model; accounts,
+  risk, instruments and valuation; clocks, boats, delivery and faults; the
+  generator and fingerprint - plus a workspace section at the end. Its
+  contradictions have all sat where one job's old text survived another's
+  landing. `docs/havoc.md` was patched rather than rewritten and wants the same
+  treatment eventually.
+
+  Do it in two steps, and not in one. First add real headings in place: no text
+  moves, no citations break, and it turns an unnavigable wall into something a
+  reader can enter in the middle. That is also the precondition for the split,
+  since a document with no seams cannot be cut along them. Only then split into
+  separate files with the boundaries visible.
+
+  The blast radius for step two: 17 files cite `architecture.md`, and two of them
+  are prose-scanning tests (`live_fact_prose.rs`, `tape_version_prose.rs`) that
+  read every markdown file in the repository. The failure mode of step two is
+  silently dropping a paragraph out of a durable must-be-true document while
+  moving text, which nobody would notice.
+
+## Infrastructure
+
+- **The CLA check is not yet a required status check.** cla-assistant.io is wired
+  up and its webhook delivers, but nothing blocks an unsigned merge until a
+  repository ruleset requires the check by name.
+
+  The trap: an owner-authored PR produces no status at all, since the CLA assigns
+  copyright to the owner and the bot correctly has nothing to ask, which means
+  the check cannot be picked from the suggestion list and cannot be validated
+  against a real run. Type the context name in by hand and leave the rule in
+  evaluate mode until an outside PR confirms it, because a required check that
+  never reports blocks every merge with no visible cause.
+
+  Not a code change - repository settings, owner-only.
+
+---
+
+# Owed by other repositories
+
+Nothing below can be fixed from this tree. Kept so the ledger is complete.
+
+## Wanted upstream nautilus_trader PRs
+
+Read the source from `research/nautilus_trader`; build against the pinned
+crates.io release. Each of these names what the other side would have to ship,
+which is what makes it a writable patch rather than a grievance.
+
+- **`ExecutionEventEmitter` cannot share its sender**, so this adapter can only
+  refuse rather than heal. The emitter derives `Clone` and owns
+  `sender: Option<UnboundedSender<ExecutionEvent>>` by value, installed once from
+  `try_get_exec_event_sender()`, which reads a `thread_local!` in
+  `nautilus_common::live::runner` set on the runner's thread. Every clone taken
+  after that point freezes the sender state of the instant it was taken, and
+  `send_order_event` on a sender-less clone only logs a warning. Our workaround
+  is a refusal, not a repair: a host that starts its clients on one thread and
+  connects them on another gets a named error rather than a working client.
+  The PR: an emitter holding its sender behind a shared cell, or resolving it per
+  send from a process-wide rather than thread-local slot, so a clone taken before
+  `set_sender` still emits.
+
+- **No channel for a declared feed gap.** `VenueMessage::FeedLagged` carries
+  `skipped` and `sim_now_ns` and the adapter has nowhere to put it. No
+  `DataEvent` variant means "the stream you are aggregating has a hole", the
+  client is handed to the host boxed as `dyn DataClient` so an adapter-owned
+  counter or health accessor is unreachable, and `is_connected` is true
+  throughout because the socket never broke. So bar aggregation over the
+  missing span is silently wrong and the polling cursor resumes past it, and a
+  strategy cannot distinguish a quiet market from a dropped one. Fabricating a
+  report from the local mirror is not the escape: the mirror is built from the
+  frames the venue just said it dropped. The execution socket cannot self-heal
+  either: the frame translator that sees `FeedLagged` runs as `handler(msg).await`
+  inside the reader's own frame loop, so a venue-truth query issued there
+  deadlocks by construction, and the client is `!Send` so spawning it off is
+  unavailable. The PR: a data-side degradation signal and a client-initiated
+  reconciliation request. Until then, a host driving mogwai should treat an
+  error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
+  reconcile-and-distrust-the-window signal.
+
+- **No registration signal at the account cache insertion boundary.**
+  `await_account_registered` polls every 10 ms until nautilus's runner has
+  consumed the forwarded account event and inserted the row, with a 5 s wall
+  bound. The pinned cache exposes no registration notification, and notifying
+  when the adapter forwards the event would be too early, because forwarding only
+  queues it. The PR: a signal at the cache insertion boundary. No adapter-side
+  latch can substitute.
+
+  The connection half of this is already closed and should not be re-filed:
+  `wait_connected` sleeps on an adapter-owned notification with a 250 ms backstop
+  re-read, and that backstop is not a leftover poll - bite-checking the
+  notification by deleting `notify_waiters` hung every socket test for the full
+  dial timeout rather than failing on anything that named the cause, so a latch
+  with one publisher and no fallback was trading five hundred cheap wakeups for a
+  wedge.
+
+- **The Rust trait default for mass status does not compose** the way the Python
+  base does. Queued in the maintainer's PR tracker. Not a substitute for our own
+  reconciliation guard: mogwai overrides the method, so this protects the next
+  adapter author rather than this repo.
+
+- **Tape sparsity has no attribution channel.** An empty historical window is
+  correct behaviour here - the fitted ACD arrival process is persistent and
+  heavy-tailed, so a short window can legitimately hold zero trades and `/trades`
+  correctly answers `200 []` - but it still costs the consumer a fatal halt, and
+  one of the two fixes is blocked on the same gap as `FeedLagged`: an empty
+  historical response carries no feed identity, so it cannot be attributed.
+
+## Owed by us to broadarrow: one message, unsent
+
+Nobody has written it. Four breaking changes now, and several entries below are
+stale in their favour. This is a message to write, not code to change.
+
+- **The account surface moved.** They set no `account_type`, inherit
+  `MOGWAI-001`, POST no account, and have no handling for a run that ends by
+  liquidation. Their orchestrator runs the shared shape, so 50 subagents
+  inheriting `MOGWAI-001` would take each other's ledger in turn; the id belongs
+  in their per-subagent account TOMLs. The account-id contract is in
+  `docs/config.md`. That break is designed, but designed-to-break only works if
+  the other side is told it is coming.
+- **`OrderExpired` replaced `OrderCanceled` for expiries**, with a terminal
+  `Expired` status. Exhaustive matching stops compiling; loose matching stops
+  seeing `Day` and `Gtd` orders end at all, which is the dangerous reading.
+- **`POST /control/divergence` changed request shape.** What they must send now
+  is `{"kind": "<Tag>", "args": {<the tag's fields>}}`, with the optional
+  `account` and `symbol` staying at the top level beside `kind`. Unknown
+  top-level fields are refused rather than ignored, so the old
+  `{"type": ..., <fields>}` body takes a `422` and arms nothing - it does not
+  degrade quietly, and a scenario that posted it would run believing a fault was
+  armed. Refusals and acks are JSON objects now too: a refusal is
+  `{"error": "<reason>"}` and an ack is `{"status": "accepted"}`, carrying
+  `detail` and the shed `evicted` divergence when an arm evicted one, where both
+  used to be a bare text body. Their poll-heal end-to-end test drives this plane
+  directly, so it is the run most likely to notice.
+- **The adapter's data and execution configs are constructed as a validated
+  pair.** Their two helpers construct the two public configs independently and
+  will stop compiling. See the adapter section above for why the pair boundary
+  exists.
+
+In their favour, same message: trailing stops, the full order-type surface
+including `TrailingStopLimit`, order lists and `RejectNextCancel` are all served,
+so their three unrun scenario files can now be written. `translate_trailing_exit`
+can emit the limit form as well as the market one; the venue derives the limit
+price from a `limit_offset`, so they send an offset and not a price.
+
+## Open at broadarrow
+
+- Item 4 of the strategy-search route, consuming the multi-instrument venue.
+  `run_prep::mogwai_facts` refuses a `/instruments` answer of anything but exactly
+  one instrument, precisely so a relaxed mogwai breaks their build loudly instead
+  of having broadarrow pick an instrument arbitrarily. Closing it means selecting
+  by the strategy's frontmatter `MOGWAI:<symbol>`, per worker rather than per
+  venue, after which the readiness record's `symbol` field needs its
+  one-venue-one-symbol meaning reconciled.
+- `POST /accounts` at run-prep preflight, so each worker opens its own ledger with
+  its own balances before the node is built. Nothing here blocks it.
+- Their profile row becomes `AtomicOuo` and brick 3 of
+  `notes/venue-order-list-oco-spec.md` lands. Carve-out they must read before
+  citing the group-admission guarantee: a member whose funds an earlier member's
+  fill consumed is rejected on the second pass with its earlier siblings already
+  accepted.
+- Whether a refusal marked `RETRYABLE_REJECT_PREFIX` should be treated as
+  retryable at all. Their standing reasoning - a rejection wrongly treated as
+  retryable is worse than a run that stops when the venue said no - is still
+  sound, and the marker only changes what the decision rests on. Nothing here
+  pushes them either way.
+- Boot-storm pacing for concurrent `/trades` and `/quotes` warmup, because their
+  daemon decides when workers spawn. Our bounded wait makes staggering an
+  optimization for ordinary paging rather than a precondition of correctness,
+  which is the change worth telling them about.
+- `submit_order_list` is the only route that emits a group frame, so a consumer
+  wanting an atomic group by any other route has no API for it. None is owed
+  until one is wanted.
+- Their own repo: the feed-stale message hard-codes the issue-4255 hypothesis
+  ("the connection looks healthy...") as fact even when the venue process is
+  dead; `reference/mogwai.md` and `ba man mogwai` still describe the venue as
+  unfundable, stale since the `[balances]` seed landed; stored scenario TOMLs
+  setting `transport_profile` on either adapter config no longer parse, since the
+  field went with `TransportProfile` itself, and want a sweep.
+
+## Runs owed against mogwai
+
+Theirs to run, not ours to build, but each is a venue exercise that would surface
+mogwai defects, and several have been owed for weeks.
+
+- The restart run, the realized-PnL baseline, legs 1 to 3: serve durably, trade to
+  a non-zero realized figure, SIGKILL the worker, re-run against the same
+  `[attach]` scenario, verify the carried baseline, the brake mark, and no
+  duplicate booking. Leg 3 is load-bearing and rests on a verdict reached by
+  reading the dependency rather than by observing a reconciliation, landed as an
+  explicit operator override of its own gate - a known-unrun verification on a
+  capital bound.
+- `go_live` restart de-duplication: kill a non-flat worker with orders resting at
+  the durable venue, restart, verify the batch de-duplicates against the
+  surviving book.
+- The futures run against a `preset = "MNQ"` venue: warmup, fed fills, a resting
+  stop triggering on the multiplied instrument, a settlement-currency commission
+  actually charged, and the brakes marking in that currency.
+- The conditional half of the fed-fill path: a fed fill from an order that
+  genuinely rested and then filled at venue timing, ideally under havoc.
+- Flip plus pyramid plus partial in one bar, end to end.
+- Gate B, the anchored-warmup overlap drop. Their `handoff.rs` covers Binance,
+  Kraken and Bybit but not mogwai, and is a consistency test rather than ground
+  truth.
+- The poll-heal end-to-end test, which drives our control plane directly: rest a
+  far-from-market limit, POST `CancelOpenOrderSilently`, assert the local order
+  converges to Canceled within the retry ladder's bound. Their fixture notes still
+  hold: carry no protective exits, and census the whole rotated log family.

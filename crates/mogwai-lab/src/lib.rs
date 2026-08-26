@@ -78,5 +78,6 @@ pub mod stream;
 pub mod subcontract;
 pub mod summary;
 pub mod tick_composition_ratios;
+pub mod tree;
 
 pub use error::{LabError, LabResult};

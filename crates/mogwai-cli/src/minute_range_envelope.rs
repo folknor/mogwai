@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail};
 use clap::Args;
 use mogwai_lab::{
-    delivery::{fresh_tree_state, require_clean_tree, verify_input},
+    delivery::verify_input,
     fit::observe::observe,
     preflight::require_preflight,
     stream::{data_files, parse_stream},
     subcontract::{RESAMPLE_ENVELOPE_LEVEL, RESAMPLE_REPLICATES, RESAMPLE_SEED},
+    tree::{fresh_tree_state, require_clean_tree},
 };
 use serde_json::{Value, json};
 
@@ -128,7 +129,7 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::tree::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     fn missing_inputs(out: &str) -> MinuteRangeEnvelopeArgs {
         MinuteRangeEnvelopeArgs {

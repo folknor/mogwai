@@ -874,7 +874,11 @@ pub(crate) async fn process_order_cmd(
             ts_event: ts,
         });
     };
-    let events = engine.process_with_market_on_clock(order_cmd, ts, market_px, sim);
+    let mut events = engine.process_with_market_on_clock(order_cmd, ts, market_px, sim);
+    // Under the engine lock, before it is dropped below: the equity the risk
+    // state reports is read from this engine, so stamping after the drop would
+    // read a book another command had already moved.
+    stamp_account_risk(&engine, account_state, &mut events);
     // Released before these events are published, which makes the order visible
     // to the sweeper while its own `OrderAccepted` is still in this vec. The
     // engine mutex establishes mutation order; it does not establish
@@ -1659,6 +1663,51 @@ pub(crate) async fn account(
 /// evaluator wants whether or not anything is enforced against it. With no
 /// policy currency there is nothing to compute it in, so it reports the
 /// settlement currency's balance only when exactly one is held.
+/// Stamp the risk half onto every `AccountState` frame in a batch the engine
+/// just produced.
+///
+/// The one place the field is set. Two paths produce account frames - the
+/// sweeper's pass and the order-entry command path - and both call this while
+/// they still hold the engine lock the frames came out of. A second stamping
+/// site is how one path ends up publishing the budget and the other not,
+/// which is invisible from either side.
+///
+/// Why here rather than in the engine: `mogwai-engine` is the venue-agnostic
+/// core and owns no risk policy, so `Engine::snapshot` leaves the field `None`
+/// by construction. This is the seam where the venue's own thresholds meet the
+/// frame.
+///
+/// Called under the engine lock, and takes the risk lock inside. That order is
+/// fixed - engine, then risk - and it is the only order available: the ledger
+/// sits behind a `std::sync::Mutex` whose guard is `!Send`, so no async path
+/// can hold it across the `.await` that takes the engine lock. The reverse
+/// ordering therefore fails to compile rather than deadlocking at runtime.
+///
+/// An unpoliced account is left `None`. It has no thresholds and no policy
+/// currency, so there is no budget to report - `GET /account` still reports
+/// its equity, because an evaluator wants that either way, but a frame's
+/// `risk` means "what is being enforced" and nothing is.
+pub(crate) fn stamp_account_risk(
+    engine: &mogwai_engine::Engine,
+    account_state: &crate::run::Account,
+    events: &mut [VenueMessage],
+) {
+    let mut ledger = None;
+    for event in events.iter_mut() {
+        let VenueMessage::AccountState(frame) = event else {
+            continue;
+        };
+        // Locked once for the batch and only if a frame actually wants it: a
+        // sweep batch carrying no account frame must not take the lock at all,
+        // and one carrying several must not take it several times.
+        let ledger = ledger.get_or_insert_with(|| account_state.risk.lock().unwrap());
+        if ledger.is_unpoliced() {
+            continue;
+        }
+        frame.risk = Some(risk_state(engine, ledger, frame));
+    }
+}
+
 fn risk_state(
     engine: &mogwai_engine::Engine,
     ledger: &crate::risk::RiskLedger,

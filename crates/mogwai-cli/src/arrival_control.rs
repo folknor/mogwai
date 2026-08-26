@@ -26,9 +26,10 @@ use mogwai_lab::arrival_control::{
     gate_b3, gate_b4, gate_b6, gate_b7, gate_hours, hourly_mean_parents, normalizer_drift,
     recentred_curve, seed_median,
 };
-use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree, sha256_bytes, sha256_file};
+use mogwai_lab::delivery::{sha256_bytes, sha256_file};
 use mogwai_lab::sampler::ResourceSampler;
 use mogwai_lab::storage::{ScratchDir, cache_root};
+use mogwai_lab::tree::{fresh_tree_state, require_clean_tree};
 use serde_json::{Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
@@ -549,7 +550,7 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::tree::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     #[test]
     fn b1_accepts_only_the_supplied_release_mogwai_path() {

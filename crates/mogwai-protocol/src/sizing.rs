@@ -96,9 +96,15 @@ pub const ORDER_EVENT_MAX_BYTES: usize = if ORDER_FILLED_MAX_BYTES > ORDER_REJEC
 };
 
 /// One `Balance` row inside `AccountState`: `currency`, `total`, `free`,
-/// `locked` - three decimals at ~32 bytes plus ~60 bytes of key names,
-/// punctuation and the enclosing braces, rounded to 192.
-pub const BALANCE_ROW_MAX_BYTES: usize = 192 + ESC * MAX_CURRENCY_LEN;
+/// `locked` and the nested `held` breakdown - six decimals at ~33 bytes
+/// (198), about 60 bytes of key names, punctuation and braces for the outer
+/// row, and about 55 more for `"held":` and its three keys and braces. About
+/// 315, rounded to 384.
+///
+/// The breakdown is charged unconditionally. It is absent only on a frame this
+/// build did not produce, so a bound that assumed absence would under-reserve
+/// every real snapshot, and under-reserving voids the bound outright.
+pub const BALANCE_ROW_MAX_BYTES: usize = 384 + ESC * MAX_CURRENCY_LEN;
 
 /// One `Position` row inside `AccountState`: `symbol`, `position_id`,
 /// `quantity`, `avg_px`, `mark_px`, `unrealized_pnl` - four decimals at about
@@ -147,8 +153,37 @@ pub const LINKAGE_MAX_BYTES: usize = 2 * MAX_LINKED_ORDERS * ORDER_EVENT_MAX_BYT
 /// pre-engine refusal paths reserve without a `BookShape` to size against.
 pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 
+/// One `RiskState` inside `AccountState`, at its widest: every optional
+/// present and a breach recorded.
+///
+/// Nine `Decimal`s - `equity`, `peak_equity`, `day_open_equity`, the trailing,
+/// daily and overall remainings and thresholds, and `max_position` - at their
+/// widest serialized form of ~33 bytes each, so 297. About 180 bytes of key
+/// names with their quotes, colons and commas (`day_open_equity`,
+/// `trailing_threshold` and `overall_remaining` are the long ones), plus the
+/// enclosing braces and the `"risk":` key that holds it inside the snapshot.
+///
+/// The nested `Breach` is charged whole: `rule` and `action` at their longest
+/// spellings (`daily_loss_limit`, `lock_until_reset`, 16 each), a u64
+/// `ts_event` at 20, two more decimals at 66, and ~55 of key names and
+/// scaffolding - about 175.
+///
+/// That totals roughly 660, rounded to 1024. No string here is
+/// consumer-supplied: every field is a decimal, a u64, or an enum this crate
+/// spells, so nothing takes `JSON_ESCAPE_FACTOR` and the whole constant is
+/// fixed. `the_risk_state_bound_covers_a_maximal_state` brackets it.
+pub const RISK_STATE_MAX_BYTES: usize = 1024;
+
 /// Upper bound on one serialized `AccountState`: the envelope plus every
-/// balance and position row the book currently carries.
+/// balance and position row the book currently carries, plus the risk state a
+/// policed account carries on every frame.
+///
+/// `RISK_STATE_MAX_BYTES` is charged unconditionally rather than per policy.
+/// The reservation is taken before the engine mutates, from a `BookShape` that
+/// says nothing about whether the account is policed - and an unpoliced
+/// account omits the field entirely, so charging it always over-reserves the
+/// unpoliced case by a fixed amount and under-reserves nothing. Which is the
+/// correct direction: under-reserving voids the bound outright.
 ///
 /// The account id is the one string here charged at its raw cap rather than at
 /// `JSON_ESCAPE_FACTOR` times it, and it is the only string in this module that
@@ -168,6 +203,7 @@ pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 #[must_use]
 pub fn account_state_max_bytes(shape: &BookShape) -> usize {
     144 + MAX_ACCOUNT_ID_LEN
+        + RISK_STATE_MAX_BYTES
         + shape.balances * BALANCE_ROW_MAX_BYTES
         + shape.positions * POSITION_ROW_MAX_BYTES
         + shape.margins * MARGIN_ROW_MAX_BYTES
@@ -333,6 +369,36 @@ mod tests {
             total: Decimal::MIN,
             free: Decimal::MIN,
             locked: Decimal::MIN,
+            held: Some(crate::HeldBreakdown {
+                orders: Decimal::MIN,
+                margin: Decimal::MIN,
+                unsettled: Decimal::MIN,
+            }),
+        }
+    }
+
+    /// Every optional present and a breach recorded, at the longest enum
+    /// spellings this crate ships: `daily_loss_limit` and `lock_until_reset`.
+    /// A state with any field absent is strictly cheaper, so this is the shape
+    /// `RISK_STATE_MAX_BYTES` has to cover.
+    fn maximal_risk_state() -> crate::risk::RiskState {
+        crate::risk::RiskState {
+            equity: Decimal::MIN,
+            peak_equity: Decimal::MIN,
+            day_open_equity: Decimal::MIN,
+            trailing_threshold: Some(Decimal::MIN),
+            trailing_remaining: Some(Decimal::MIN),
+            daily_remaining: Some(Decimal::MIN),
+            overall_threshold: Some(Decimal::MIN),
+            overall_remaining: Some(Decimal::MIN),
+            max_position: Some(Decimal::MIN),
+            breached: Some(crate::risk::Breach {
+                rule: crate::risk::BreachedRule::DailyLossLimit,
+                action: crate::risk::BreachAction::LockUntilReset,
+                ts_event: u64::MAX,
+                equity: Decimal::MIN,
+                threshold: Decimal::MIN,
+            }),
         }
     }
 
@@ -531,6 +597,19 @@ mod tests {
         }
     }
 
+    /// The risk term on its own, measured as the bare struct because that is
+    /// what `account_state_max_bytes` charges for - the `"risk":` key and its
+    /// comma are counted in the snapshot's own fixed addend, and the
+    /// end-to-end test below is what covers them.
+    ///
+    /// This is the `brackets` call the module header says a new per-struct
+    /// constant owes.
+    #[test]
+    fn the_risk_state_bound_covers_a_maximal_state() {
+        let bytes = serde_json::to_vec(&maximal_risk_state()).unwrap().len();
+        brackets("risk state", RISK_STATE_MAX_BYTES, bytes);
+    }
+
     /// `account_state_max_bytes` end to end: the envelope alone at a maximal
     /// account id, and then the whole thing at seven rows of every kind, which
     /// is what catches the array commas the per-row bounds above do not charge
@@ -544,11 +623,17 @@ mod tests {
     #[test]
     fn account_state_bound_covers_an_empty_and_a_maximal_snapshot() {
         let account_id = AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap();
+        // Carrying a maximal risk state, not `None`. `account_state_max_bytes`
+        // charges the risk term unconditionally, so a fixture without one
+        // would fail the upper bracket for a reason that says nothing about
+        // the envelope this test exists to measure. "Empty" here means no
+        // rows.
         let empty = VenueMessage::AccountState(AccountState {
             account_id: account_id.clone(),
             balances: Vec::new(),
             positions: Vec::new(),
             margins: Vec::new(),
+            risk: Some(maximal_risk_state()),
             ts_event: u64::MAX,
         });
         let bytes = serde_json::to_vec(&empty).unwrap().len();
@@ -561,6 +646,7 @@ mod tests {
             balances: vec![maximal_balance(); ROWS],
             positions: vec![maximal_position(); ROWS],
             margins: vec![maximal_margin(); ROWS],
+            risk: Some(maximal_risk_state()),
             ts_event: u64::MAX,
         });
         let shape = BookShape {

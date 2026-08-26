@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use clap::Args;
 use mogwai_lab::aggregate::artifact::write_json_atomic;
-use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree};
 use mogwai_lab::fit::driver::{FitConfig, run_fit};
 use mogwai_lab::storage::{ScratchDir, artifact_path, cache_root};
+use mogwai_lab::tree::{fresh_tree_state, require_clean_tree};
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
 const DEFAULT_JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
@@ -177,7 +177,7 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::tree::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     fn missing_inputs(out: &str) -> FitArgs {
         FitArgs {
@@ -191,7 +191,7 @@ mod tests {
     }
 
     /// The N1 fit-side gate: `fit` is a call site of the shared
-    /// `mogwai_lab::delivery::require_clean_tree`, and moving it must not change
+    /// `mogwai_lab::tree::require_clean_tree`, and moving it must not change
     /// what an operator sees.
     ///
     /// Both verdicts are injected, and that is the whole design. This test

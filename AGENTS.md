@@ -186,6 +186,34 @@ in any session:
   `performance.md`, `test-doctrine.md` and
   `technical-implementation-spec.md`.
 
+### Standing lessons from the 2026-08-26 backlog adjudication
+
+`notes/bugs.md` and `notes/bugs-engine.md` were adjudicated entry by entry and
+deleted; `notes/todo.md` is now the only backlog. Roughly a third of what was in
+them was not work at all, and the three shapes it took are worth recognising
+before filing anything.
+
+- **Read the code site before the entry's prose.** Four entries were still
+  asking a question the code had already answered, in a doc comment at the exact
+  site the entry named. An entry naming a symbol is a pointer to that symbol's
+  own documentation first and a claim second.
+- **A settled thing filed as an open question re-opens itself forever.** Writing
+  "undecided" next to a decision that was in fact made is an invitation to every
+  later reader to re-derive it. If it is ruled, say so and record the ruling
+  where the mechanism lives; do not leave it phrased as a fork.
+- **An entry earns its place only if something in this tree could change to
+  close it.** A true observation about where this repository ends is not a
+  defect. We cannot prove a third-party framework calls our code; we cannot
+  detect a widened conformance tolerance without new measurement; a lint cannot
+  separate an assertion message from a wire payload. All correct, none of them
+  work. Record such a limit at the site it constrains.
+
+One standing owner ruling belongs here because fresh readers keep re-filing it:
+**tape fidelity is not a prerequisite for exchange machinery.** All the
+machinery of a real exchange can be built against the tapes we have, and better
+tapes are gated on tape research v2 regardless. An instrument class with no
+fitted preset is a known and accepted state, not a finding.
+
 ### Reading vs depending on nautilus_trader and broadarrow
 
 The broadarrow adapter (and any spec or implementation that touches the nautilus

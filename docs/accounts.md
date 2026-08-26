@@ -342,7 +342,66 @@ spelling is refused on decode. An unpoliced account still reports its equity
 when it holds exactly one currency, since that is the one number an evaluator
 wants whether or not anything is enforced.
 
-The audience is the evaluator rather than the strategy. A real trader reads its
-remaining drawdown off the firm's dashboard and mogwai presents none, so
-without these numbers a run that ended flat having spent ninety percent of its
-budget is indistinguishable from one that never came close.
+The audience for the pulled answer is the evaluator: without these numbers a run
+that ended flat having spent ninety percent of its budget is indistinguishable
+from one that never came close.
+
+## What a balance's locked amount is made of
+
+Each balance row carries `total`, `free` and `locked`. `locked` is everything
+this currency is not free to spend - exactly `total - free`, and exactly what
+the venue's own funds check subtracts.
+
+Three unrelated things sum into it, and they release on unrelated events, so
+the sum alone cannot tell a consumer what would free the money:
+
+- **order holds** - funds reserved against resting orders, released by
+  cancelling or filling them;
+- **margin** - maintenance collateral posted against open marked positions
+  (futures, perpetuals, inverses, and an equity whose margin policy makes it a
+  Reg-T margin account), released by closing the position, and moving on its
+  own as the mark moves;
+- **unsettled** - sale proceeds the account owns but cannot spend until their
+  settlement instant, released by the passage of simulated time and by nothing
+  the consumer can do.
+
+Every balance row therefore carries a `held` object with those three fields
+beside `locked`. They sum to `locked` by construction - the total is formed by
+adding the three, rather than computed separately and hoped to agree - and
+every one is string-spelled like the rest of the money on the wire.
+
+`locked` keeps its meaning and is still the right answer to "how much can I not
+spend". `held` is the answer to "and what would release it".
+
+## A strategy sees its own remaining budget
+
+The same risk block rides on every pushed `AccountState` frame a policed
+account's passengers receive, as an optional `risk` field beside `balances`,
+`positions` and `margins`. So a strategy can size against its own remaining
+drawdown as it trades, which is what a real trader reads off the firm's
+dashboard. Before this it existed only on the pulled `GET /account`, which meant
+a strategy driving the venue through a nautilus host could not reach it at all.
+
+Two properties to rely on, and one not to.
+
+The field is absent for an unpoliced account. It has no thresholds, so it has no
+budget to report, and an all-absent risk block would read as a policed account
+with nothing left rather than an account under no policy. Absence is the signal.
+
+The numbers are as stale as the last sweep. `equity` inside the block is the
+figure the last risk evaluation used, not one recomputed for the frame it rides
+on - the same staleness the account's marks already carry. Recomputing per frame
+would price a mark walk into the order path and would publish a budget the
+enforcement had not acted on.
+
+What not to rely on: the field is optional on the wire, so a decoder written
+before it existed ignores it and behaves exactly as it did. A missing `risk` is
+therefore never evidence that a budget was exhausted.
+
+Through the nautilus adapter these arrive in `AccountState.info` under
+`mogwai_`-prefixed keys - `mogwai_trailing_remaining`, `mogwai_daily_remaining`,
+`mogwai_overall_remaining`, the thresholds, the peak, the day's open, the
+position cap, and the breach's rule, action and instant if one has fired. Read
+them with `get_str` and parse: they are string-spelled for the same reason they
+are on the wire, and `get_f64` would reintroduce the very tolerance the string
+spelling exists to prevent.

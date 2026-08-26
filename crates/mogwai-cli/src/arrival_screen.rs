@@ -21,8 +21,9 @@ use mogwai_lab::arrival_screen::{
     marginal_envelope_counts, measure_cell_walks, probe_cell, refinement_round, screen_work,
     write_artifact,
 };
-use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree, sha256_file};
+use mogwai_lab::delivery::sha256_file;
 use mogwai_lab::sidecar;
+use mogwai_lab::tree::{fresh_tree_state, require_clean_tree};
 use serde_json::{Map, Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
@@ -538,7 +539,7 @@ mod tests {
     use std::path::Path;
     use std::rc::Rc;
 
-    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::tree::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     use super::*;
 

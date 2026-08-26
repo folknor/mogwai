@@ -31,7 +31,7 @@ use nautilus_common::{
         GeneratePositionStatusReports, ModifyOrder, QueryOrder, SubmitOrder,
     },
 };
-use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
+use nautilus_core::{Params, UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
@@ -3525,17 +3525,86 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
             );
         }
     }
-    ctx.emitter.send_account_state(NautilusAccountState::new(
-        ctx.account_id,
-        ctx.account_type,
-        balances,
-        margins,
-        true,
-        UUID4::new(),
-        ts_event,
-        now_unix_nanos(ctx.sim),
-        None,
-    ));
+    ctx.emitter.send_account_state(
+        NautilusAccountState::new(
+            ctx.account_id,
+            ctx.account_type,
+            balances,
+            margins,
+            true,
+            UUID4::new(),
+            ts_event,
+            now_unix_nanos(ctx.sim),
+            None,
+        )
+        .with_info(risk_info(state.risk.as_ref())),
+    );
+}
+
+/// The venue's risk state rendered into nautilus's account info bag, so a
+/// strategy can size against its own remaining drawdown.
+///
+/// The info bag is the whole answer here, not a workaround, and the contrast
+/// with the forex multiplier is the reason. That one is refused rather than
+/// preserved, because nautilus computes notional itself at an implicit
+/// multiplier of one, so a preserved value would sit beside a wrong number.
+/// Nautilus computes nothing about prop-firm drawdown - it has no concept of a
+/// trailing floor or a daily loss limit - so there is no wrong number for
+/// these to sit beside. They are the only account budget in the system.
+///
+/// Every decimal stays a JSON string, for the reason the wire types spell them
+/// that way: these are money quantities, and a JSON number decodes through
+/// `f64`. A strategy reads them back with `get_str` and parses, which is
+/// lossless; `get_f64` on these keys would silently reintroduce exactly the
+/// tolerance the string spelling exists to prevent.
+///
+/// `None` for an unpoliced account, which has no thresholds and so no budget.
+/// An empty bag would be indistinguishable from a policed account whose
+/// optionals are all absent.
+fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> {
+    let risk = risk?;
+    let mut info = Params::new();
+    let mut put = |key: &str, value: Option<rust_decimal::Decimal>| {
+        if let Some(value) = value {
+            info.insert(key.into(), serde_json::Value::String(value.to_string()));
+        }
+    };
+    put("mogwai_equity", Some(risk.equity));
+    put("mogwai_peak_equity", Some(risk.peak_equity));
+    put("mogwai_day_open_equity", Some(risk.day_open_equity));
+    put("mogwai_trailing_threshold", risk.trailing_threshold);
+    put("mogwai_trailing_remaining", risk.trailing_remaining);
+    put("mogwai_daily_remaining", risk.daily_remaining);
+    put("mogwai_overall_threshold", risk.overall_threshold);
+    put("mogwai_overall_remaining", risk.overall_remaining);
+    put("mogwai_max_position", risk.max_position);
+    // The breach, if one has fired. Carried because a strategy that has
+    // already been locked or terminated should be able to see that its budget
+    // is gone rather than infer it from a remaining that reads at or below
+    // zero - the two are not the same, since a `LockUntilReset` lifts at the
+    // next boundary and a `Terminate` never does.
+    if let Some(breach) = &risk.breached {
+        info.insert(
+            "mogwai_breached_rule".into(),
+            serde_json::Value::String(
+                serde_json::to_value(breach.rule)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+            ),
+        );
+        info.insert(
+            "mogwai_breached_action".into(),
+            serde_json::Value::String(
+                serde_json::to_value(breach.action)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+            ),
+        );
+        info.insert("mogwai_breached_ts_event".into(), breach.ts_event.into());
+    }
+    Some(info)
 }
 
 /// Converts a venue-sent `client_order_id` string into a nautilus

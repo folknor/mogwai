@@ -51,6 +51,31 @@ pub(crate) struct UnsettledCredit {
     pub(crate) settles_at_ns: u64,
 }
 
+/// One currency's held amount, split by what would release it. Summed into the
+/// wire's `Balance.locked` and published beside it as `Balance.held`.
+///
+/// The three senses used to be added into one running total here, and the
+/// consumer got a number that could not be acted on: an order hold frees on
+/// cancel, maintenance collateral frees on closing the position, an unsettled
+/// credit frees only when its instant arrives. Keeping them apart through the
+/// fold costs nothing and is what makes `locked` interpretable.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct HeldParts {
+    pub(crate) orders: Decimal,
+    pub(crate) margin: Decimal,
+    pub(crate) unsettled: Decimal,
+}
+
+impl HeldParts {
+    /// The three summed, saturating, with `clipped` set if any addition
+    /// saturated. This is the only place the total is formed, so `locked` and
+    /// the published breakdown cannot disagree about what they mean.
+    fn total(self, clipped: &mut bool) -> Decimal {
+        let sum = add_clamped(self.orders, self.margin, clipped);
+        add_clamped(sum, self.unsettled, clipped)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PositionState {
     pub(crate) qty: Decimal,
@@ -635,13 +660,17 @@ impl Engine {
                     .balances
                     .get(&currency)
                     .unwrap_or(&Decimal::ZERO);
-                let held = *held_balances.get(&currency).unwrap_or(&Decimal::ZERO);
+                let parts = held_balances.get(&currency).copied().unwrap_or_default();
                 // `total` and the held amount are each in range, but they can sit
                 // near opposite Decimal boundaries (a huge short spend vs a
                 // huge buy hold), so the difference itself can
                 // overflow. Saturate rather than panic; a clipped `free` is
                 // already implied by the clipped inputs it derives from.
                 let mut clipped = false;
+                // The sum is formed here and nowhere else, so `locked` is the
+                // three published parts added up rather than a number that
+                // merely ought to equal them.
+                let held = parts.total(&mut clipped);
                 let free = sub_clamped(total, held, &mut clipped);
                 if clipped {
                     clipped_currencies.push(currency.clone());
@@ -651,6 +680,11 @@ impl Engine {
                     total,
                     free,
                     locked: held,
+                    held: Some(mogwai_protocol::HeldBreakdown {
+                        orders: parts.orders,
+                        margin: parts.margin,
+                        unsettled: parts.unsettled,
+                    }),
                 }
             })
             .collect();
@@ -659,11 +693,18 @@ impl Engine {
             self.warn_saturated(&SaturationKey::Currency(currency));
         }
 
+        // `None`, always, and not because the budget is unknown: this crate is
+        // the venue-agnostic exchange core and owns no risk policy at all. The
+        // thresholds live in `mogwai-venue`'s risk engine, which stamps the
+        // field on the way out. An engine that filled this in would be an
+        // engine that had opinions about drawdown, which is the boundary this
+        // crate exists to keep.
         AccountState {
             account_id: self.account_id.clone(),
             balances,
             positions: self.positions(),
             margins: self.margin_requirement(),
+            risk: None,
             ts_event: ts,
         }
     }
@@ -809,8 +850,28 @@ impl Engine {
     /// currencies whose accumulation clipped at the Decimal boundary, so the
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
     /// this stays `&self` because it runs inside iteration over `self.open`.
-    fn held_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
-        let mut held = self.order_holds.clone();
+    /// The per-currency held total, its three-way split, and the currencies
+    /// whose arithmetic saturated.
+    ///
+    /// The split is accumulated in the same pass that builds the total rather
+    /// than by a second traversal, so the three parts sum to the total by
+    /// construction. A separate fold could disagree with this one after any
+    /// future edit to either, and the wire contract is that they agree.
+    fn held_balances(&self) -> (HashMap<String, HeldParts>, Vec<String>) {
+        let mut held: HashMap<String, HeldParts> = self
+            .order_holds
+            .iter()
+            .map(|(currency, amount)| {
+                (
+                    currency.clone(),
+                    HeldParts {
+                        orders: *amount,
+                        margin: Decimal::ZERO,
+                        unsettled: Decimal::ZERO,
+                    },
+                )
+            })
+            .collect();
         // Sorted because the source is a `HashSet`: the only consumer is the
         // once-per-currency saturation warning, and an unordered log is a
         // needless nondeterminism in an otherwise deterministic venue.
@@ -834,16 +895,16 @@ impl Engine {
             }
             let currency = instrument.class.settlement_currency().to_owned();
             let maintenance = policy.maintenance(instrument, position.qty, position.mark_px);
-            let total = held.entry(currency).or_default();
-            *total = total.saturating_add(maintenance);
+            let parts = held.entry(currency).or_default();
+            parts.margin = parts.margin.saturating_add(maintenance);
         }
 
         // Unsettled sale proceeds, so the `locked` a consumer reads is the same
         // number `free_balance` subtracts. A wire snapshot that disagreed with
         // the venue's own funds check would be the worst of both.
         for credit in &self.account.unsettled {
-            let total = held.entry(credit.currency.clone()).or_default();
-            *total = total.saturating_add(credit.amount);
+            let parts = held.entry(credit.currency.clone()).or_default();
+            parts.unsettled = parts.unsettled.saturating_add(credit.amount);
         }
 
         (held, clipped_currencies)

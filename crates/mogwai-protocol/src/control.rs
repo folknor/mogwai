@@ -415,6 +415,21 @@ pub enum Divergence {
     /// by `MAX_DIVERGENCE_MS`. Frames produced during the window are
     /// dropped, not buffered. Re-arm with `ms: 0` to lift the window early;
     /// a re-arm replaces the window outright rather than extending it.
+    ///
+    /// A blackout is indistinguishable from a real disconnect, and that is the
+    /// whole point rather than an omission. The venue knows it armed this and
+    /// therefore knows the passenger is merely blinded - and that knowledge
+    /// licenses no difference in behaviour, because a divergence a consumer can
+    /// recognise tests nothing. A strategy would learn the tell and stop
+    /// exercising the recovery path the arm exists to exercise.
+    ///
+    /// Nor does the world stop while it is up. The river is exogenous, the boat
+    /// keeps pacing, fills keep landing on the ledger; the passenger is blind to
+    /// all of it and comes back to a book that moved without it. That is the
+    /// divergence, and it is why "toothless while armed" is the wrong worry.
+    ///
+    /// Ruled 2026-08-26, after the question had been re-filed as open several
+    /// times. It is not open.
     GoDark { ms: u64 },
     /// Suppress only market-data frames (`Trade` / `Quote`) for `ms`,
     /// leaving every execution frame alive. Bounded by

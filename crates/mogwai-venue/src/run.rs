@@ -2474,6 +2474,7 @@ pub(crate) mod tests {
                 balances: vec![],
                 positions: vec![],
                 margins: vec![],
+                risk: None,
                 ts_event: 1,
             })),
             Audience::Account(id) if id == &account

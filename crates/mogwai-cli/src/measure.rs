@@ -24,7 +24,7 @@ use mogwai_lab::aggregate::artifact::{
     measure12a_semantic_errors, write_json_atomic,
 };
 use mogwai_lab::aggregate::bootstrap::bootstrap_multiplicities;
-use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree, verify_input};
+use mogwai_lab::delivery::verify_input;
 use mogwai_lab::kernel::typed_canon;
 use mogwai_lab::measure12a::generated::GeneratedAcc;
 use mogwai_lab::measure12a::observed;
@@ -34,6 +34,7 @@ use mogwai_lab::stream::{data_files, parse_stream};
 use mogwai_lab::subcontract::{
     FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_BURN_IN,
 };
+use mogwai_lab::tree::{fresh_tree_state, require_clean_tree};
 use serde_json::Value;
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";

@@ -6372,6 +6372,63 @@ mod tests {
         assert_eq!(usdt.free, Decimal::from(-300));
     }
 
+    /// `locked` is the three published parts added up, and the part that moved
+    /// is the one that names what would release the money.
+    ///
+    /// The three have opposite remedies - an order hold frees on cancel,
+    /// maintenance collateral on closing the position, an unsettled credit only
+    /// when its instant arrives - so a consumer reading the sum alone cannot
+    /// act on it. Asserting the split rather than only the total is the point:
+    /// a breakdown that summed correctly while attributing to the wrong sense
+    /// would satisfy an equality check and still be useless.
+    #[test]
+    fn a_resting_orders_hold_is_published_as_an_order_hold_and_nothing_else() {
+        let mut e = Engine::new();
+        // A partial fill is what leaves a remainder resting, and a resting
+        // remainder is what holds funds. Submitting a plain order leaves no
+        // hold at all - it fills on arrival - which would make every assertion
+        // below pass against zero on both sides. The first cut of this test did
+        // exactly that and survived its own bite-check, so the non-zero
+        // assertion immediately after this is not decoration.
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
+        let state = account(&out, out.len() - 1);
+        let usdt = balance(state, "USDT");
+        let held = usdt
+            .held
+            .as_ref()
+            .expect("this build publishes the breakdown on every balance row");
+
+        assert_eq!(
+            usdt.locked,
+            Decimal::from(700),
+            "seven of ten units remain resting at 100, so 700 is held and the \
+             assertions below are not comparing zero with zero"
+        );
+        assert_eq!(
+            held.orders, usdt.locked,
+            "the whole of this account's locked funds is one resting order's hold"
+        );
+        assert_eq!(
+            held.margin,
+            Decimal::ZERO,
+            "a spot account posts no maintenance collateral"
+        );
+        assert_eq!(
+            held.unsettled,
+            Decimal::ZERO,
+            "nothing has been sold, so nothing is waiting to settle"
+        );
+        assert_eq!(
+            held.orders + held.margin + held.unsettled,
+            usdt.locked,
+            "the breakdown must sum to the number it explains"
+        );
+    }
+
     fn trailing_stop(id: &str, side: Side, trigger: i64, offset: i64) -> SubmitOrder {
         SubmitOrder {
             client_order_id: id.into(),

@@ -111,6 +111,16 @@ impl RiskLedger {
         self.policy.currency.as_deref()
     }
 
+    /// Whether this ledger enforces nothing at all.
+    ///
+    /// Asked by the account-frame stamp: an unpoliced account has no
+    /// thresholds, so it has no remaining budget to publish, and a frame
+    /// carrying a risk block of all-`None` optionals would read as a policed
+    /// account with nothing left rather than as an account under no policy.
+    pub(crate) fn is_unpoliced(&self) -> bool {
+        self.policy.is_unpoliced()
+    }
+
     /// Whether the account may open. A locked account is flat and stays flat
     /// until its next reset; a terminated one never opens again.
     pub(crate) fn is_locked(&self) -> bool {

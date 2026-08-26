@@ -169,9 +169,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // Stamped on the venue clock, which is the only one that
                 // answers here: the order being cancelled is on a river with no
                 // boat, so there is no river clock to date it by.
-                let cancelled = engine.cancel_unreadable_orders(&readable, venue_now);
+                let mut cancelled = engine.cancel_unreadable_orders(&readable, venue_now);
                 if !cancelled.is_empty() {
                     let shape = engine.book_shape();
+                    crate::http::stamp_account_risk(&engine, account_state, &mut cancelled);
                     deliver_produced(
                         &sweep.run,
                         account_state.account_id.as_str(),
@@ -434,6 +435,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         originated,
                     );
                     let shape = engine.book_shape();
+                    // After `enforce_policy`, which has just judged this pass's
+                    // equity, so the budget published is the one the
+                    // enforcement acted on rather than the previous pass's.
+                    crate::http::stamp_account_risk(&engine, account_state, &mut events);
                     drop(engine);
                     if !events.is_empty() {
                         deliver_produced(
@@ -1313,9 +1318,11 @@ mod tests {
                 total: Decimal::from(100_000),
                 free: Decimal::from(100_000),
                 locked: Decimal::ZERO,
+                held: None,
             }],
             positions: Vec::new(),
             margins: Vec::new(),
+            risk: None,
             ts_event: 1,
         })];
         deliver(
@@ -1693,6 +1700,77 @@ mod tests {
             state.trailing_remaining,
             Some(Decimal::from(300)),
             "flat on the pass and 200 of the 500 budget is gone",
+        );
+    }
+
+    /// A policed account's own remaining budget rides out on its account
+    /// frames, so a strategy can size against it.
+    ///
+    /// Asserting on the frame rather than on the ledger is the point. The
+    /// ledger has always known the number - `GET /account` has published it
+    /// since it existed - and what was missing is that no pushed frame carried
+    /// it, so a strategy driving the venue through a nautilus host could not
+    /// reach it at all. A test that read `account_state.risk` would pass
+    /// against exactly the tree that had the defect.
+    ///
+    /// What this does not cover, stated so nobody reads it as more: it calls
+    /// `stamp_account_risk` directly, so it pins what the stamp produces and
+    /// not that either production path takes it. Delete the call in
+    /// `sweeper`'s pass or in `process_order_cmd` and this test still passes.
+    /// Nothing holds those two call sites yet. Closing that wants a
+    /// socket-level test observing the frames a real passenger receives, which
+    /// is where a dropped stamp would actually show.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_policed_accounts_frames_carry_its_remaining_budget() {
+        let run = crate::run::test_run();
+        let account_state = policed_account(&run, 500).await;
+        let mut engine = account_state.engine.lock().await;
+        let mut events = vec![VenueMessage::AccountState(engine.account_snapshot(10))];
+        assert!(
+            matches!(&events[0], VenueMessage::AccountState(frame) if frame.risk.is_none()),
+            "the engine owns no risk policy, so the frame leaves its ledger bare"
+        );
+
+        crate::http::stamp_account_risk(&engine, &account_state, &mut events);
+
+        let VenueMessage::AccountState(frame) = &events[0] else {
+            panic!("the batch still holds one account frame");
+        };
+        let risk = frame
+            .risk
+            .as_ref()
+            .expect("a policed account publishes what is being enforced against it");
+        assert_eq!(
+            risk.trailing_remaining,
+            Some(Decimal::from(500)),
+            "the whole 500-dollar trail is intact on an account that has not traded"
+        );
+    }
+
+    /// The other half, and the reason the stamp asks before it fills: an
+    /// unpoliced account has no thresholds, so it has no budget to report. A
+    /// risk block of all-absent optionals would read as a policed account with
+    /// nothing left, which is the opposite of the truth.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unpoliced_accounts_frames_carry_no_budget() {
+        let run = crate::run::test_run();
+        let account = AccountId::parse("BARE-001").unwrap();
+        run.open_account(
+            &account,
+            HashMap::from([("USD".to_string(), Decimal::from(10_000))]),
+            // The default policy, which polices nothing.
+            mogwai_protocol::risk::AccountPolicy::default(),
+        )
+        .expect("a fresh account opens");
+        let account_state = run.account(&account);
+        let mut engine = account_state.engine.lock().await;
+        let mut events = vec![VenueMessage::AccountState(engine.account_snapshot(10))];
+
+        crate::http::stamp_account_risk(&engine, &account_state, &mut events);
+
+        assert!(
+            matches!(&events[0], VenueMessage::AccountState(frame) if frame.risk.is_none()),
+            "an account under no policy has no budget, and says so by absence"
         );
     }
 
