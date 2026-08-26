@@ -54,8 +54,10 @@ what unblocks what.
    or marketable-limit order walks the opposing quoted touch and a
    parametric ladder rather than slipping the last print by a draw. What
    remains under this heading is the synthetic-book calibration that would
-   make the ladder's constants real, and the margin-refold profiling
-   question. No chart verdict is owed on the crossing itself, by owner
+   make the ladder's constants real. The margin-refold question closed
+   2026-08-26 as priced-and-acceptable - the measurement and the reasoning
+   that binds any future index live in `reference/performance.md`, row
+   27d8f088. No chart verdict is owed on the crossing itself, by owner
    ruling 2026-08-26: the standing chart gate covers tape generation, and
    the crossing moved no tape byte. The calibration landing does owe one,
    because its preset constants move generated quote bytes.
@@ -142,7 +144,35 @@ headings step is filler between slates.
 Crossing landed 2026-08-26: a market or marketable-limit order now walks the
 opposing quoted touch and a parametric ladder instead of slipping the last
 print by a volatility-scaled draw, per `TAPE_PROTOCOL_VERSION` 27. What
-remains is what the mechanism exposed rather than what it was built to fix.
+remains is what the mechanism exposed rather than what it was built to fix,
+plus the calibration intake the spec deferred, now carried here since the
+spec is deleted.
+
+- **Calibration intake for the book constants.** Measure `quoted_width`,
+  `top_sizes`, `depth_levels`, `depth_growth` and `trade_displacement_ticks`
+  from real book data, landing as preset values with fitted provenance
+  through the normal intake sequence - `mogwai-lab` gains whatever
+  measurement the corpus format needs, and the method stays
+  instrument-agnostic per the north star.
+
+  Corpus state, established during implementation: the delivered MNQ corpus
+  is TBBO only, which can fit spread, touch sizes and trade displacement but
+  cannot honestly fit `depth_levels` or `depth_growth` - those need mbp-1,
+  which the Databento account holds server-side, re-fetchable by job id at
+  no new cost (see the intake entry under Tape research v2). No crypto book
+  archive is on disk; the crypto trade archives fit the displacement half
+  only.
+
+  The landing rules, carried from the spec so they are not re-derived:
+  committing changed preset artifacts moves generated quote bytes, so the
+  landing owes the next unspent tape protocol identity - and being exact
+  about which knobs owe it, `quoted_width`, `top_sizes` and
+  `trade_displacement_ticks` are generator-read and move tape bytes, while
+  `depth_levels` and `depth_growth` are read-time only and move none. The
+  landing re-blesses every fill and tape golden it moves, re-runs the fit
+  tolerances, and owes a rendered chart under the owner's eye - the standing
+  tape-generation gate applies here because tape bytes move, unlike the
+  crossing landing, which moved none.
 
 - **The placeholder ladder displays eight size increments, which is a usability
   cliff on every preset without fitted `top_sizes`.** Depth is `top_sizes`
@@ -176,38 +206,6 @@ remains is what the mechanism exposed rather than what it was built to fix.
   would ride along with them. Left open deliberately - the order-path spec
   scoped itself to the arrival and trigger paths, and this is the one taking
   path it did not reach.
-
-- **The order path refolds all holds whenever a margin-equity sell is
-  involved.** `rest_open`, `take_open` and `refresh_open_hold` each trigger a
-  full `rebuild_order_holds_excluding(None)` refold when a margin-equity sell is
-  in play, so those accounts go from constant time to linear in open orders on
-  the order path. Correct, and the price of moving the cover allocation into the
-  aggregate, but it is a hot path.
-
-  Parked against the book-crossing work above rather than on its own, because
-  that is what turns this into a measurable question: a venue walking depth
-  against order size has a real workload to profile, so "is the refold actually a
-  bottleneck" acquires an answer instead of a guess.
-
-  Round 8 tried to cache it and refused. The reasoning, recorded so it is not
-  re-derived: exact constant-time mutation is not available, because both the
-  max-resting-price rule and the exclusive-group max-leg fold are maxima over a
-  live multiset, and deleting a current maximum needs the next one, which a
-  scalar running max cannot supply. An exact logarithmic index is feasible - an
-  ordered multiset per group plus one over resting sell prices, mutated on rest,
-  take, amend, fill and cancel - and it is not cheap in the way that matters: it
-  adds release-critical state that all five transitions must maintain, and that
-  state has to be reconstructible from `OpenBook` alone. The asymmetry that
-  decides it is that `reconcile_order_holds` panics only under
-  `cfg(debug_assertions)`, so a drifting cache fails loudly in a test run and
-  silently corrupts margin in release. A slow correct fold beats a fast unproven
-  one until an index arrives with a release-checkable reconstruction.
-
-  Whatever is done must preserve what round 1 and round 2 established: the
-  incremental cache and a fresh fold stay in exact agreement, and
-  `margin_equity_sell_holds` deliberately counts a price-less resting sell for
-  its quantity while contributing no price, so the two folds cannot disagree even
-  on an order no wire path can currently rest.
 
 ## Tape research v2
 
@@ -699,9 +697,34 @@ which is what makes it a writable patch rather than a grievance.
 
 ## Owed by us to broadarrow: one message, unsent
 
-Nobody has written it. Four breaking changes now, and several entries below are
-stale in their favour. This is a message to write, not code to change.
+Nobody has written it. Seven breaking changes now - the 2026-08-26 landings
+added three - and several entries below are stale in their favour. This is a
+message to write, not code to change, and per the owner it lives here until
+it is delivered.
 
+- **The default shape moved to USD cash equity, 2026-08-26.** An unconfigured
+  venue now resolves every unmatched symbol through a new NVDA preset - cash
+  equity, USD-settled - and the default funding is 1,000,000 USD, not USDT.
+  The sharp edge: BTCUSDT is funding-barred out of the box, since it settles
+  USDT and the default account holds none. Any of their scenarios that spin a
+  transient venue with no `[balances]` and trade BTCUSDT will be refused at
+  bind as unfunded; the fix on their side is one `[balances]` line. Their
+  `reference/mogwai.md` "unfundable venue" prose is doubly stale now.
+- **Market-taking fills cross a book now, 2026-08-26.** Slippage is the
+  arithmetic consequence of walking displayed depth, not a draw: fills land
+  at or beyond the quoted touch, never inside the spread, and a market order
+  bigger than displayed depth partially fills and cancels the remainder with
+  reason "insufficient displayed depth". A scenario asserting exact fill
+  prices or assuming a market order always fills whole will read differently.
+  Until book calibration lands, non-MNQ presets display placeholder depth
+  (one size increment per level), so large market orders against those books
+  mostly cancel - size orders to the touch or fund MNQ.
+- **Policed accounts are refused at boarding for unreachable currency,
+  2026-08-26.** An account policed in currency X may bind only shapes
+  settling in X; the bind is refused as a 400 with a named reason before the
+  socket upgrade, not at order time. Their runs use unpoliced defaults today,
+  so this bites only when they adopt policy presets - but the refusal text is
+  new surface their error handling will meet first.
 - **The account surface moved.** They set no `account_type`, inherit
   `MOGWAI-001`, POST no account, and have no handling for a run that ends by
   liquidation. Their orchestrator runs the shared shape, so 50 subagents

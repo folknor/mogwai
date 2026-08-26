@@ -1639,3 +1639,39 @@ The instrument now gates the hit and the resident miss against the original
 50 ms p99) as the fallback's regression bound. The resident fold is a copy of
 ~15,000 window prints plus the shared arithmetic, which is where the ~200 us
 goes; the walk's cost is unchanged because it is the same walk.
+
+## 2026-08-26 the margin-equity refold is priced and acceptable
+
+Host `plantasjen`, release, row `27d8f088` at commit 1c4a9d4, from
+`brokkr mogwai order_path_refold --bench` (the `mogwai-engine` example
+`order_path_refold_bench`, registered as target `order_path_refold`).
+
+The question, carried since the round-8 cache refusal: a margin-equity sell
+in play makes `rest_open`, `take_open` and `refresh_open_hold` each trigger a
+full `rebuild_order_holds_excluding(None)` refold, turning those accounts
+linear in open orders on the order path. The decision rule set when the
+book-crossing work gave the path a real workload: above 20 percent of submit
+latency at 50 resting orders, specify the logarithmic index from the round-8
+analysis, with its release-checkable reconstruction from `OpenBook`; below
+it, close as priced-and-acceptable.
+
+| counter | value |
+|---|---:|
+| wall, best of 3 | 100 ms |
+| commands | 6,000 |
+| orders resting | 50 |
+| refolds performed | 8,000 |
+
+About 17 us per command with every refold included - far under the
+threshold, so the fold stays and the index is not built. The reasoning that
+still binds any future attempt: exact constant-time mutation is unavailable
+because the max-resting-price rule and the exclusive-group max-leg fold are
+maxima over a live multiset; a logarithmic index is feasible but adds
+release-critical state all five transitions must maintain, and
+`reconcile_order_holds` panics only under `cfg(debug_assertions)`, so a
+drifting cache fails loudly in tests and silently corrupts margin in
+release. A slow correct fold beats a fast unproven one until an index
+arrives with a release-checkable reconstruction. Whatever is ever built must
+preserve the rounds 1 and 2 invariants: the incremental cache and a fresh
+fold stay in exact agreement, and `margin_equity_sell_holds` counts a
+price-less resting sell for quantity while contributing no price.
