@@ -354,9 +354,9 @@ async fn serve_async(
         }
     });
     let app = Router::new()
-        .route("/health", get(http::health))
-        .route("/account", get(account))
-        .route("/instruments", get(instruments))
+        .route(mogwai_protocol::routes::HEALTH, get(http::health))
+        .route(mogwai_protocol::routes::ACCOUNT, get(account))
+        .route(mogwai_protocol::routes::INSTRUMENTS, get(instruments))
         // Namespaced, because demotion by prose is not a transport boundary.
         // These serve the unarmed river of a label on the run clock, which is
         // the operator's view and not any passenger's: a passenger carrying a
@@ -366,11 +366,11 @@ async fn serve_async(
         // market these would silently repair. A consumer that kept calling the
         // old path would have received a plausible answer and no way to know
         // the meaning had changed, so the path itself moved.
-        .route("/operator/trades", get(trades))
-        .route("/operator/quotes", get(quotes))
-        .route("/clock", get(clock))
-        .route("/ws", get(ws_upgrade))
-        .route("/accounts", post(http::open_account))
+        .route(mogwai_protocol::routes::OPERATOR_TRADES, get(trades))
+        .route(mogwai_protocol::routes::OPERATOR_QUOTES, get(quotes))
+        .route(mogwai_protocol::routes::CLOCK, get(clock))
+        .route(mogwai_protocol::routes::WS, get(ws_upgrade))
+        .route(mogwai_protocol::routes::ACCOUNTS, post(http::open_account))
         // Havoc is per-account configuration, posted on connect, and constant
         // for that connection. An account's knobs arrive as it connects and do
         // not change again while it is connected; no consumer arms a divergence
@@ -393,7 +393,10 @@ async fn serve_async(
         // pending-arm shed cap, the unordered application of concurrent arms -
         // read as live hazards only under the assumption this convention does
         // not hold.
-        .route("/control/divergence", post(arm_divergence))
+        .route(
+            mogwai_protocol::routes::CONTROL_DIVERGENCE,
+            get(http::divergence_kinds).post(arm_divergence),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;
     let bound_addr = listener.local_addr()?;

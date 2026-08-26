@@ -145,7 +145,15 @@ pub use trigger::{
 /// boundary, its coarsening exemption, the walk-back fence and the fence's
 /// `last_trade_price` recovery all go with the mutation they existed to
 /// contain.
-pub const TAPE_PROTOCOL_VERSION: u32 = 24;
+/// 25 makes the session-segment composer's terminal conditions visible through
+/// `TickSource::fault` - clock exhaustion, a level off its decimal grid, and a
+/// forward seek against a river whose clock cannot advance - and removes the
+/// library panic that stood where the price fault now is. No composed byte
+/// moves: the walk is one function that a seek and a read share, and a read
+/// takes the same path it always did. The bump is owed anyway, because the
+/// generation-path rule is unconditional and no tape identity has ever been
+/// depended on.
+pub const TAPE_PROTOCOL_VERSION: u32 = 25;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -187,6 +195,21 @@ pub enum TickFault {
     /// reached. The symbol and the underlying error are reported where the fault
     /// is latched, which is the only place that knows them.
     Materialize,
+    /// A composed segment river could no longer advance its nanosecond clock.
+    SegmentClockExhausted {
+        clock_ns: u64,
+    },
+    /// A composed segment river's running level could not be represented on
+    /// its declared decimal price grid.
+    SegmentPrice {
+        clock_ns: u64,
+    },
+    /// A forward seek was asked of a composed segment river whose clock cannot
+    /// advance, so no later instant is reachable however long the walk runs.
+    /// Distance never produces this: a far target is a cost, not a fault.
+    SegmentSeekUnreachable {
+        target_ns: u64,
+    },
 }
 
 /// One replayable market-data event.

@@ -243,10 +243,21 @@ impl SegmentCompose {
 /// An endless river composed from a segment library.
 ///
 /// Effectively infinite: like [`crate::GeneratedSource`] a caller bounds it by
-/// span rather than by exhaustion. It has exactly one terminal condition, the
-/// nanosecond clock running out of range ([`SegmentSource::clock_exhausted`]),
-/// so a `None` from this source is never ordinary end-of-stream and a consumer
-/// that reports it as one is reporting the wrong thing.
+/// span rather than by exhaustion. A `None` from this source is never ordinary
+/// end-of-stream, and a consumer that reports it as one is reporting the wrong
+/// thing. Every way it can end is a terminal fault named on
+/// [`TickSource::fault`], and there are three:
+///
+/// - [`crate::TickFault::SegmentClockExhausted`], the nanosecond clock running
+///   out of range. Mirrored by the inherent
+///   [`SegmentSource::clock_exhausted`], which predates the fault channel and
+///   is what the offline composer reads.
+/// - [`crate::TickFault::SegmentPrice`], the running level leaving the decimal
+///   grid every emitted price is snapped to.
+/// - [`crate::TickFault::SegmentSeekUnreachable`], a forward seek against a
+///   library whose clock cannot advance at all.
+///
+/// Distance is deliberately not among them. See [`SegmentSource::seek_to`].
 #[derive(Debug)]
 pub struct SegmentSource {
     library: SegmentLibrary,
@@ -279,6 +290,27 @@ pub struct SegmentSource {
     /// `next_tick` returns `None` from then on rather than saturating, which
     /// would hand every later tick the same `ts_event` forever.
     clock_exhausted: bool,
+    fault: Option<crate::TickFault>,
+    /// Whether any tick this library can play advances the nanosecond clock.
+    /// False for a library whose every `dt_ns` is zero under a zero seam gap -
+    /// legal input, since a sweep across price levels genuinely prints several
+    /// trades at one nanosecond, and the loader refuses none of it. Such a
+    /// river is endless and frozen: it emits forever at one instant and can
+    /// never reach a later one, which is the only thing that makes a forward
+    /// seek unreachable rather than merely far. Computed once at construction
+    /// so `seek_to` decides it without walking.
+    clock_can_advance: bool,
+}
+
+/// One step of composed state, as [`SegmentSource::step`] reports it.
+enum Step {
+    /// The composer advanced exactly one tick. `Some` when that tick was at or
+    /// after the caller's emit threshold and was therefore materialized;
+    /// `None` when it was skipped, which costs no symbol or decimal work but
+    /// leaves identical state behind.
+    Advanced(Option<TickEvent>),
+    /// The river ended. `fault` names why; it is never ordinary exhaustion.
+    Ended,
 }
 
 impl SegmentSource {
@@ -330,7 +362,13 @@ impl SegmentSource {
                 config.start_price
             )));
         }
+        let clock_can_advance = config.seam_gap_ns > 0
+            || library
+                .segments
+                .iter()
+                .any(|s| s.dt_ns.iter().any(|dt| *dt > 0));
         let mut source = Self {
+            clock_can_advance,
             rng: ChaCha12Rng::seed_from_u64(config.seed),
             tick_size,
             tick_f64,
@@ -342,6 +380,7 @@ impl SegmentSource {
             at_seam: false,
             clamps: 0,
             clock_exhausted: false,
+            fault: None,
             library,
             config,
         };
@@ -362,7 +401,10 @@ impl SegmentSource {
     }
 
     /// Whether the source stopped because the nanosecond clock ran out of
-    /// range. The only reason this source ever returns `None`.
+    /// range. The reason the offline composer reports, and the only one it can
+    /// provoke - it walks forward from the origin and never seeks. It is not
+    /// the only way this source ends: see [`TickSource::fault`], which names
+    /// all three and is what a `dyn TickSource` reader must consult.
     pub fn clock_exhausted(&self) -> bool {
         self.clock_exhausted
     }
@@ -405,6 +447,7 @@ impl SegmentSource {
             }
             None => {
                 self.clock_exhausted = true;
+                self.fault = Some(crate::TickFault::SegmentClockExhausted { clock_ns: self.ts });
                 false
             }
         }
@@ -436,7 +479,7 @@ impl SegmentSource {
     /// rounding the running level would accumulate the rounding error into
     /// every subsequent return, which over an endless river is a slow drift
     /// rather than a bounded one.
-    fn emit_price(&self) -> Decimal {
+    fn emit_price(&mut self) -> Option<Decimal> {
         // Enforced, not argued. This used to fall back to `self.tick_size` on a
         // `None`, which printed a one-tick trade in the middle of a runaway river
         // with no error and no log - and `None` is reachable well before `inf`,
@@ -444,30 +487,34 @@ impl SegmentSource {
         // inside [tick, MID_CEILING], which has a decimal image by construction,
         // so a `None` here means that band was breached and the river is wrong;
         // failing loudly beats printing a price nobody can trace.
-        let level = Decimal::from_f64_retain(self.price).unwrap_or_else(|| {
-            panic!(
-                "composed level {} has no decimal image; the [{}, {MID_CEILING}] \
-                 band that guarantees one was breached",
-                self.price, self.tick_f64
-            )
-        });
+        let Some(level) = Decimal::from_f64_retain(self.price) else {
+            self.fault = Some(crate::TickFault::SegmentPrice { clock_ns: self.ts });
+            return None;
+        };
         let steps = (level / self.tick_size).round();
-        (steps * self.tick_size).normalize()
+        Some((steps * self.tick_size).normalize())
     }
-}
 
-impl TickSource for SegmentSource {
-    fn next_tick(&mut self) -> Option<TickEvent> {
+    /// Advances exactly one tick of composed state.
+    ///
+    /// `emit_from_ns` decides only whether the tick is materialized: a tick
+    /// landing before it is skipped, which costs no `Symbol` allocation and no
+    /// decimal snap while leaving byte-identical state behind. That is the
+    /// whole reason `next_tick` and `seek_to` are one function rather than
+    /// two - the walk a seek performs must be the walk a read performs, and a
+    /// second copy of the seam, integration and clock rules is exactly where
+    /// the two would drift.
+    fn step(&mut self, emit_from_ns: u64) -> Step {
         // A segment whose cursor has run out hands over at the seam. `while`
         // rather than `if`: `validate` forbids an empty segment, so one hop
         // always suffices, but the loop makes that a property of the data
         // rather than an assumption the walk would panic on.
-        if self.clock_exhausted {
-            return None;
+        if self.fault.is_some() {
+            return Step::Ended;
         }
         while self.cursor >= self.library.segments[self.segment].trade_count {
             if !self.take_seam() {
-                return None;
+                return Step::Ended;
             }
         }
         let i = self.cursor;
@@ -503,16 +550,27 @@ impl TickSource for SegmentSource {
         if !self.advance_clock(dt_i) {
             // The level moved and the cursor did not, so the source is left
             // mid-segment and internally inconsistent. Harmless because the
-            // state is terminal: `clock_exhausted` latches, the guard at the
-            // top of this function returns `None` from here on, and nothing
+            // state is terminal: `clock_exhausted` latches, the fault guard at
+            // the top of `step` ends every later call, and nothing
             // reads the level again. Anything that ever makes exhaustion
             // recoverable owes an undo of the integration or a reordering.
-            return None;
+            return Step::Ended;
         }
 
+        // Skipped ticks advance the cursor and nothing else. The emitted value
+        // is a pure function of state this step has already settled, so
+        // withholding it changes no later tick.
+        if self.ts < emit_from_ns {
+            self.cursor += 1;
+            return Step::Advanced(None);
+        }
+
+        let Some(price) = self.emit_price() else {
+            return Step::Ended;
+        };
         let tick = TradeTick {
             symbol: Symbol::from(self.config.symbol.as_str()),
-            price: self.emit_price(),
+            price,
             size: Decimal::from(size_i),
             aggressor: match side_i {
                 'B' => AggressorSide::Buyer,
@@ -524,7 +582,69 @@ impl TickSource for SegmentSource {
             ts_event: self.ts,
         };
         self.cursor += 1;
-        Some(TickEvent::Trade(tick))
+        Step::Advanced(Some(TickEvent::Trade(tick)))
+    }
+}
+
+impl TickSource for SegmentSource {
+    fn next_tick(&mut self) -> Option<TickEvent> {
+        // Threshold zero: every instant is at or after it, so every step this
+        // takes materializes its tick.
+        match self.step(0) {
+            Step::Advanced(tick) => tick,
+            Step::Ended => None,
+        }
+    }
+
+    fn fault(&self) -> Option<crate::TickFault> {
+        self.fault
+    }
+
+    /// Walks to the first tick at or after `start_ts`, skipping the emission
+    /// work for everything before it.
+    ///
+    /// Distance is not a failure and must never be turned into one. A bound
+    /// stated as a tick count did exactly that: it read as a work bound and
+    /// behaved as a terminal fault, so a reachable instant far enough from the
+    /// origin - which is precisely what a named tape window asks for - came
+    /// back as a dead source, latched, and took every later read with it. The
+    /// only thing that legitimately ends a seek short is something that ends
+    /// the source: the clock running out of range, the level leaving its
+    /// decimal grid, or a library whose clock cannot advance at all.
+    ///
+    /// That last one is what makes this terminate. `self.ts` is monotone, and
+    /// `clock_can_advance` is false exactly when no tick in the library can
+    /// move it - the one case where a forward target is genuinely out of
+    /// reach, decided without walking. Otherwise the walk advances the clock
+    /// toward a bounded `u64` target and arrives, or exhausts the clock
+    /// trying. With `sample = true` and only some segments carrying time that
+    /// arrival is almost sure rather than certain, since the draw could in
+    /// principle keep choosing a timeless segment forever; every shipped
+    /// window carries time in every segment and a positive seam gap besides.
+    ///
+    /// What this does not give is a cheap distant seek: the walk is O(ticks),
+    /// because the composed level and the sampling draw are path-dependent and
+    /// no segment can be skipped without changing the river. A caller that
+    /// needs a bound owes itself a checkpoint chain, the way `mogwai-venue`
+    /// resumes a generated river from a snapshot and replays only the
+    /// residual, rather than a cap here that would refuse the walk.
+    fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
+        if self.fault.is_some() {
+            return None;
+        }
+        if start_ts > self.ts && !self.clock_can_advance {
+            self.fault = Some(crate::TickFault::SegmentSeekUnreachable {
+                target_ns: start_ts,
+            });
+            return None;
+        }
+        loop {
+            match self.step(start_ts) {
+                Step::Advanced(Some(tick)) => return Some(tick),
+                Step::Advanced(None) => (),
+                Step::Ended => return None,
+            }
+        }
     }
 }
 
@@ -814,6 +934,105 @@ mod tests {
         assert!(
             source.clock_exhausted(),
             "the source stopped for a reason it did not name"
+        );
+        assert_eq!(
+            source.fault(),
+            Some(crate::TickFault::SegmentClockExhausted {
+                clock_ns: u64::MAX - 500_000
+            }),
+            "a dyn TickSource reader must see why the endless river ended"
+        );
+    }
+
+    /// The distance a named tape window asks for is a cost, never a fault.
+    ///
+    /// The target here sits at tick 1,500,000 - deliberately past the
+    /// 1,000,000-tick cap a first attempt at bounding this walk imposed, which
+    /// turned every reachable instant beyond it into a latched terminal fault
+    /// that killed the source for good. A target only reachable by a long walk
+    /// is exactly the case a composed window opens with, so the test walks one.
+    #[test]
+    fn a_reachable_distant_seek_arrives_and_leaves_the_river_readable() {
+        let mut config = SegmentCompose::new("MNQ", 8);
+        // No seam dead time and no sampling, so the target instant is a plain
+        // multiple of the per-tick 1,000,000 ns the fixture carries and the
+        // tick count the walk must cover is arithmetic rather than a guess.
+        config.seam_gap_ns = 0;
+        config.sample = false;
+        let mut source = SegmentSource::new(
+            library(vec![segment("d1", None, &[0, 0, 0, 0, 0, 0, 0, 0])]),
+            config,
+        )
+        .expect("a valid library");
+
+        let target = 1_500_000 * 1_000_000;
+        let head = source
+            .seek_to(target)
+            .expect("a reachable instant must be reached, however far it is");
+        assert_eq!(
+            head.ts_event(),
+            target,
+            "the seek must return the first tick at or after the target, not the one after it"
+        );
+        assert_eq!(
+            source.fault(),
+            None,
+            "walking a long way is not a source failure and must latch nothing"
+        );
+        assert_eq!(
+            source.next_tick().map(|t| t.ts_event()),
+            Some(target + 1_000_000),
+            "the river must go on being read from where the seek left it"
+        );
+    }
+
+    /// The one thing that genuinely puts a forward instant out of reach: a
+    /// library with no time in it. Every `dt_ns` is zero and the seam gap is
+    /// zero, so the composed clock is frozen at its origin and no amount of
+    /// walking reaches a later instant. Decided without walking, and terminal
+    /// because the river really is broken.
+    #[test]
+    fn a_seek_on_a_river_whose_clock_cannot_advance_faults_without_walking() {
+        let mut frozen = segment("d1", None, &[0, 0, 0]);
+        frozen.dt_ns = vec![0; frozen.trade_count];
+        let mut config = SegmentCompose::new("MNQ", 8);
+        config.seam_gap_ns = 0;
+        let mut source =
+            SegmentSource::new(library(vec![frozen]), config).expect("a valid library");
+
+        // The origin itself is still servable: the frozen clock is only a bar
+        // to instants after it.
+        assert_eq!(source.seek_to(0).map(|t| t.ts_event()), Some(0));
+        assert_eq!(source.fault(), None);
+
+        assert!(source.seek_to(1).is_none());
+        assert_eq!(
+            source.fault(),
+            Some(crate::TickFault::SegmentSeekUnreachable { target_ns: 1 }),
+            "an unreachable forward window must stop with a visible fault"
+        );
+        assert!(
+            source.next_tick().is_none(),
+            "that fault is terminal, like every other way this source ends"
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_composed_price_faults_instead_of_panicking() {
+        let mut source = SegmentSource::new(
+            library(vec![segment("d1", None, &[0])]),
+            SegmentCompose::new("MNQ", 8),
+        )
+        .expect("a valid library");
+        source.price = f64::INFINITY;
+        assert!(source.emit_price().is_none());
+        assert_eq!(
+            source.fault(),
+            Some(crate::TickFault::SegmentPrice { clock_ns: 0 })
+        );
+        assert!(
+            source.next_tick().is_none(),
+            "a faulted source is terminal and may not recover on its next draw"
         );
     }
 

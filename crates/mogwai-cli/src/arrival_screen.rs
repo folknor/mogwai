@@ -33,7 +33,14 @@ const DEFAULT_OUT: &str = "analysis/mnq-arrival-screen.json";
 /// parallelism and the run gets slower rather than faster. The runs behind the
 /// number are in `reference/performance.md`, under the arrival kernel's cost
 /// cliff. Raising it wants a new run, not a guess about the host.
-const DEFAULT_MAX_JOBS: usize = 16;
+pub const DEFAULT_MAX_JOBS: usize = 16;
+
+#[must_use]
+pub fn default_jobs() -> usize {
+    thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(DEFAULT_MAX_JOBS)
+}
 
 #[derive(Args, Debug)]
 pub struct ArrivalScreenArgs {
@@ -113,11 +120,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     if args.jobs == Some(0) {
         bail!("--jobs must be at least 1");
     }
-    let jobs = args.jobs.unwrap_or_else(|| {
-        thread::available_parallelism()
-            .map_or(1, NonZeroUsize::get)
-            .min(DEFAULT_MAX_JOBS)
-    });
+    let jobs = args.jobs.unwrap_or_else(default_jobs);
     if args.demand_census.is_some() && args.out.is_some() {
         bail!("--demand-census is mutually exclusive with --out");
     }

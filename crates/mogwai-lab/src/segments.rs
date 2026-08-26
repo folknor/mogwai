@@ -730,8 +730,11 @@ mod tests {
             .join("../../analysis/tz-america-chicago-2026c.json");
         let frame = ScheduleFrame::stage_m(&authority).expect("frozen authority");
         for window in WINDOWS {
-            window_bounds("2026-04", window, &frame)
-                .unwrap_or_else(|e| panic!("shipped window {} must be cuttable: {e}", window.name));
+            assert!(
+                window_bounds("2026-04", window, &frame).is_ok(),
+                "shipped window {} must be cuttable",
+                window.name
+            );
         }
     }
 

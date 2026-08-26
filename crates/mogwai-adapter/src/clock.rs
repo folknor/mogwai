@@ -472,7 +472,10 @@ fn sim_now(sim: SimClock) -> UnixNanos {
 pub(crate) async fn fetch_clock(http: &HttpClient, http_base: &str) -> anyhow::Result<VenueClock> {
     let response = http
         .get(
-            join_url(http_base, "clock"),
+            join_url(
+                http_base,
+                mogwai_protocol::routes::segment(mogwai_protocol::routes::CLOCK),
+            ),
             None,
             None,
             Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),

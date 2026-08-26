@@ -45,6 +45,13 @@ A run retains at most 256 materialized rivers and never evicts them. This is an
 operational bound for trusted consumers belonging to the run's owner, not a
 hostile-consumer defence.
 
+`GET /control/divergence` reports the ordered list of divergence kinds this
+binary accepts. `POST /control/divergence` remains the arm operation on the
+same path. The read exposes protocol vocabulary only: it carries no account,
+river, cadence or armed-state information. The shipped script reads this list
+before posting its control-shape probes, so adding a wire kind without a script
+body makes the gate fail for incomplete coverage.
+
 A consumer reads its history over its own socket, never over these routes. Send
 `QueryHistory` with a `request_id` and a `kind` of `Trades` or `Quotes`; the
 venue answers a `HistoryPage` carrying that `request_id`, one bounded page of

@@ -243,7 +243,7 @@ impl GeneratorArm {
 /// passenger-local by construction. That was true of a one-account venue and
 /// stopped being true when a run started carrying tens of ledgers; the venue and
 /// `docs/havoc.md` both describe the per-account routing above.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::VariantNames)]
 #[serde(tag = "type")]
 pub enum Divergence {
     /// Fill the next matching order only `fraction` of the way, leaving the rest open.
@@ -360,3 +360,9 @@ pub enum Divergence {
     /// door is a fault path nothing can test.
     FaultTape,
 }
+
+/// Every externally armable divergence tag, derived from the wire enum.
+///
+/// `GET /control/divergence` publishes this slice so out-of-crate harnesses can
+/// prove their scenario coverage is complete instead of hand-copying the enum.
+pub const DIVERGENCE_KINDS: &[&str] = <Divergence as strum::VariantNames>::VARIANTS;

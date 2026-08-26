@@ -39,6 +39,7 @@ pub mod control;
 /// readiness handshake, shipped so consumers do not re-derive it from prose.
 pub mod launch;
 pub mod risk;
+pub mod routes;
 
 pub use clock::{SimClock, VenueClock, now_unix_nanos, validate_sim_clock};
 pub use decimal::{decimal_from_f64, decimal_to_f64};
@@ -48,7 +49,9 @@ pub use havoc::{
     validate_conn_havoc, validate_divergence, validate_inbound_havoc, validate_market_regime,
 };
 pub use instruments::{
-    FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
+    DEFAULT_BASE_CURRENCY, DEFAULT_PRICE_PRECISION, DEFAULT_QUOTE_CURRENCY, DEFAULT_SIZE_PRECISION,
+    DEFAULT_SYMBOL, FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass,
+    default_instrument, default_instruments,
 };
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,

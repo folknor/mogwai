@@ -931,6 +931,33 @@ impl ParentSource for ParentWalk {
                     canonical_params: None,
                     seed: None,
                 },
+                TickFault::SegmentClockExhausted { clock_ns } => ScreenRefusal {
+                    variant: "segment.clock_exhausted".to_string(),
+                    clock_ns,
+                    detail: "a segment-composer fault reached a GeneratedSource-only screen"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
+                TickFault::SegmentPrice { clock_ns } => ScreenRefusal {
+                    variant: "segment.price".to_string(),
+                    clock_ns,
+                    detail: "a segment-composer fault reached a GeneratedSource-only screen"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
+                TickFault::SegmentSeekUnreachable { target_ns } => ScreenRefusal {
+                    variant: "segment.seek_unreachable".to_string(),
+                    clock_ns: target_ns,
+                    detail: "a segment-composer fault reached a GeneratedSource-only screen"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
             }),
             Self::Kernel(walk) => {
                 let stride = walk.child_stride_ns();

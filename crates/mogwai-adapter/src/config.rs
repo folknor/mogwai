@@ -518,7 +518,11 @@ fn ws_url(
     callsign: Option<&str>,
 ) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    let mut url = format!("{base}/ws?account={account}", account = account_id.as_ref());
+    let mut url = format!(
+        "{base}{path}?account={account}",
+        path = mogwai_protocol::routes::WS,
+        account = account_id.as_ref()
+    );
     if let Some(symbol) = symbol {
         url.push_str(&format!("&symbol={symbol}"));
     }

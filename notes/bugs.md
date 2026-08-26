@@ -350,31 +350,24 @@ UTC hour later than this table places them". So the cost is not a constant edit.
 Giving the calendar a daylight rule is a schema change reaching every preset, and
 that is the decision this finding actually carries.
 
-### D4. `SegmentSource` overrides neither `seek_to` nor `fault`
+### D8. A composed river has no checkpoint chain, so a distant seek is O(ticks)
 
-An effectively infinite source inherits the O(distance) default walk that
-`mogwai-data`'s own `TickSource` doc warns about - the shape `GeneratedSource`
-needed `CheckpointIndex` for - harmless today only because
-`mogwai segments compose` walks forward from the origin and never seeks. It
-becomes a hang the moment anything serves a composed river or asks it for a
-window.
+Filed 2026-08-26 as the residue of D4, and named because C13's tape windows are
+what will meet it. `SegmentSource::seek_to` no longer caps the walk - a cap
+there turned distance into a latched terminal fault, which would have made a
+window on a composed river fail silently - so a far target is now reachable and
+simply costs the walk. What it costs is the whole walk: the composed level and
+the sampling draw are both path-dependent, so no segment can be skipped without
+composing a different river, and the seek is linear in ticks from wherever the
+source stands.
 
-`fault` is the harder half: the composer's one terminal condition, clock
-exhaustion, has no `TickFault` variant and is reported only through the inherent
-`SegmentSource::clock_exhausted`, which a `dyn TickSource` consumer cannot see,
-and adding a variant ripples into `mogwai-venue`'s `http.rs` fault rendering.
-
-The same item owns `emit_price`'s panic: a named panic inside
-`TickSource::next_tick` in a library crate, which becomes a serving-path abort
-the moment a composed river is served, where `GeneratedSource`'s equivalent
-failures go through `TickFault`. Giving the composer a `TickFault` closes both
-halves at once.
-
-Re-verified 2026-08-26, accurate in full, with one addition: there is a second
-library panic on the same feature, `mogwai-lab/src/segments.rs`'s
-`panic!("shipped window {} must be cuttable")`. It sits on a test-fixture helper
-path so the risk is lower, but it is the same family and should be swept with
-the first.
+`GeneratedSource` had the same shape and `CheckpointIndex` is what fixed it -
+snapshot the walk every K ticks, resume from the snapshot before the target,
+replay only the residual. The composer wants the same thing, and the venue's
+`Rivers::place_cursor` shows how a caller consumes it. Until then a consumer
+opening a window far from the composed origin pays for every tick between, which
+is correct but not fast, and nothing bounds how long it holds whatever lock it
+took to get there.
 
 ### D5. The 86 MB and 57 MB build tax, and the dead protocol code
 
@@ -577,28 +570,6 @@ agree at 0.62.0, so the parenthetical correcting the earlier "0.61" note stands.
 ---
 
 ## G. Tests and tooling
-
-### G16. The scripts hand-copy Rust constants, and only exercise proves them
-
-Filed 2026-08-24 from round 2, as the residue of the hole that round found.
-`scripts/smoke.py` had been pinning `READY_VERSION = 6` against a
-`ReadyRecord::VERSION` of 8 for two schema bumps, which killed every mode of the
-script at boot, and nothing noticed because nothing ran it. That pin now reads 8
-and matches, so the stale instance is repaired; what survives is the shape. The
-same hand copy is still there in two places: that pin, and `DIVERGENCE_KINDS`,
-the list of divergence tags the control-plane helper will build a body for.
-
-The new `control-shapes` gate closes the half that matters most - it boots a
-venue on every gate run, so a stale pin or a body the venue would refuse now
-fails immediately. What it cannot do is prove either list complete. A divergence
-kind added in Rust and not added to `DIVERGENCE_KINDS` is simply untested, and
-the gate stays green while it is. Closing that means the venue publishing its
-own kind list on a route the script can read, which is a wire addition and wants
-a ruling before it is built rather than being done in passing.
-
-The general lesson is worth more than either constant: a green workspace suite
-says nothing about the layer above the code the tests import. Two rounds running
-have now put a hole there.
 
 ### G1. Triage every test for parallel safety, and kill every fixed duration and wait
 
@@ -1060,40 +1031,6 @@ control's committed `new_curve` is therefore a correct re-centring on a differen
 scale from its own `old_curve`. What it cost is readability, and it will cost the
 same again at any later reader who compares the two curves elementwise. Fixing
 the frozen sentence is a section 17 amendment through review, not an edit.
-
----
-
-## I. Values that want to become named constants or knobs
-
-### I1. `default_instruments()` BTCUSDT seed is seven inline literals
-
-`mogwai-protocol`. Duplicated verbatim in two of that crate's own tests, and the
-smoke test's fixed order shape depends on it implicitly. Its own doc comment
-signposts multi-instrument growth.
-
-### I2. HTTP route strings have no shared registry
-
-`mogwai-venue`'s route strings are inline literals with no shared registry against
-the adapter's route segments, so a renamed route breaks the pair silently.
-
-### I3. Two uncapped job counts beside `arrival_screen`'s measured 16
-
-Half of this entry is closed, verified 2026-08-26. It was filed as
-`DEFAULT_MAX_JOBS` carrying no comment naming its measurement, and it now carries
-a four-line doc comment saying 16 is measured rather than chosen, that past it an
-SMT regression eats the parallelism, and pointing at `reference/performance.md`
-for the runs behind the number.
-
-What is open is the other half, now with one more site than filed:
-`arrival_envelope_diagnostic.rs` and `mogwai-cli/src/tick_composition.rs` both
-take `thread::available_parallelism()` bare, with no cap at all. Whether they
-should share `arrival_screen`'s 16 is open - but it should be settled for both at
-once rather than one at a time.
-
-### I4. `MIN_WALL_REQUEST_TIMEOUT_SECS` is the tightest cap on usable sim speed
-
-Flagged in its own comment in the adapter. If sim speed is ever pushed hard, that
-constant is the first wall.
 
 ---
 

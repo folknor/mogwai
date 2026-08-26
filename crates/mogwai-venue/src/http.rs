@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! HTTP surface: shared app state plus every plain request/response route
-//! (`/instruments`, `/account`, `/clock`, `/trades`, `/quotes`,
-//! `/control/divergence`). The stateful, streaming websocket surface
+//! (`/instruments`, `/account`, `/clock`, `/operator/trades`,
+//! `/operator/quotes`, `/control/divergence`). The stateful, streaming websocket surface
 //! (`/ws`) lives in `ws.rs`; both share `AppState` and the order-entry
 //! validation gate (`process_order_cmd`) defined here.
 
@@ -100,6 +100,10 @@ struct DivergenceAccepted {
     detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     evicted: Option<Divergence>,
+}
+
+pub(crate) async fn divergence_kinds() -> Json<&'static [&'static str]> {
+    Json(mogwai_protocol::control::DIVERGENCE_KINDS)
 }
 
 fn divergence_accepted(detail: Option<String>, evicted: Option<Divergence>) -> Response {
@@ -1082,6 +1086,23 @@ pub(crate) fn classify_fault(fault: mogwai_data::TickFault) -> FaultClass {
             kind: "materialize",
             clock_ns: 0,
             detail: "a river the config validated could not be materialized".to_owned(),
+        },
+        TickFault::SegmentClockExhausted { clock_ns } => FaultClass {
+            kind: "segment.clock_exhausted",
+            clock_ns,
+            detail: format!("composed river clock exhausted at clock_ns={clock_ns}"),
+        },
+        TickFault::SegmentPrice { clock_ns } => FaultClass {
+            kind: "segment.price",
+            clock_ns,
+            detail: format!("composed river price left its decimal grid at clock_ns={clock_ns}"),
+        },
+        TickFault::SegmentSeekUnreachable { target_ns } => FaultClass {
+            kind: "segment.seek_unreachable",
+            clock_ns: target_ns,
+            detail: format!(
+                "composed river clock cannot advance, so clock_ns={target_ns} is unreachable"
+            ),
         },
     }
 }
@@ -3194,6 +3215,16 @@ mod calendar_tests {
 
     fn generated_profiles() -> std::sync::Arc<source::Rivers> {
         crate::fills::test_rivers()
+    }
+
+    #[tokio::test]
+    async fn divergence_kind_route_publishes_the_wire_enum() {
+        let Json(kinds) = divergence_kinds().await;
+        assert_eq!(
+            kinds,
+            mogwai_protocol::control::DIVERGENCE_KINDS,
+            "the route must publish every kind derived from the wire enum"
+        );
     }
 
     /// `POST /accounts` is the third live decode path carrying money into the

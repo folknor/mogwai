@@ -1908,6 +1908,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "strum",
  "tracing",
 ]
 

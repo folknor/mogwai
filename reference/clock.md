@@ -50,6 +50,29 @@ is on a wall cadence the clock cannot distinguish itself from.
 
 ## What acceleration costs a consumer that stops reading
 
+The adapter scales `request_timeout_secs` from the simulation axis onto the wall
+clock, then floors the result at one wall second. Local I/O does not compress
+with simulated time, so without that floor a high enough `speed` would hand a
+sound HTTP round trip a sub-second budget it cannot make, and every order would
+time out for no reason but the accelerator.
+
+What the floor does is worth stating precisely, because it was written down
+backwards once. It imposes no ceiling on usable acceleration. The wall budget is
+`max(ceil(configured / speed), 1)`, which never falls below a wall second however
+fast the run goes, so acceleration cannot squeeze a request out. Nor can raising
+the configured timeout ever shorten the wall wait - the expression is monotone in
+both arguments, upward in `configured` and downward in `speed`.
+
+What it does cost is the meaning of the number. Past `speed == configured`, the
+floor takes over and the effective budget stops being the simulated span the
+consumer asked for: one wall second is `speed` simulated seconds, so a
+`ConnHavoc` arm meaning "give up after two simulated seconds" is silently more
+generous than that on any run faster than speed two, and the divergence grows
+with the speed. That is deliberate and is not owed a fix from the simulation
+axis - the whole point of the floor is that a wall round trip is a wall cost.
+Tightening it wants a measured local round-trip bound, which nothing has needed
+enough to buy.
+
 The venue is coherent. Once live, no reader can advance the canonical lead past
 the tape worker, so published tape, history, sweeps and market readings are one
 deterministic realization. The worker does advance the lead before pacing and

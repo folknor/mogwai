@@ -130,7 +130,10 @@ async fn fetch_account(
     quota.wait().await;
     let url = format!(
         "{path}?account={account}",
-        path = join_url(base, "account"),
+        path = join_url(
+            base,
+            mogwai_protocol::routes::segment(mogwai_protocol::routes::ACCOUNT),
+        ),
         account = account_id.as_ref()
     );
     let response = http
@@ -212,7 +215,10 @@ async fn ship_venue_havoc(
     account_id: AccountId,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    let url = join_url(http_base, "control/divergence");
+    let url = join_url(
+        http_base,
+        mogwai_protocol::routes::segment(mogwai_protocol::routes::CONTROL_DIVERGENCE),
+    );
     for divergence in &spec.venue {
         let serde_json::Value::Object(mut encoded) =
             serde_json::to_value(divergence).context("encode divergence")?

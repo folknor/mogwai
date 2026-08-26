@@ -23,7 +23,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     process,
     sync::{
@@ -131,7 +130,7 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     }
     let jobs = args
         .jobs
-        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
+        .unwrap_or_else(mogwai_cli::arrival_screen::default_jobs);
 
     let fp = fingerprint();
     // Every preset resolves before any measurement starts. The run is hours

@@ -77,29 +77,6 @@ MODE_CONFIGS = {
 # The control plane's request shape.
 # --------------------------------------------------------------------------
 
-# Every divergence kind the venue arms. The venue publishes no list of these,
-# so this is a hand-kept copy and cannot prove itself complete - a kind added
-# in Rust and not added here is simply untested. What it does buy is that no
-# script can post a kind the venue does not have, and that the `control-shapes`
-# mode below proves every kind named here is one a real venue accepts.
-DIVERGENCE_KINDS = frozenset(
-    {
-        "PartialFillNext",
-        "RejectNextSubmit",
-        "RejectNextCancel",
-        "DelayAcks",
-        "CommandLatency",
-        "DuplicateNextFill",
-        "DropNextAccountUpdate",
-        "GoDark",
-        "StallData",
-        "FeeSurcharge",
-        "CancelOpenOrderSilently",
-        "FaultTape",
-    }
-)
-
-
 def divergence_body(
     kind: str, account: str | None = None, symbol: str | None = None, **args: object
 ) -> dict:
@@ -114,7 +91,6 @@ def divergence_body(
     at the call site and nothing tied those dicts to the venue. One constructor
     means the next such change breaks in one place.
     """
-    assert kind in DIVERGENCE_KINDS, f"unknown divergence kind {kind}"
     body: dict = {"kind": kind, "args": dict(args)}
     if account is not None:
         body["account"] = account
@@ -1144,6 +1120,12 @@ def mode_control_shapes(venue: Venue) -> str:
     line this asserts on, which keeps the check about shape and leaves each
     kind's semantics to the modes and tests that own them.
     """
+    published = set(venue.http("/control/divergence"))
+    covered = set(CONTROL_SHAPE_ARMS) | {"FaultTape"}
+    assert covered == published, (
+        "the script's divergence shapes must cover the venue's published kinds; "
+        f"missing: {sorted(published - covered)}, stale: {sorted(covered - published)}"
+    )
     for kind, body in sorted(CONTROL_SHAPE_ARMS.items()):
         status = venue.post("/control/divergence", body)
         assert status not in (400, 415, 422), (
@@ -1156,11 +1138,6 @@ def mode_control_shapes(venue: Venue) -> str:
     # `202` rather than a deserializer refusal is that check.
     status = venue.post("/control/divergence", divergence_body("FaultTape"))
     assert status == 202, f"the venue refused the FaultTape request shape with {status}"
-    covered = set(CONTROL_SHAPE_ARMS) | {"FaultTape"}
-    assert covered == set(DIVERGENCE_KINDS), (
-        "every divergence kind this script knows must be posted here; "
-        f"uncovered: {sorted(set(DIVERGENCE_KINDS) - covered)}"
-    )
     return f"the venue accepted the request shape of all {len(covered)} divergence kinds"
 
 

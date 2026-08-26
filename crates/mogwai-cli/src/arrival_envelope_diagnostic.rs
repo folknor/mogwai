@@ -3,7 +3,6 @@
 
 //! Corpus-free counterfactual evaluation of Stage A's skipped A2 envelopes.
 
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -171,7 +170,7 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
     }
     let jobs = args
         .jobs
-        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
+        .unwrap_or_else(crate::arrival_screen::default_jobs);
     let screen_path = args.screen.unwrap_or_else(|| DEFAULT_SCREEN.into());
     let measure_path = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());

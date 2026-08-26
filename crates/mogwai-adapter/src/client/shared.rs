@@ -292,7 +292,10 @@ pub(crate) async fn fetch_instruments(
     quota.wait().await;
     let response = http
         .get(
-            join_url(base, "instruments"),
+            join_url(
+                base,
+                mogwai_protocol::routes::segment(mogwai_protocol::routes::INSTRUMENTS),
+            ),
             None,
             None,
             Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
@@ -426,8 +429,11 @@ pub(crate) fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
 /// dividing a sim-seconds timeout by a high `speed` would otherwise yield a
 /// sub-second wall budget that the actual HTTP round trip blows, spuriously
 /// timing out every order. Clamping up to one wall second keeps the request
-/// survivable; the consequence is that `request_timeout_secs` is the tightest
-/// contributor to the usable-speed ceiling. Documented in `reference/clock.md`.
+/// survivable, and it imposes no ceiling on usable speed: the budget only ever
+/// stops shrinking. What it costs instead is the configured number's meaning -
+/// past `speed == configured`, the floor is what applies and the effective
+/// budget is `speed` simulated seconds rather than the span the consumer asked
+/// for. Deliberate, and reasoned out in `reference/clock.md`.
 const MIN_WALL_REQUEST_TIMEOUT_SECS: u64 = 1;
 
 pub(crate) fn request_timeout_secs(spec: &Option<HavocSpec>, sim: SimClock) -> u64 {
@@ -544,7 +550,10 @@ pub(crate) fn run_identity_check(
     Some(Arc::new(move || {
         let http = http.clone();
         let quota = quota.clone();
-        let url = join_url(&http_base, "health");
+        let url = join_url(
+            &http_base,
+            mogwai_protocol::routes::segment(mogwai_protocol::routes::HEALTH),
+        );
         let probe: std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> =
             Box::pin(async move {
                 quota.wait().await;

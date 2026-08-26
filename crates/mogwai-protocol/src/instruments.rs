@@ -421,25 +421,37 @@ impl InstrumentDef {
 
 /// The canonical default instrument set the venue seeds when none is supplied.
 ///
-/// Today this is the single `BTCUSDT` instrument. The engine seeds from this
+/// Today this is the single [`default_instrument`] definition. The engine seeds from this
 /// function, and the venue derives its default generator grid from the same
 /// definition, so order validation and generated prices agree on tick size and
 /// precision. The field values are price precision 2, size precision 8, with
 /// `1e-2` / `1e-8` increments.
 #[must_use]
 pub fn default_instruments() -> Vec<InstrumentDef> {
-    vec![InstrumentDef {
-        symbol: "BTCUSDT".into(),
-        class: InstrumentClass::Spot {
-            base: "BTC".into(),
-            quote: "USDT".into(),
-        },
-        price_precision: 2,
-        size_precision: 8,
-        price_increment: Decimal::new(1, 2),
-        size_increment: Decimal::new(1, 8),
-    }]
+    vec![default_instrument()]
 }
+
+/// The canonical instrument definition used when no set is supplied.
+#[must_use]
+pub fn default_instrument() -> InstrumentDef {
+    InstrumentDef {
+        symbol: DEFAULT_SYMBOL.into(),
+        class: InstrumentClass::Spot {
+            base: DEFAULT_BASE_CURRENCY.into(),
+            quote: DEFAULT_QUOTE_CURRENCY.into(),
+        },
+        price_precision: DEFAULT_PRICE_PRECISION,
+        size_precision: DEFAULT_SIZE_PRECISION,
+        price_increment: Decimal::new(1, u32::from(DEFAULT_PRICE_PRECISION)),
+        size_increment: Decimal::new(1, u32::from(DEFAULT_SIZE_PRECISION)),
+    }
+}
+
+pub const DEFAULT_SYMBOL: &str = "BTCUSDT";
+pub const DEFAULT_BASE_CURRENCY: &str = "BTC";
+pub const DEFAULT_QUOTE_CURRENCY: &str = "USDT";
+pub const DEFAULT_PRICE_PRECISION: u8 = 2;
+pub const DEFAULT_SIZE_PRECISION: u8 = 8;
 
 #[cfg(test)]
 mod tests {
@@ -834,19 +846,13 @@ mod tests {
     fn default_instruments_ships_one_btcusdt_spot_definition() {
         let defs = default_instruments();
         assert_eq!(defs.len(), 1);
-        assert_eq!(
-            defs[0],
-            InstrumentDef {
-                symbol: "BTCUSDT".into(),
-                class: InstrumentClass::Spot {
-                    base: "BTC".into(),
-                    quote: "USDT".into(),
-                },
-                price_precision: 2,
-                size_precision: 8,
-                price_increment: Decimal::new(1, 2),
-                size_increment: Decimal::new(1, 8),
-            }
-        );
+        assert_eq!(defs[0], default_instrument());
+        assert_eq!(DEFAULT_SYMBOL, "BTCUSDT");
+        assert_eq!(DEFAULT_BASE_CURRENCY, "BTC");
+        assert_eq!(DEFAULT_QUOTE_CURRENCY, "USDT");
+        assert_eq!(DEFAULT_PRICE_PRECISION, 2);
+        assert_eq!(DEFAULT_SIZE_PRECISION, 8);
+        assert_eq!(defs[0].price_increment, Decimal::new(1, 2));
+        assert_eq!(defs[0].size_increment, Decimal::new(1, 8));
     }
 }
