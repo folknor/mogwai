@@ -971,12 +971,21 @@ changes as a result of being looked at - but the glossary settles it: nothing
 has to be boarded for history to answer, so refusing a label no passenger had
 boarded would make cold history unservable.
 
-A page's cutoff is the tighter of the run clock and the asking passenger's own
-boat clock. The run bound keeps any caller from reading past the venue's
-present; the boat bound keeps this one passenger from reading past its own, which on
-an unpaced or slow-boat run is earlier. Without the second, a strategy warming
-from its own history would read water it had not been delivered - the look-ahead
-the first bound exists to prevent, arriving one level down.
+A page's cutoff for a shared placement is the tighter of the run clock and the
+asking passenger's own boat clock. The run bound keeps any caller from reading
+past the venue's present; the boat bound keeps this one passenger from reading
+past its own, which on an unpaced or slow-boat run is earlier. Without the
+second, a strategy warming from its own history would read water it had not
+been delivered - the look-ahead the first bound exists to prevent, arriving one
+level down. A named placement is bounded by its own boat clock and its window
+end alone, with no run-clock term: its boat is anchored at `window_start_ns`
+and delivers from there whatever the run clock reads, so its frontier can
+legitimately lead the venue's, and clamping it to the run clock starved the
+warmup backfill the window's floor promises - answered as an empty complete
+page a consumer cannot tell from a quiet market - while making the answer a
+function of the venue's boot instant, the wall-clock input a named run is
+defined not to carry. No look-ahead opens either way, because history never
+crosses the asking boat's own delivery frontier.
 
 Still owed:
 
@@ -1101,9 +1110,10 @@ itself is stated once above, in the phrasing
 it here in any other phrasing would be exactly the durable-claim defect that
 test exists to prevent.
 So none of the intervening bumps - 12's arrival-frame calibration, 13's
-fill-band decimal normalization, 14's `ReopenGap` crossing repair, 15's
-protocol-12b mechanism landing, and onward - moved any of the bytes this oracle
-observes: the first six simulated hours of the offline generation path, at
+fill-band decimal normalization, 14's `ReopenGap` crossing repair, and onward -
+moved any of the bytes this oracle observes (15 is not among them: it remains
+the arrival-mechanism reservation, held for a protocol-12b mechanism landing
+that has not happened, so no commit has ever set the constant to it): the first six simulated hours of the offline generation path, at
 those three arms. It does not walk MNQ, it does not walk the venue's river
 placement, and it does not run past six hours, so it is evidence about the
 crypto generator's core draw rather than a blanket identity. That is consistent

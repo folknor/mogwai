@@ -126,14 +126,17 @@ pub(crate) struct PageRequest<'a> {
     /// it here instead would let a single request be answered against a moving
     /// clock.
     ///
-    /// The tighter of two bounds, and the second one is the point. The run
-    /// clock keeps any caller from reading past the venue's present, which is
-    /// why a forward claim from this venue is worth something. But a passenger
-    /// on a slow boat is behind the run clock, and serving it rows between its
-    /// own instant and the run's would hand it its own future - the look-ahead
-    /// the run bound exists to prevent, arriving one level down. A history read
-    /// over a socket is a passenger asking about its own ride, so it is bounded
-    /// by that ride.
+    /// Which clocks tighten it is the caller's placement question, decided in
+    /// `ws::spawn_history_page`. A shared placement takes the tighter of the
+    /// run clock and its own boat clock: the run clock keeps any caller from
+    /// reading past the venue's present, and a passenger on a slow boat is
+    /// behind it, so serving rows between its own instant and the run's would
+    /// hand it its own future - the look-ahead the run bound exists to
+    /// prevent, arriving one level down. A named placement takes its own boat
+    /// clock and its window end with no run term, because its boat is
+    /// anchored at the window start and its frontier legitimately leads the
+    /// venue's. Either way a history read over a socket is a passenger asking
+    /// about its own ride, so it never crosses that ride's delivery frontier.
     pub(crate) present: u64,
     pub(crate) run_start_ns: u64,
     pub(crate) data_origin_ns: u64,

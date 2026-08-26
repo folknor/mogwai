@@ -932,15 +932,26 @@ fn spawn_history_page(
     let rivers = Arc::clone(&state.rivers);
     let slots = Arc::clone(&state.history_slots);
     let waiters = Arc::clone(&state.history_slot_waiters);
-    // The tighter of the two presents. The run clock bounds any caller against
-    // the venue's own present; the boat clock bounds this passenger against its
-    // own. On a paced run at speed 1 they are nearly the same and the second
-    // buys nothing visible, which is exactly why it was missing: on an unpaced
-    // or slow-boat run the boat trails the run clock, and serving the span
-    // between them would hand this passenger water it has not been delivered.
-    let mut present = state.run_now().min(sim_now_ns(boat.sim));
-    if let Some(end_ns) = boat.key().window_end_ns() {
-        present = present.min(end_ns.saturating_sub(1));
+    // The passenger's ceiling, and which clocks bound it depends on the
+    // placement. A shared boat takes the tighter of the run clock and its own:
+    // the run clock bounds any caller against the venue's present, and the boat
+    // clock bounds this passenger against its own - on an unpaced or slow-boat
+    // run the boat trails the run clock, and serving the span between them
+    // would hand this passenger water it has not been delivered. A named
+    // placement drops the run bound and keeps only its own boat clock and its
+    // window end. Its boat is anchored at `window_start_ns` and delivers from
+    // there whatever the run clock reads, so its own frontier can legitimately
+    // lead the venue's - clamping to the run clock would refuse the warmup
+    // backfill the window's floor promises (as an empty complete page a
+    // consumer cannot tell from a quiet market) until the venue's wall clock
+    // caught up, and would put the venue's boot instant into a named
+    // passenger's observable, which is the wall-clock input the window exists
+    // to remove. No look-ahead opens: history stays at or behind the boat's
+    // own delivery frontier either way.
+    let mut present = sim_now_ns(boat.sim);
+    match boat.key().window_end_ns() {
+        Some(end_ns) => present = present.min(end_ns.saturating_sub(1)),
+        None => present = present.min(state.run_now()),
     }
     let run_start_ns = boat.key().origin_ns(state.run.started_ns);
     let data_origin_ns = if boat.key().window_end_ns().is_some() {

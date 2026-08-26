@@ -4775,3 +4775,81 @@ async fn a_second_placement_of_one_river_is_refused_over_the_wire() {
         "the shared placement is compared too: {body}"
     );
 }
+
+/// A named window's history ceiling is its own boat clock and its window end,
+/// never the run clock.
+///
+/// The consumer flow the window exists for is board, backfill the warmup from
+/// your own socket, trade the span - and a named boat is anchored at
+/// `window_start_ns` the moment it is placed, however little wall time the run
+/// clock has covered. Clamping the page ceiling to the run clock therefore
+/// starved exactly that flow: a window starting later in the run than the
+/// venue's wall clock has reached answered the warmup query with an empty
+/// complete page, which a consumer cannot tell from a market that genuinely
+/// printed nothing, while the same socket was already being delivered that very
+/// span live. It also made the answer a function of the venue's boot instant,
+/// which is the wall-clock input a named run is defined not to carry.
+///
+/// The window here starts one simulated minute after `run_start_ns`, so at
+/// query time the run clock - walking at wall rate from boot on this unpaced
+/// config - is far behind the window's own warmup floor. The page must carry
+/// the warmup rows anyway, bounded by the request's own end.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_named_windows_warmup_history_ignores_the_run_clock() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let start_ns = venue.record.run_start_ns + 60_000_000_000;
+    let end_ns = start_ns + 60_000_000_000;
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}&callsign=warm&account=WINDOW-WARMUP&window_start_ns={start_ns}&window_end_ns={end_ns}",
+        venue.ws_url_for(&venue.symbol),
+    ))
+    .await
+    .expect("the named window boards ahead of the run clock");
+    let warmup_from = start_ns - 30_000_000_000;
+    socket
+        .send(Message::Text(
+            format!(
+                r#"{{"type":"QueryHistory","request_id":"WINDOW-WARMUP","kind":"Trades","start":{warmup_from},"end":{start_ns}}}"#
+            )
+            .into(),
+        ))
+        .await
+        .expect("ask for the warmup span the window's floor promises");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the warmup page answers before the harness budget")
+            .expect("socket open")
+            .expect("frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        if let Ok(VenueMessage::HistoryPage {
+            request_id,
+            cutoff,
+            rows,
+            ..
+        }) = serde_json::from_str(&text)
+            && request_id == "WINDOW-WARMUP"
+        {
+            // The run clock is nowhere near the window yet, so a ceiling that
+            // consulted it would have cut this page to an empty complete one.
+            assert_eq!(
+                cutoff, start_ns,
+                "the warmup page's cutoff must be the requested end, not the run clock"
+            );
+            assert!(
+                !rows.is_empty(),
+                "the warmup span ahead of the run clock must be served, not answered empty"
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| (warmup_from..=start_ns).contains(&row.ts_event())),
+                "warmup rows escaped the requested window"
+            );
+            break;
+        }
+    }
+}
