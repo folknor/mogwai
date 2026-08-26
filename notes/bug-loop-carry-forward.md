@@ -2,19 +2,19 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current through
-round 2 of the now-exhausted `notes/bugs-protocol-cli.md`, whose decisions are
-directly below. The bugs-venue-serving, bugs-venue-mechanics and bugs-engine
-arcs beneath it are closed and judged sound; the close-pass records are at the
-bottom. `notes/bugs-adapter.md` has not been worked at all, which is why this
-carry-forward stays live. The bugs-protocol-cli arc owes a close pass over its
-own three commits next, and the adapter arc after that.
+the close pass over the now-exhausted `notes/bugs-protocol-cli.md` arc, whose
+decisions are directly below. The bugs-protocol-cli, bugs-venue-serving,
+bugs-venue-mechanics and bugs-engine arcs are all closed and judged sound; the
+close-pass records are at the bottom. `notes/bugs-adapter.md` has not been
+worked at all, which is why this carry-forward stays live. The adapter arc is
+next, and the adapter is the one crate that touches nautilus.
 
-What the close pass should look hardest at, from this round: the round-2 fix
+What the adapter arc should carry from the protocol/CLI arc: the round-2 fix
 pass closed a finding by writing a sentence into `reference/architecture.md`,
-and the sentence was false about the very path the finding named. Both halves of
-that are worth carrying into the adapter arc - a durable claim is owed the same
-verification as a code change, and closing a "the ordering happens to be safe"
-finding with prose closes nothing.
+and the sentence was false about the very path the finding named. Both halves
+of that matter - a durable claim is owed the same verification as a code
+change, and closing a "the ordering happens to be safe" finding with prose
+closes nothing.
 
 ## Machinery agents may build on and must not break, from bugs-protocol-cli round 2
 
@@ -201,6 +201,8 @@ finding with prose closes nothing.
   through the supported constructor and was left alone rather than given a
   defensive arm - the venue's refusal is translated to `OrderRejected` and names
   the reason, which is the better answer than silently dropping the price.
+  The close pass filed this as finding 10 in `notes/bugs-adapter.md`, so the
+  adapter arc meets it in its own document.
 
 ## Machinery agents may build on and must not break, from bugs-venue-mechanics round 1
 
@@ -655,6 +657,51 @@ finding with prose closes nothing.
   the round-1 precedent, which moved fill and linkage behaviour far more than
   round 2 did. `mogwai-data`, `analysis/` and the fingerprint were untouched
   throughout.
+
+## The close pass, and how the bugs-protocol-cli arc ended
+
+The close pass reviewed the whole two-commit arc (the SubmitPhase split and the
+BoundaryCleared witness) and closed it. What it found and did:
+
+- Every production and test call site of `validate_submit_order` and
+  `validate_submit_group` was enumerated and checked against the stamp it
+  stands on. The two production sites are exactly as recorded -
+  `boundary_error` PreStamp on both frames, `on_submit_group` PostStamp - and
+  no test asserts the wrong phase's rule: the engine tests that reuse the
+  priced `order()` helper strip the price before asking PreStamp, and the
+  linkage tests that hand a priced market child to PreStamp are safe because
+  `validate_order_link` runs before the type match, so the child refusal fires
+  first for the reason the assertion names.
+- The parent-cycle walk was re-derived: bounded at `orders.len()` steps per
+  member, it cannot flag an acyclic chain (depth is at most `len - 1`) and
+  cannot miss a cycle (after `len` steps a walker in or above one still holds a
+  parent), and duplicate ids are refused before `find` could pick between them.
+- The finding-4 deletion was re-proven: all three of `sim_ns`'s exits are at or
+  above `sim_epoch_ns`, so the deleted `.max` genuinely could not fire.
+- The durable prose the arc touched was checked claim by claim against the
+  code, which was this arc's characteristic hazard: the two-admissions section
+  of `reference/architecture.md` (witness minting, the unclamped counts, the
+  64 KiB bound, the deferred verdict), `docs/cli.md`'s launcher properties
+  (owner-loop reap recording, the `take` under the `BufReader`, the single
+  elision marker, the launcher-pid comparison against `getppid()`), and
+  `docs/order-lists.md`'s two-validations paragraph all state what the code
+  does. One prose defect found and fixed, in the arc's own family: the lattice
+  test's doc claimed the market-price rule "cannot be expressed here" while
+  the lattice does state that cell - as its pre-stamp value, which is the side
+  the test asks. The comment now says exactly that.
+- The wire_submit residual (a host-built `OrderInitialized` with type Market
+  and a price now earns a named refusal instead of a fill at that price) is
+  filed as finding 10 in `notes/bugs-adapter.md`, where the next arc will meet
+  it, rather than left as a footnote here.
+- The remaining residuals were accepted as recorded: the unclamped
+  `worst_case_output_bytes` count (the ordering, enforced by the witness, is
+  what keeps it small), the narrowed one-arm market-reading socket test (a
+  replacement witness needs an observable other than the fill price, and none
+  exists yet), and the untestable no-op clamp deletion.
+- No `TAPE_PROTOCOL_VERSION` bump is owed, verified rather than trusted:
+  nothing under `mogwai-data`, `analysis/` or the fingerprint moved in either
+  commit, and order validation, admission sizing and the launcher are not the
+  tape generation path.
 
 ## The close pass, and how the bugs-engine arc ended
 

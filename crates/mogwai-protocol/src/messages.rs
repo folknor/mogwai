@@ -3215,10 +3215,14 @@ mod tests {
     /// Written out here rather than folded into the validator, which is the
     /// standing ruling on the structural proposal from the protocol/CLI bug
     /// hunt. The rules that are not cells - post-only, the conditional-versus-IOC
-    /// conflict, `expire_time` against the time in force, the linkage walk, and
-    /// the market-price rule that inverts across `SubmitPhase` - cannot be
-    /// expressed here, and the phase-dependent one is exactly the cell that was
-    /// missing when this hunt started. A table that could not have held the
+    /// conflict, `expire_time` against the time in force, and the linkage walk -
+    /// cannot be expressed here. The Market/`price` cell can be, and is, but
+    /// only for one side of the stamp: every row states the `PreStamp` truth,
+    /// which is why the test below asks `PreStamp` throughout, and the
+    /// inversion of that one cell across `SubmitPhase` - exactly the cell that
+    /// was missing when this hunt started - is pinned by
+    /// `the_market_price_cell_is_the_one_the_phase_decides` instead. A table
+    /// that could not have held the
     /// defect it was proposed for is not the implementation's shape; it is a
     /// good test, because a new `OrderType` variant fails to compile until its
     /// row is stated.

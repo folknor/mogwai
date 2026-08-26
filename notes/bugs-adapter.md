@@ -259,3 +259,25 @@ not transcribed; the two cross-repo semantics claims that mattered were verified
 `mogwai_engine::order_status_snapshot`, and `ExecutionEventEmitter`'s
 `set_sender` / `is_initialized` / `send_order_status_report` surface in
 `research/nautilus_trader/crates/live/src/execution/emitter.rs`.
+
+## 10. Handed over from the protocol/CLI arc: `wire_submit` forwards a host-stated price on a Market order into a new wire refusal
+
+Filed by the protocol/CLI close pass, 2026-08-26. Low severity, decide rather
+than assume.
+
+The wire now refuses a consumer-supplied `price` on a `Market` order
+(`SubmitPhase::PreStamp`, "Market order must not carry a price"). `wire_submit`
+in `client/exec.rs` maps `init.price` through for every order type except
+`TrailingStopLimit`, so a host handing the adapter an `OrderInitialized` with
+`order_type` Market and a price now earns a boundary refusal - translated to a
+named `OrderRejected` - where it previously earned a fill at that price.
+
+Nautilus's own `MarketOrder` cannot carry a price through the supported
+constructor, so this is unreachable on the supported path, and the protocol/CLI
+round left it alone deliberately: a named refusal beats silently dropping the
+price, and a defensive drop would hide a host bug. The adapter round should
+either ratify that ruling in `wire_submit`'s doc, which currently says nothing
+about the Market case while the `TrailingStopLimit` arm documents its drop at
+length, or argue for the drop with the same care that arm did. What must not
+happen is a later reader "fixing" the refusal by silently dropping the price
+without meeting the round-1 argument.
