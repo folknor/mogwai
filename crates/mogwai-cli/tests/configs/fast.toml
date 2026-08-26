@@ -15,3 +15,7 @@ warmup_ns = 300000000000
 
 # Unthrottled: the gates assert on WHAT arrives, not on its cadence.
 speed = 0.0
+
+[balances]
+USD = "1000000"
+USDT = "1000000"

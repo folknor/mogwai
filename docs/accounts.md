@@ -53,7 +53,7 @@ The body is JSON and unknown fields are refused:
 ```json
 {
   "account_id": "WYRD-820",
-  "balances": {"USDT": "250000"},
+  "balances": {"USD": "250000"},
   "policy_preset": "intraday-trail"
 }
 ```

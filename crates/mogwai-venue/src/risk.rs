@@ -45,6 +45,21 @@ use mogwai_protocol::risk::{
 };
 use rust_decimal::Decimal;
 
+/// Whether this shape reaches `currency` in the venue's one-hop valuation
+/// model.
+///
+/// A future settling in `currency` moves only that currency and carries its own
+/// unrealized, so it qualifies. A spot pair quoted in `currency` qualifies too:
+/// that pair's own mark is the one hop that prices its base asset. "Reaches"
+/// means that hop and no other. A second hop would require an exchange-rate
+/// surface and therefore a price the venue did not observe.
+pub(crate) fn reaches_policy_currency(
+    def: &mogwai_protocol::InstrumentDef,
+    currency: &str,
+) -> bool {
+    def.class.settlement_currency() == currency
+}
+
 /// Nanoseconds in one minute, for the reset-boundary arithmetic.
 const NANOS_PER_MINUTE: u64 = 60 * 1_000_000_000;
 
@@ -109,6 +124,11 @@ impl RiskLedger {
     /// anything.
     pub(crate) fn currency(&self) -> Option<&str> {
         self.policy.currency.as_deref()
+    }
+
+    /// The currency only when this ledger actually enforces a rule.
+    pub(crate) fn policed_currency(&self) -> Option<&str> {
+        (!self.is_unpoliced()).then_some(self.currency()).flatten()
     }
 
     /// Whether this ledger enforces nothing at all.
@@ -463,6 +483,20 @@ mod tests {
         let mut ledger = RiskLedger::new(AccountPolicy::default(), 50_000.into(), 0);
         assert_eq!(ledger.observe(Decimal::ZERO, 1), Verdict::Clear);
         assert!(!ledger.is_locked());
+    }
+
+    #[test]
+    fn a_currency_on_an_unpoliced_policy_does_not_turn_into_enforcement() {
+        let ledger = RiskLedger::new(
+            AccountPolicy {
+                currency: Some("USD".to_owned()),
+                ..AccountPolicy::default()
+            },
+            50_000.into(),
+            0,
+        );
+        assert_eq!(ledger.currency(), Some("USD"));
+        assert_eq!(ledger.policed_currency(), None);
     }
 
     /// A static overall floor does not follow a peak. Up 3,000 and back to

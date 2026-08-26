@@ -5,7 +5,7 @@
 # built-in defaults, which capped the wall wait between two prints at
 # gap_cap_ms. With that cap deleted, speed = 1.0 waits out the fitted
 # inter-arrival process in full, whose dwells run to tens of seconds on the
-# default BTCUSDT profile, and the first Trade frame no longer arrives inside
+# default NVDA profile, and the first Trade frame no longer arrives inside
 # the consumer's timeout. Speed is the knob that answers that now, so this
 # compresses the same fitted process rather than capping it.
 speed = 60.0

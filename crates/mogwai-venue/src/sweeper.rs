@@ -923,17 +923,18 @@ fn enforce_policy(
         .risk
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(currency) = ledger.currency().map(str::to_owned) else {
+    let Some(currency) = ledger.policed_currency().map(str::to_owned) else {
         // Unpoliced. No equity is computed at all, so an unpoliced account pays
         // nothing for a feature it does not use.
         return (emitted, originated, false);
     };
     let Some(equity) = crate::risk::equity_in(engine, &currency) else {
-        // The account holds value this policy cannot express. Order entry
-        // refuses what would create that state, so reaching here means an
-        // account acquired it another way - a venue-originated liquidation
-        // partial, say. Enforcing against a wrong number would be worse than
-        // not enforcing, so this warns loudly and declines rather than guessing.
+        // Opening, boarding and order entry bound which currencies a policed
+        // account can acquire, but two live residues remain: a spot fill can be
+        // swept before the first mark prices its base asset, and that base-asset
+        // balance itself is valued through the admitted pair's one hop. A warn
+        // here is evidence of one of those windows or a hole in a door.
+        // Enforcing against a wrong number remains worse than declining.
         tracing::warn!(
             account = %account_state.account_id.as_str(),
             %currency,
@@ -1697,6 +1698,76 @@ mod tests {
             state.trailing_remaining,
             Some(Decimal::from(300)),
             "flat on the pass and 200 of the 500 budget is gone",
+        );
+    }
+
+    /// A policy that names a currency and sets no rule is unpoliced, valid and
+    /// reachable, and this pass must not value it.
+    ///
+    /// The gate used to read `ledger.currency()` under a comment claiming the
+    /// `else` arm was the unpoliced one - a claim that expression does not
+    /// check. Such an account was valued and run against every rule it does not
+    /// have, which reaches no false breach and is therefore invisible. The
+    /// observable that does move is the day anchor: `observe` rolls
+    /// `day_open_equity` onto the reading whenever the pass crosses a day
+    /// boundary, and it does that with no rule set, so an anchor still sitting
+    /// on the opening balance is the pass declining to value the account at
+    /// all. The ratchet is the wrong observable here and was tried first: the
+    /// peak only moves inside the trailing-drawdown arm, so a policy with no
+    /// rules leaves it flat either way and the assertion could not fail.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_currency_with_no_rule_is_not_valued_by_the_pass() {
+        let run = crate::run::test_run();
+        let account = AccountId::parse("RISK-002").unwrap();
+        run.open_account(
+            &account,
+            HashMap::from([("USD".to_string(), Decimal::from(10_000))]),
+            mogwai_protocol::risk::AccountPolicy {
+                currency: Some("USD".to_owned()),
+                ..mogwai_protocol::risk::AccountPolicy::default()
+            },
+        )
+        .expect("a currency with no rule is a valid policy");
+        let account_state = run.account(&account);
+        *account_state.engine.lock().await = engine_with_position();
+        let mut engine = account_state.engine.lock().await;
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        engine.mark(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_500),
+            )],
+            10,
+        );
+        // Two days in, so the pass crosses a day boundary and would re-anchor.
+        let to_ns = 2 * 86_400 * 1_000_000_000;
+        let mut events = Vec::new();
+        let (_, _, terminated) = enforce_policy(
+            &account_state,
+            &mut engine,
+            &mut events,
+            &symbol,
+            None,
+            to_ns,
+            0,
+            0,
+        );
+        assert!(!terminated, "there is no rule to breach");
+        let equity = engine.valuation_in("USD").expect("valuable");
+        assert_eq!(
+            equity,
+            Decimal::from(11_000),
+            "the mark is worth 1,000 more than the opening balance, so a re-anchor is visible"
+        );
+        assert_eq!(
+            account_state
+                .risk
+                .lock()
+                .unwrap()
+                .state(equity)
+                .day_open_equity,
+            Decimal::from(10_000),
+            "an unpoliced account must not be valued, so its day never re-anchored"
         );
     }
 

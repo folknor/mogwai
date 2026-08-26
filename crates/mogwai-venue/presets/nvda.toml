@@ -1,0 +1,30 @@
+[instrument]
+symbol = "NVDA"
+price_precision = 2
+size_precision = 0
+price_increment = "0.01"
+size_increment = "1"
+
+[instrument.class]
+kind = "equity"
+currency = "USD"
+multiplier = "1"
+
+# No generator and no session table: the scalars default from the committed
+# fingerprint medians with the tick grid, price decimals and top sizes forced
+# to this definition. Those medians are crypto quantities, so the default shape
+# opens near sixty thousand dollars a share - stated here because it is the
+# shape every unmatched symbol wears, and because stating one scalar is not
+# currently expressible: a `[generator]` table is all-or-nothing, and supplying
+# a partial one is a code change to the absent-generator path rather than a
+# preset edit.
+
+[provenance]
+"symbol" = { kind = "declared", rationale = "the default shape's label" }
+"price_precision" = { kind = "declared", rationale = "US equity quote grid, cents" }
+"size_precision" = { kind = "declared", rationale = "shares are whole units" }
+"price_increment" = { kind = "declared", rationale = "US equity quote grid, cents" }
+"size_increment" = { kind = "declared", rationale = "one share" }
+"class.kind" = { kind = "declared", rationale = "cash equity" }
+"class.currency" = { kind = "declared", rationale = "US listing, USD settled" }
+"class.multiplier" = { kind = "declared", rationale = "one share per contract" }

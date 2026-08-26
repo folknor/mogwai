@@ -1188,7 +1188,7 @@ mod river_tests {
     #[test]
     fn a_last_trade_read_reports_an_unissued_key() {
         let rivers = total_rivers();
-        let key = rivers.test_key("BTCUSDT").with_unresolvable_bundle();
+        let key = rivers.test_key("NVDA").with_unresolvable_bundle();
         let error = rivers
             .last_trade_at_or_before(&key, TAPE_ORIGIN_NS)
             .expect_err("an internal routing refusal is not a quiet tape");
@@ -1322,7 +1322,7 @@ mod river_tests {
         let first = rivers.resolve_profile("FOOBAR").unwrap();
         let second = rivers.resolve_profile("FOOBAR").unwrap();
         assert_eq!(first.def.symbol.as_ref(), "FOOBAR");
-        assert_eq!(first.def.class.settlement_currency(), "USDT");
+        assert_eq!(first.def.class.settlement_currency(), "USD");
         assert!(Arc::ptr_eq(&first, &second));
         assert!(rivers.resolve_profile("not legal!").is_err());
     }

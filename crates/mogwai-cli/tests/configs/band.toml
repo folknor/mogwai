@@ -4,7 +4,7 @@
 # A venue whose resting limits use the volatility-scaled fill band.
 #
 # The clock is accelerated on purpose. The band is a statement about the tape,
-# and at speed 1.0 the fitted BTCUSDT arrival process legitimately dwells tens
+# and at speed 1.0 the borrowed fitted arrival process legitimately dwells tens
 # of seconds between prints, so a wall-bounded assertion about a resting fill
 # would be a bet on the tape's cadence rather than a gate on this code.
 #

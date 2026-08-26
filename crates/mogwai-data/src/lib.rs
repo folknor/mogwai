@@ -165,7 +165,7 @@ pub use trigger::{
 /// rather than owed - it costs one integer, no tape identity has ever been
 /// depended on, and a spent identity is cheaper than an argument about whether
 /// the next reader will agree the placement analysis was exhaustive.
-pub const TAPE_PROTOCOL_VERSION: u32 = 27;
+pub const TAPE_PROTOCOL_VERSION: u32 = 28;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

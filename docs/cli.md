@@ -443,7 +443,7 @@ bar counts and its clustering constants are declared with a rationale saying
 they come from nowhere at all. Choosing a preset without reading that is
 choosing a number you have not been told the standing of.
 
-`gen` remains the offline generator command. `--symbol` (default `BTCUSDT`)
+`gen` remains the offline generator command. `--symbol` (default `NVDA`)
 resolves against the built-in venue first and then against the embedded presets,
 so
 `mogwai gen --symbol MNQ --type bars --interval 1m --length 3d` charts the index
@@ -464,11 +464,11 @@ offline path dropped the calendar and printed straight through both, so a chart
 taken from it disagreed with the served river it was supposed to illustrate.
 
 `tick-composition` is the offline measurement the tape budget constants are
-derived from. It walks all three presets across eight seeds and four arrival
+derived from. It walks all four presets across eight seeds and four arrival
 configurations and writes exactly one fixture, named by `--out` and stamped with the
 live tape protocol version. Each preset is resolved the way `serve` resolves
 it, so the futures are measured on their own size grid and session calendar. It
-is a long run - about an hour at the default 2,000,000 parent events per
+is a long run - somewhat over an hour at the default 2,000,000 parent events per
 combination, nearly all of it the maximum-surge arm - and `--jobs` bounds its
 concurrency; `--parents` shortens it for a smoke run, at which point the output
 is no longer the shipped fixture. The destination is staged and renamed at the

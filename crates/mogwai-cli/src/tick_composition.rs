@@ -787,19 +787,19 @@ mod tests {
     #[test]
     fn task_order_is_seed_then_mode_then_preset() {
         let tasks = tasks();
-        assert_eq!(tasks.len(), 96);
+        assert_eq!(tasks.len(), 128);
         assert_eq!(
             (tasks[0].seed, tasks[0].mode.label(), tasks[0].preset),
-            (1, "quiet", "MNQ")
+            (1, "quiet", "NVDA")
         );
-        assert_eq!(tasks[2].preset, "BTCUSDT");
+        assert_eq!(tasks[3].preset, "BTCUSDT");
         assert_eq!(
-            (tasks[3].seed, tasks[3].mode.label(), tasks[3].preset),
-            (1, "active", "MNQ")
+            (tasks[4].seed, tasks[4].mode.label(), tasks[4].preset),
+            (1, "active", "NVDA")
         );
         assert_eq!(
-            (tasks[12].seed, tasks[12].mode.label(), tasks[12].preset),
-            (2, "quiet", "MNQ")
+            (tasks[16].seed, tasks[16].mode.label(), tasks[16].preset),
+            (2, "quiet", "NVDA")
         );
     }
 

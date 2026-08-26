@@ -160,12 +160,12 @@ announces readiness.
 Instrument resolution has three layers: a preset bundle, default knobs from
 `[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. This
 resolution is total - a label with no `[symbols.*]` table and no matching preset
-name resolves `[instrument]` over the operator's `preset` or over BTCUSDT.
+name resolves `[instrument]` over the operator's `preset` or over NVDA.
 The top-level `symbol` names the default label - what a request that carries no
 symbol binds - and nothing else; it receives no boat and no early warmup. If
-absent, the default bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
-`[instrument]` preset, which beats a preset matching the symbol, which beats the
-BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
+absent, the default bundle's NVDA symbol stands. An explicit per-symbol `preset`
+beats a default `[instrument]` preset, which beats a preset matching the symbol,
+which beats the NVDA default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
 two table keys that differ only in case. `[instrument].symbol` is refused:
 overlays carry knobs, while the top-level key carries the default symbol.
 
@@ -173,8 +173,9 @@ Boot resolves and validates every shape the config names - the default symbol an
 every `[symbols.*]` table - funding currencies included, and refuses startup
 over any of them. It additionally resolves each shipped preset and the
 unconfigured fallback, but only records an unfundable settlement currency there
-rather than refusing: barring a BTCUSDT-only operator over an unfunded USD
-would make the venue harder to launch than to use. A request landing on one of
+rather than refusing: barring a USD-only operator over the unfunded USDT that
+the shipped BTCUSDT preset settles in would make the venue harder to launch
+than to use. A request landing on one of
 those barred shapes is refused at bind or at the history poll instead, naming
 the currency to add to `[balances]`.
 
@@ -372,7 +373,7 @@ of its budget is a different result from one that never came close.
 ## The instrument class
 
 A config may carry no instrument-facing key at all, and many do: an unnamed
-label selects a matching shipped preset or the BTCUSDT default, and the derived
+label selects a matching shipped preset or the NVDA default, and the derived
 definition supplies the class, precision and increments. Write a
 `[symbols.<SYM>]` table only for a label whose shape you want to differ from
 that. Overlay keys are logged explicit choices:
@@ -493,7 +494,7 @@ open, which is the crypto case and the default.
 
 ## Presets
 
-A requested symbol selects a committed preset of the same name, or BTCUSDT when
+A requested symbol selects a committed preset of the same name, or NVDA when
 unmatched - so `?symbol=MNQ` gets the index-future bundle from a config that
 never mentions MNQ.
 An explicit `preset = "MNQ"` in either overlay takes precedence and serves that

@@ -447,6 +447,21 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
         )
             .into_response());
     }
+    if let Some(currency) = state.run.policy_currency(&account_id, resetting)
+        && !crate::risk::reaches_policy_currency(&profile.def, &currency)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account {account} is policed in {currency} and {symbol} settles in {settlement}; \
+                 a policed account may bind only shapes settling in its policy currency, because \
+                 the venue prices one hop and owns no exchange rate - the symbol is still served, \
+                 it just cannot be bound by this account under this policy",
+                account = account_id.as_str()
+            ),
+        )
+            .into_response());
+    }
     let speed = query.speed.unwrap_or(state.cfg.speed);
     if !speed.is_finite() || speed < 0.0 {
         return Err((

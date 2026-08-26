@@ -32,7 +32,7 @@ admission_lane_frames = 64
 pending_command_acts = 256
 global_pending_command_acts = 4096
 
-# The boot symbol selects a matching preset, or the BTCUSDT default when
+# The boot symbol selects a matching preset, or the NVDA default when
 # unmatched. It is the river boarded at startup and the default for a request
 # that names no symbol; any other symbol a consumer asks for is served too.
 # symbol = "FOOBAR"
@@ -57,9 +57,9 @@ global_pending_command_acts = 4096
 # when it binds, rather than having every buy rejected for insufficient balance
 # minutes in.
 #
-# So these default balances fund USDT only, which covers BTCUSDT and every
-# unmatched symbol resolving through it, but not the USD-settled MNQ and MES
-# bundles. Add USD below for a run whose consumers may ask for the index
-# futures. An empty table is the deliberate unfunded run, with funds checks off.
+# These default balances fund USD, which covers NVDA, MNQ, MES and every
+# unmatched symbol resolving through the NVDA shape. BTCUSDT is funding-barred
+# until USDT is added here. An empty table is the deliberate unfunded run, with
+# funds checks off.
 [balances]
-USDT = "1000000"
+USD = "1000000"

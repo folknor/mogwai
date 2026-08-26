@@ -301,13 +301,13 @@ impl Default for Config {
     }
 }
 
-/// The funded built-in default: 1,000,000 USDT, the quote currency of the
-/// built-in BTCUSDT instrument. Mirrors the committed mogwai.toml so a
+/// The funded built-in default: 1,000,000 USD, the settlement currency of the
+/// built-in NVDA instrument. Mirrors the committed mogwai.toml so a
 /// no-config checkout serves an account that can actually trade; operators
 /// running a custom instrument set fund their own quote currencies via the
 /// `[balances]` table (or set it empty to run unfunded deliberately).
 fn default_balances() -> HashMap<String, Decimal> {
-    HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))])
+    HashMap::from([("USD".to_string(), Decimal::from(1_000_000))])
 }
 
 /// Refuses boot on funding gaps the funded-account enforcement would turn into
@@ -574,9 +574,8 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The preset every unmatched symbol is served under. It is spot, makes no
-/// calendar claim about an unfitted symbol, settles in the funded USDT default,
-/// and was fitted from trade-level archives.
+/// The preset every unmatched symbol is served under. It is standard USD cash
+/// equity and makes no calendar claim about an unfitted symbol.
 ///
 /// This is the shape contract for every unmatched symbol, not merely the tape
 /// you get when you do not pick one. Swapping it for tape reasons silently moves
@@ -589,7 +588,7 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
 /// unnamed request fails its own funding check, which is the one path that must
 /// never fail. Designating either one is therefore a joint decision. The symbol
 /// contributes no currency of its own; it is a label.
-pub const DEFAULT_PRESET: &str = "BTCUSDT";
+pub const DEFAULT_PRESET: &str = "NVDA";
 /// The shape an arbitrary unconfigured label resolves to under this config.
 ///
 /// No probe label. Resolving the fallback under some sentinel string needs that
@@ -610,13 +609,14 @@ fn unconfigured_fallback_shape(cfg: &Config) -> anyhow::Result<source::Instrumen
 }
 
 /// The shipped presets. The one spelling of the registry: name, text.
-const PRESETS: [(&str, &str); 3] = [
+const PRESETS: [(&str, &str); 4] = [
+    ("NVDA", include_str!("../presets/nvda.toml")),
     ("MNQ", include_str!("../presets/mnq.toml")),
     ("MES", include_str!("../presets/mes.toml")),
     ("BTCUSDT", include_str!("../presets/btcusdt.toml")),
 ];
 
-pub fn preset_names() -> [&'static str; 3] {
+pub fn preset_names() -> [&'static str; 4] {
     PRESETS.map(|(name, _)| name)
 }
 
@@ -1480,9 +1480,14 @@ fn profile_from_configured(
     if configured.generator.is_none() {
         scalars.modal_tick = def.price_increment;
         scalars.price_decimals = u32::from(def.price_precision);
-        scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(
-            mogwai_data::SizeGrid::from_def(&def).min_size,
-        );
+        let min_size = mogwai_data::SizeGrid::from_def(&def).min_size;
+        scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(min_size);
+        if matches!(def.class, InstrumentClass::Equity { .. }) {
+            // Fingerprint medians are fractional crypto quantities. Equity
+            // definitions require whole shares, so an absent generator starts
+            // at the instrument's minimum tradable share count instead.
+            scalars.latent_size_median = min_size;
+        }
     }
     if scalars.modal_tick != def.price_increment {
         anyhow::bail!(
@@ -2385,7 +2390,8 @@ mod tests {
             refuse_unfunded_settlement(&cfg, &defs[0]).expect_err("an unfunded quote refuses boot");
         assert!(err.to_string().contains("unfunded"), "{err}");
 
-        refuse_unfunded_settlement(&Config::default(), &defs[0])
+        let default = profile_from_preset(DEFAULT_PRESET).unwrap();
+        refuse_unfunded_settlement(&Config::default(), &default.def)
             .expect("the shipped defaults fund their own quote currency");
     }
 
@@ -2883,6 +2889,39 @@ mod tests {
         );
     }
 
+    /// The bundle-addition path in `apply_overlay` is deliberately permissive:
+    /// a top-level key the chosen bundle does not set is inserted rather than
+    /// refused, because `margin`, `fees` and `calendar` are absent from most
+    /// bundles and the must-already-exist rule would make them unreachable.
+    /// The typo guard that survives that permission is the downstream
+    /// `deny_unknown_fields` deserialize, and nothing pinned it - so a
+    /// nonsense addition surviving as an ignored table would have been silent.
+    #[test]
+    fn a_nonsense_bundle_addition_is_refused_by_the_deserialize() {
+        let cfg: Config = toml::from_str("[symbols.MNQ]\nnonsense = 1\n").unwrap();
+        let error = profile_for(&cfg, Some("MNQ")).unwrap_err();
+        // The alternate formatting, because the key is named by the serde
+        // error under the context rather than by the context itself - and the
+        // chain is what both doors render: `ResolveRefusal::Invalid` prints
+        // `{error:#}` at bind, and anyhow's Debug prints the chain at boot.
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("nonsense"),
+            "an addition no field accepts must die naming the key: {chain}"
+        );
+        // The negative half: a legitimate addition to a bundle that sets no
+        // such key still lands, which is the whole reason the path is
+        // permissive. MNQ ships no fee table.
+        let cfg: Config = toml::from_str(
+            "[symbols.MNQ.fees.maker]\nbasis = \"per_contract\"\namount = \"0.20\"\n[symbols.MNQ.fees.taker]\nbasis = \"per_contract\"\namount = \"0.25\"\n",
+        )
+        .unwrap();
+        assert!(
+            profile_for(&cfg, Some("MNQ")).unwrap().fees.is_some(),
+            "a bundle addition the deserialize accepts must still apply"
+        );
+    }
+
     #[test]
     fn a_lowercase_default_symbol_finds_its_uppercase_symbols_table() {
         let cfg: Config = toml::from_str(
@@ -2948,17 +2987,19 @@ mod tests {
     #[test]
     fn an_unfunded_preset_shape_is_barred_not_refused() {
         let profiles =
-            build_instrument_profiles(&Config::default()).expect("USDT-only boot succeeds");
-        let error = profiles.resolve("MNQ").expect_err("USD preset is barred");
+            build_instrument_profiles(&Config::default()).expect("USD-only boot succeeds");
+        let error = profiles
+            .resolve("BTCUSDT")
+            .expect_err("USDT preset is barred");
         assert!(
-            matches!(error, source::ResolveRefusal::FundingBarred { ref currency, .. } if currency == "USD")
+            matches!(error, source::ResolveRefusal::FundingBarred { ref currency, .. } if currency == "USDT")
         );
     }
 
     #[test]
     fn funding_every_preset_bars_nothing() {
         let mut cfg = Config::default();
-        cfg.balances.insert("USD".to_owned(), Decimal::ONE);
+        cfg.balances.insert("USDT".to_owned(), Decimal::ONE);
         let profiles = build_instrument_profiles(&cfg).unwrap();
         for symbol in preset_names() {
             profiles.resolve(symbol).unwrap();
@@ -3590,7 +3631,7 @@ mod tests {
         assert_eq!(profiles.instrument_defs().len(), 2);
         assert_eq!(
             profiles.default_symbol_def(None).unwrap().symbol.as_ref(),
-            "BTCUSDT"
+            "NVDA"
         );
     }
 }

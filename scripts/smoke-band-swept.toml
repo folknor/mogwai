@@ -4,7 +4,7 @@
 #
 # The clock is accelerated for the same reason the in-process sweeper gates run
 # at speed 100: the swept fill waits on the NEXT PRINT, and at speed 1.0 the
-# fitted BTCUSDT arrival process legitimately dwells tens of seconds - sometimes
+# borrowed fitted arrival process legitimately dwells tens of seconds - sometimes
 # minutes - between prints, so a wall-bounded assertion would be a bet on the
 # tape's cadence rather than a gate on the sweeper. At speed 100 every wall
 # second buys 100 simulated seconds of tape, which the dwell bound in

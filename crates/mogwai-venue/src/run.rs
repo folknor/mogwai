@@ -1144,6 +1144,35 @@ impl Run {
         }
     }
 
+    /// The policy currency of the ledger this connection will be served on.
+    ///
+    /// This mirrors `funded_in`'s prospective-ledger semantics: a resetting or
+    /// unopened claim reads the policy that will be minted, while a resuming
+    /// claim reads the existing ledger. A currency on an unpoliced policy is
+    /// descriptive only and must not turn boarding into enforcement.
+    pub(crate) fn policy_currency(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+        resetting: bool,
+    ) -> Option<String> {
+        if !resetting && let Some(account_state) = self.peek_account(account_id) {
+            let ledger = account_state
+                .risk
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return ledger.policed_currency().map(str::to_owned);
+        }
+        // Resetting, or nothing opened yet: the policy this claim will mint.
+        // Asked rather than hardcoded to `None`, so the day `minted_policy`
+        // grows teeth this door follows it instead of being silently skipped.
+        let policy = self.minted_policy();
+        if policy.is_unpoliced() {
+            None
+        } else {
+            policy.currency
+        }
+    }
+
     /// Collect every account that has been unattended longer than `ttl`.
     ///
     /// A frozen account is resumable state with no lifecycle of its own: nothing
@@ -3219,6 +3248,68 @@ pub(crate) mod tests {
             policy,
         )
         .expect("opening in the policy currency alone is the supported shape");
+    }
+
+    /// The boarding door reads the ledger this claim will be served on, which
+    /// is not always the ledger that exists. Three readings, one per branch:
+    /// a resuming claim reads the live ledger, a resetting claim reads the
+    /// policy about to be minted rather than the doomed one, and an id nobody
+    /// opened reads the minted policy too. A currency on an unpoliced policy
+    /// is descriptive and must answer `None` on every one of them, or the door
+    /// refuses a bind while enforcing nothing.
+    #[tokio::test]
+    async fn the_boarding_policy_currency_follows_the_ledger_the_claim_will_get() {
+        let run = run(1_000, 400, None);
+        let policed = mogwai_protocol::AccountId::parse("POLICED-01").unwrap();
+        run.open_account(
+            &policed,
+            std::collections::HashMap::from([("USD".to_owned(), Decimal::from(50_000))]),
+            mogwai_protocol::risk::AccountPolicy {
+                currency: Some("USD".to_owned()),
+                trailing_drawdown: Some(mogwai_protocol::risk::TrailingDrawdown {
+                    amount: Decimal::from(5_000),
+                    basis: mogwai_protocol::risk::TrailingBasis::default(),
+                    lock_at_equity: None,
+                    on_breach: mogwai_protocol::risk::BreachAction::Terminate,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("a policed account in its own currency opens");
+        assert_eq!(
+            run.policy_currency(&policed, false).as_deref(),
+            Some("USD"),
+            "a resuming claim is enforced under the ledger it resumes"
+        );
+        assert_eq!(
+            run.policy_currency(&policed, true),
+            None,
+            "a resetting claim is enforced under the policy it mints, which is unpoliced"
+        );
+        assert_eq!(
+            run.policy_currency(
+                &mogwai_protocol::AccountId::parse("NOBODY-01").unwrap(),
+                false
+            ),
+            None,
+            "an id nobody opened is enforced under the minted policy too"
+        );
+
+        let stated = mogwai_protocol::AccountId::parse("STATED-01").unwrap();
+        run.open_account(
+            &stated,
+            std::collections::HashMap::from([("USD".to_owned(), Decimal::from(50_000))]),
+            mogwai_protocol::risk::AccountPolicy {
+                currency: Some("USD".to_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("a currency with no rule is a valid unpoliced policy");
+        assert_eq!(
+            run.policy_currency(&stated, false),
+            None,
+            "a currency on an unpoliced policy must not turn boarding into enforcement"
+        );
     }
 
     /// An arm against an account that has not connected must not cost that

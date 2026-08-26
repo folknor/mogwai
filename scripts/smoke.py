@@ -402,7 +402,7 @@ def order(client_order_id: str, symbol: str, **overrides: object) -> dict:
         "symbol": symbol,
         "side": "Buy",
         "order_type": "Market",
-        "quantity": "0.001",
+        "quantity": "1",
         "time_in_force": "Gtc",
     }
     payload.update(overrides)
@@ -571,12 +571,9 @@ def mode_default(venue: Venue) -> str:
         # the last quote alone reads as exact and is simply flaky, because the
         # tape moves on between the reading and the fill.
         #
-        # Four satoshi, which is absurd for a BTCUSDT order and is deliberate:
-        # BTCUSDT has no fitted top_sizes, so its placeholder ladder displays
-        # eight satoshi in total and anything larger partially fills and
-        # cancels for insufficient displayed depth. That would make this a test
-        # of the exhaustion path rather than of the crossing price. The cliff is
-        # filed in notes/todo.md against the calibration brick.
+        # One share matches the default equity grid and its uncalibrated top
+        # size, so this remains a crossing-price check rather than an exhaustion
+        # check.
         def crossing_is_adverse(client_order_id: str, side: str, quantity: str) -> None:
             ws.send(
                 order(
@@ -611,8 +608,8 @@ def mode_default(venue: Venue) -> str:
                     f"{got} > {ceiling}"
                 )
 
-        crossing_is_adverse("SMOKE-CROSS-BUY", "Buy", "0.00000004")
-        crossing_is_adverse("SMOKE-CROSS-SELL", "Sell", "0.00000002")
+        crossing_is_adverse("SMOKE-CROSS-BUY", "Buy", "1")
+        crossing_is_adverse("SMOKE-CROSS-SELL", "Sell", "1")
 
         # The one ledger answers for the order the same socket just worked.
         ws.send({"type": "QueryOrders", "request_id": "SMOKE-Q", "open_only": False})

@@ -1176,7 +1176,7 @@ mod tests {
         // could not agree with a literal transcribed from the old artifact.
         assert_eq!(
             manifest.plan_sha256,
-            "210de630d5ff7f95667e15b72a46ce23a6db24326c6820afe12c491f2e50f4d4"
+            "6107bd66994f468022ce1265fcbe8b1e079979bb18613a4c9c4390d0088fe5cd"
         );
         assert_eq!(
             manifest.plan_sha256,

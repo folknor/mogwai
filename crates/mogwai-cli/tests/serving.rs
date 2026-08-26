@@ -40,7 +40,7 @@ use std::time::Duration;
 use common::{
     account_ttl_config, band_config, empty_scheduled_close_config, fast_config, fees_config,
     http_get, http_post_json, mnq_preset_config, paced_config, perpetual_config,
-    scheduled_close_config, spawn, tiny_fanout_config, two_symbols_config,
+    policy_boarding_config, scheduled_close_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, QuoteTick, TradeTick, VenueMessage};
@@ -353,7 +353,7 @@ async fn scheduled_close_refuses_market_takers_and_whole_groups_over_the_socket(
 
     let commands = [
         format!(
-            r#"{{"type":"SubmitOrder","client_order_id":"CLOSED-MARKET","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
+            r#"{{"type":"SubmitOrder","client_order_id":"CLOSED-MARKET","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
             venue.symbol
         ),
         format!(
@@ -410,7 +410,7 @@ async fn a_closed_market_without_a_readable_print_is_not_a_synthesis_failure() {
         .await
         .expect("bind the empty closed river");
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"EMPTY-CLOSE","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
+        r#"{{"type":"SubmitOrder","client_order_id":"EMPTY-CLOSE","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
         venue.symbol
     );
     socket.send(Message::Text(submit.into())).await.unwrap();
@@ -458,7 +458,7 @@ async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
     assert_eq!(defs.len(), 1);
     let def = &defs[0];
     assert_eq!(def.symbol.as_ref(), "FOOBAR");
-    let preset = mogwai_venue::config::profile_from_preset("BTCUSDT").unwrap();
+    let preset = mogwai_venue::config::profile_from_preset("NVDA").unwrap();
     assert_eq!(def.class, preset.def.class);
     assert_eq!(def.price_precision, preset.def.price_precision);
     assert_eq!(def.size_precision, preset.def.size_precision);
@@ -1147,7 +1147,7 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
 /// A policed spot account trades and is valued: the base asset it ends up
 /// holding is priced by the pair that quotes it.
 ///
-/// This is what the default tape shape needs. A spot fill credits the base as a
+/// This is what a spot tape shape needs. A spot fill credits the base as a
 /// currency balance and debits the quote, so an account holding BTC is worth
 /// nothing statable until BTCUSDT is marked - and its equity must never collapse
 /// by the notional it just spent, which is what a naive sum of balances
@@ -1155,22 +1155,24 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_policed_spot_account_is_valued_at_the_marked_price() {
-    let venue = spawn(&["--config", &fast_config()]);
+    let venue = spawn(&["--config", &policy_boarding_config()]);
     let (status, body) = http_post_json(
         &venue.http_base(),
         "/accounts",
-        r#"{"account_id":"WYRD-204","balances":{"USDT":"5000000"},
-            "policy":{"currency":"USDT","trailing_drawdown":{"amount":"1000000"}}}"#,
+        r#"{"account_id":"WYRD-204","balances":{"USD":"5000000"},
+            "policy":{"currency":"USD","trailing_drawdown":{"amount":"1000000"}}}"#,
     );
     assert_eq!(status, 201, "the policed account opens: {body}");
 
-    let (mut socket, _) =
-        tokio_tungstenite::connect_async(format!("{}?account=WYRD-204", venue.ws_url()))
-            .await
-            .expect("open the policed account's socket");
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-204",
+        venue.ws_url_for("BTCUSD")
+    ))
+    .await
+    .expect("open the policed account's socket");
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"SPOT-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
-        venue.symbol
+        "BTCUSD"
     );
     socket
         .send(Message::Text(submit.into()))
@@ -1179,7 +1181,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
 
     // The purchase must actually book before anything is asked about its
     // valuation, and the order of the two waits is what makes this test able to
-    // fail at all: the account opens with 5,000,000 USDT, so the equity floor
+    // fail at all: the account opens with 5,000,000 USD, so the equity floor
     // below is already satisfied before the fill lands. A poll that did not wait
     // for the fill first would pass on the opening balance.
     //
@@ -2254,24 +2256,151 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
         body.contains("WYRD-600") && body.contains("not funded in"),
         "the refusal is the funding check rather than some other 400: {body}"
     );
-    // USDT as a literal, not resolved through the same config code the venue
+    // USD as a literal, not resolved through the same config code the venue
     // runs: this is the settlement currency of the default boot river, and a
     // derived expectation would compare the venue's answer to itself.
     //
-    // The whole phrase, not `contains("USDT")`. The boot river here is the
-    // default preset BTCUSDT, and "USDT" is a substring of "BTCUSDT" - so a bare
-    // `contains("USDT")` was implied by the symbol assertion beside it and said
+    // The whole phrase, not `contains("USD")`. The boot river here is the
+    // default preset NVDA, so the phrase distinguishes settlement from the
+    // account's own currency and says
     // nothing on its own. A venue that had regressed to echoing the account's
-    // own currency back - "not funded in JPY, which is what BTCUSDT settles in",
+    // own currency back - "not funded in JPY, which is what NVDA settles in",
     // a plausible real bug - would have satisfied it.
     assert!(
-        body.contains("not funded in USDT"),
+        body.contains("not funded in USD"),
         "the refusal names the settlement currency, not the account's own: {body}"
     );
     assert!(
         body.contains(&*venue.symbol),
         "the refusal names the river whose settlement it is: {body}"
     );
+}
+
+/// A spot fill can add a balance currency that the opening-funding check could
+/// not see. That balance may fund a second shape, but a policed account still
+/// may not board it when the shape does not settle in the policy currency.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn policed_account_boarding_refuses_a_funded_second_hop_before_eviction() {
+    let venue = spawn(&["--config", &policy_boarding_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-601","balances":{"USD":"5000000"},
+            "policy":{"currency":"USD","trailing_drawdown":{"amount":"1000000"}}}"#,
+    );
+    assert_eq!(status, 201, "the policed account opens: {body}");
+
+    let (mut incumbent, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-601&callsign=alpha",
+        venue.ws_url_for("BTCUSD")
+    ))
+    .await
+    .expect("the USD-quoted spot pair boards");
+    submit_market_order(&mut incumbent, "BTCUSD", "BOARD-1")
+        .await
+        .expect("the buy fills and creates the BTC balance line");
+
+    let refused = while_draining(
+        &mut incumbent,
+        tokio_tungstenite::connect_async(format!(
+            "{}&account=WYRD-601&callsign=beta",
+            venue.ws_url_for("BTCSETTLE")
+        )),
+        "the incumbent while the second boarding is refused",
+    )
+    .await;
+    let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = refused else {
+        panic!("the second hop must be an HTTP refusal before upgrade: {refused:?}");
+    };
+    assert_eq!(response.status(), 400);
+    let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default());
+    assert!(
+        body.contains("policed in USD") && body.contains("BTCSETTLE settles in BTC"),
+        "the named policy refusal fired: {body}"
+    );
+    incumbent
+        .send(Message::Ping(Vec::new().into()))
+        .await
+        .expect("the refused pre-claim boarding left the incumbent connected");
+}
+
+/// The shapes the same policy does board, and the refusal that is not this
+/// door's, in one venue so the door's edges are pinned against each other.
+///
+/// The MNQ leg is the future half of the one-hop predicate and the BTCUSD leg
+/// is the spot half, pinned so a later "policed means futures only"
+/// simplification fails loudly rather than quietly narrowing the model. The
+/// BTCUSDT leg records that a freshly opened policed account binding a foreign
+/// shape is already refused by the funding door, one refusal earlier - the
+/// single-step example that a review proposed as this door's principal test
+/// and that could never have bitten, so nobody re-derives it.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_policed_account_boards_every_shape_its_policy_currency_reaches() {
+    let venue = spawn(&["--config", &policy_boarding_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-602","balances":{"USD":"5000000"},
+            "policy":{"currency":"USD","trailing_drawdown":{"amount":"1000000"}}}"#,
+    );
+    assert_eq!(status, 201, "the policed account opens: {body}");
+
+    for symbol in ["MNQ", "BTCUSD"] {
+        let (socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}&account=WYRD-602&callsign={symbol}",
+            venue.ws_url_for(symbol)
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{symbol} settles in USD and must board: {error:?}"));
+        drop(socket);
+    }
+
+    let refused = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-602&callsign=barred",
+        venue.ws_url_for("BTCUSDT")
+    ))
+    .await;
+    let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = refused else {
+        panic!("a USDT-settled shape must be refused: {refused:?}");
+    };
+    let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default());
+    assert!(
+        body.contains("not funded in USDT"),
+        "the funding door answers first, so this refusal is not the policy one: {body}"
+    );
+}
+
+/// A currency on a policy that sets no rule is descriptive, not enforcement,
+/// and must not cost the account a boarding.
+///
+/// `RiskLedger::new` stores the policy verbatim and `currency()` is a bare
+/// read of it, so a policy carrying a currency and no rules is unpoliced,
+/// valid and reachable. Reading the currency without asking whether anything
+/// is enforced would refuse this bind while enforcing nothing against it.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_unpoliced_account_carrying_a_currency_boards_a_foreign_shape() {
+    let venue = spawn(&["--config", &policy_boarding_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-603","balances":{"USD":"5000000","BTC":"1"},
+            "policy":{"currency":"USD"}}"#,
+    );
+    assert_eq!(
+        status, 201,
+        "a currency with no rule is a valid policy: {body}"
+    );
+
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-603&callsign=free",
+        venue.ws_url_for("BTCSETTLE")
+    ))
+    .await
+    .expect("an unpoliced account binds whatever it is funded for");
+    drop(socket);
 }
 
 /// A perpetual position pays funding, which is the only thing tying a perp to
@@ -2517,7 +2646,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     let trades: Vec<TradeTick> = serde_json::from_str(&trades_body).expect("anchor trades");
     let price = trades.last().expect("anchor print").price - rust_decimal::Decimal::new(201, 2);
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"{price}","time_in_force":"Gtc"}}"#,
+        r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"{price}","time_in_force":"Gtc"}}"#,
         venue.symbol,
     );
     socket
@@ -2627,10 +2756,7 @@ async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
     // touch. Sized to the placeholder deliberately, and the cliff itself is
     // filed in `notes/todo.md` against the calibration brick rather than
     // papered over here.
-    for (side, id, qty) in [
-        ("Buy", "MKT-BOOK-BUY", "0.00000004"),
-        ("Sell", "MKT-BOOK-SELL", "0.00000002"),
-    ] {
+    for (side, id, qty) in [("Buy", "MKT-BOOK-BUY", "1"), ("Sell", "MKT-BOOK-SELL", "1")] {
         let before_ns = drain_last_market_ts(&mut socket).await;
         let submit = format!(
             r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"{side}","order_type":"Market","quantity":"{qty}","time_in_force":"Gtc"}}"#,
@@ -2740,7 +2866,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     let submitting = async {
         for index in 0..100 {
             let submit = format!(
-                r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+                r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}}"#,
                 venue.symbol
             );
             writer
@@ -2833,12 +2959,12 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
         for index in 0..100 {
             let submit = if index % 2 == 0 {
                 format!(
-                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"0.01","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
                     venue.symbol
                 )
             } else {
                 format!(
-                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"0.01","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"1","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
                     venue.symbol
                 )
             };
@@ -3405,7 +3531,7 @@ async fn websocket_commands_cannot_overtake_each_other() {
         .await
         .expect("open order socket");
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"ORDERED-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+        r#"{{"type":"SubmitOrder","client_order_id":"ORDERED-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}}"#,
         venue.symbol
     );
     socket
@@ -4059,7 +4185,7 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
             .expect("open an account socket");
     mine.send(Message::Text(
         format!(
-            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}}"#,
             venue.symbol
         )
         .into(),
@@ -4134,7 +4260,7 @@ async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_account
         .expect("open a default-account socket");
     mine.send(Message::Text(
         format!(
-            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-2","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-2","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}}"#,
             venue.symbol
         )
         .into(),
@@ -4242,7 +4368,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
         .await
         .expect("open order socket");
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"SILENT-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+        r#"{{"type":"SubmitOrder","client_order_id":"SILENT-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}}"#,
         venue.symbol
     );
     socket

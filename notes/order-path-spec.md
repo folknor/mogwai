@@ -196,7 +196,7 @@ venue. It is the same objection decision 3 raises against an unbounded
 ladder, one level up. It is accepted anyway, because exogenous water is a
 north-star constraint and the alternative - stateful depletion - makes one
 passenger's fills depend on another's, which is the thing the constraint
-forbids. Brick 4's chart carries a sliced-order arm so the owner sees the
+forbids. Brick 5's chart carries a sliced-order arm so the owner sees the
 magnitude rather than reads the argument. If a mitigation is ever wanted, the
 place for it is a per-account transient impact term, not stateful depth, and
 it is out of scope here.
@@ -518,16 +518,12 @@ and the identity a consumer would key on is the venue's fill behaviour as
 much as its tape. Brick 5 then takes the next identity after that for the
 preset artifacts, which do move bytes.
 
-**Brick 4 - the realism pass and the rendered chart.** Not code: the
-standing gate. Render fills against the tape (entry price versus quoted
-touch over a run, buy and sell, quiet and busy spans) and put the chart
-under the owner's eye. Three arms beyond the obvious two: a sliced order
-against one large order of the same total size, so the stateless-ladder
-limit named in the lifecycle table is visible rather than argued; a quiet
-span specifically, since the inverted sign is the defect being fixed and the
-chart is where the fix shows; and a size sweep, since depth mattering at all
-is the claim. The decision the gate changes: keep brick 3, or revert the
-landing. This is the owner-attention fork this spec asks for.
+**Brick 4 - struck by owner ruling, 2026-08-26.** An earlier draft imported
+the standing rendered-chart gate here. That gate covers changes to tape
+generation, and this work moves no tape byte: the ladder is read-time only
+and the water is untouched. Execution against unchanged water is gated by
+the fill goldens, the fill-distribution golden and the crossing tests, so
+no chart verdict is owed and brick 3 is kept on those gates alone.
 
 **Brick 5 - calibration intake for the book constants.** Measure
 `quoted_width`, `top_sizes`, `depth_levels`, `depth_growth`,
@@ -590,20 +586,18 @@ and their keying are load-bearing and untouched.
 
 Recommendations stated, not menus:
 
-1. **Brick 4's chart verdict** - the standing gate; nothing proceeds past
-   brick 3 without it.
-2. **Depth-exhaustion behaviour** - recommended: partial fill plus named
+1. **Depth-exhaustion behaviour** - recommended: partial fill plus named
    cancel of the remainder (decision 3 above). The alternative (walk an
    unbounded ladder so market orders always fill whole) is rejected here
    because it makes size costless beyond the ladder and manufactures fills
    at prices no level quoted.
-3. **Paying latency for a per-instant book** - recommended: yes, take the
+2. **Paying latency for a per-instant book** - recommended: yes, take the
    book at the submit instant and keep the band bucketed, accepting whatever
    the resident quote series costs inside the existing 5 ms budget. The
    alternative (keep the bucketed book, put the reading instant on
    `OrderFilled` so a fill is at least nameable) is rejected here because it
    ships a fill price that can be favourable and then documents it. If
    brick 2's latency gate cannot be held, this is the fork that reopens.
-4. **The brick 7 threshold** - what share of submit latency the refold may
+3. **The brick 7 threshold** - what share of submit latency the refold may
    cost before the index is built. Recommended: 20 percent at 50 resting
    orders, matching the sweep-scale example the todo entry itself uses.

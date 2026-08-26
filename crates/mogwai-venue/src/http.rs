@@ -653,7 +653,7 @@ pub(crate) async fn process_order_cmd(
         && let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
             run.rivers
                 .resolve_profile(&order.symbol)
-                .is_ok_and(|profile| !settles_only_in(&profile.def, &currency))
+                .is_ok_and(|profile| !crate::risk::reaches_policy_currency(&profile.def, &currency))
         })
     {
         let echoed: String = order.symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
@@ -1738,18 +1738,6 @@ fn risk_state(
 pub(crate) struct AccountQuery {
     #[serde(default)]
     account: Option<String>,
-}
-
-/// Whether an account measured in `currency` can state what trading this shape
-/// leaves it holding.
-///
-/// A future settling in `currency` moves only that currency and carries its own
-/// unrealized, so it always qualifies. A spot pair leaves the base asset in the
-/// ledger as a balance, which is valuable exactly when this pair quotes it in
-/// `currency` - that pair's own mark is the price. Anything else would leave a
-/// holding nothing prices.
-fn settles_only_in(def: &InstrumentDef, currency: &str) -> bool {
-    def.class.settlement_currency() == currency
 }
 
 /// The one currency an account holds, or `None` if it holds none or several.

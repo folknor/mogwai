@@ -175,16 +175,12 @@ pub struct AccountPolicy {
     /// the balance and the unrealized on positions settling in it, and has no
     /// exchange rate for anything else.
     ///
-    /// The consequence is that a policed account trades one settlement
-    /// currency, which today means futures. A spot fill credits the base asset
-    /// as a currency balance and debits the quote - buy one BTC at 60,000 and
-    /// the ledger holds `BTC: 1` beside `USDT: -60,000` - so a spot account
-    /// holds two currencies from its first fill, and the venue would have to
-    /// value the base to state its equity. It cannot: `Engine::mark` refreshes
-    /// only futures positions, so a spot position's mark is never live, and
-    /// inventing a rate would make every threshold mean something nobody
-    /// stated. An order that would open a second currency is therefore refused
-    /// at entry, by name, rather than silently mis-valued afterwards.
+    /// A future settling in this currency qualifies directly. A spot pair
+    /// quoted in it qualifies through one observed hop: the engine records a
+    /// last mark for every instrument class and uses the pair's own mark to
+    /// value its base-asset balance. Boarding and order entry refuse shapes
+    /// that would require a second hop, because inventing an exchange rate
+    /// would make every threshold mean something nobody stated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
 }

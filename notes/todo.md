@@ -54,22 +54,16 @@ what unblocks what.
    or marketable-limit order walks the opposing quoted touch and a
    parametric ladder rather than slipping the last print by a draw. What
    remains under this heading is the synthetic-book calibration that would
-   make the ladder's constants real, the owner's rendered-chart gate, and
-   the margin-refold profiling question.
-2. **Risk enforcement closure and instrument resolution**: the
-   unvaluable-policed-account entry under Engine, plus the
-   instrument-definition entry under Venue and protocol. The ruling is made,
-   the shape is settled (boarding is the boot moment), and it closes the
-   sharp end of the liquidation promise. Most of the work is definitional:
-   what information mogwai needs to cover all markets and instrument types,
-   traditional and crypto alike, resolved defaults-then-preset-then-user
-   with a loud failure when the merge cannot reconcile. `Balance.locked`
-   rides behind it but still needs its owner ruling first.
-3. **Tests and tooling**: the gate-ceiling work - declared durations,
+   make the ladder's constants real, and the margin-refold profiling
+   question. No chart verdict is owed on the crossing itself, by owner
+   ruling 2026-08-26: the standing chart gate covers tape generation, and
+   the crossing moved no tape byte. The calibration landing does owe one,
+   because its preset constants move generated quote bytes.
+2. **Tests and tooling**: the gate-ceiling work - declared durations,
    reconnect-ladder spacing as a parameter, and whatever turns
    `test_threads = 16` red. Force-multiplying rather than product work;
    interleave it while slate 1 waits on a gate.
-4. **The adapter and consumer surface**: the perpetual funding publisher is
+3. **The adapter and consumer surface**: the perpetual funding publisher is
    the buildable piece, a test pinning the `MarketToLimit` refusal makes that
    gap loud, `DuplicateNextFill` waits on the next pin. The unsent broadarrow
    message is pulled out of this ranking entirely: write it immediately, it
@@ -341,46 +335,26 @@ instrument class is not a finding and does not need re-reporting.
 
 ## Venue and protocol
 
-- **Instrument definition: the resolution contract, and the default moves to
-  USD cash equity.** Ruled 2026-08-26, and part of priority slate 2.
+- **A preset cannot state one generator scalar, so the shipped equity default
+  opens at a crypto price.** `profile_from_configured` takes
+  `configured.generator` as all-or-nothing: absent, every scalar comes from the
+  fingerprint medians with the tick grid, price decimals, top sizes and (for
+  equity) the size median forced to the definition; present, it must be
+  complete. The NVDA default preset therefore has no way to say "a share costs
+  about 180 dollars" short of transcribing a whole fitted generator it has no
+  fit for, so `mogwai gen --symbol NVDA` opens near sixty thousand dollars a
+  share, where the cent tick it declares is 0.0000167 percent of price and a
+  single print crosses a thousand ticks. Nothing is wrong on the wire and the
+  shape contract holds; what is wrong is that the default tape's proportions
+  are a different asset class from the definition wearing them.
 
-  A symbol string carries zero information. "MNQ" tells mogwai something only
-  because a preset happens to be registered under that name - happenstance,
-  not a mechanism. `MBT`, `SEKDKK` and `DOGEUSDT.P` will not be presets.
-  Everything
-  that defines an instrument and how the account's ledger resolves against it
-  - class, multiplier, increments, settlement currency, calendar, lot, borrow
-  and funding conventions - comes from exactly three layers: defaults, then
-  any relevant preset, then user-supplied config, merged in that order. If
-  the merged result cannot reconcile, the venue fails loudly. Serve anything
-  still holds: any symbol is served when its shape resolves; a preset is
-  nothing but a named bundle of knobs the user could have set by hand.
-
-  The tree already has the three-layer merge and `profile_from_configured`
-  already refuses an invalid resolved shape, so the buildable work is an
-  audit that every unreconcilable merge dies loudly, plus the boarding-time
-  valuation-reachability refusal (the Engine entry) - undefined-shape and
-  unreachable-policy-currency are two named refusal reasons at the same door.
-
-  The default preset moves from BTCUSDT spot/USDT to standard USD cash
-  equity - trading NVDA or AAPL. The coupling documented at
-  `DEFAULT_PRESET`'s declaration binds: the default preset's settlement
-  currency and the default account policy's funding currency are a joint
-  decision, because if they disagree the wholly-unnamed request fails its
-  own funding check, the one path that must never fail. So the change
-  carries an equity-class default preset with currency USD and standard
-  stock knobs, and moves the default policy's opening balance from USDT to
-  USD, in the same landing.
-
-  Two sub-decisions to take deliberately rather than inherit:
-  - The default preset also picks the tape fit, and BTCUSDT is the
-    best-fitted tape in the tree, so the change inverts "the default happens
-    to be the fitted one". Fine under the standing ruling that tape fidelity
-    gates nothing; worth stating so it is chosen, not stumbled into.
-  - Standard stock defaults imply cash-equity hours, so an unmatched symbol's
-    market would be genuinely shut most of the day, where the current default
-    deliberately makes no calendar claim. Whether the equity default keeps
-    24/7 water or takes real hours is open.
+  Two shapes, and the choice is a fork worth the owner's minute. A partial
+  generator table - deserialize into an all-optional shadow and fill the rest
+  from the medians - is the general fix and lets any future declared preset
+  state what it knows. Deriving the level from the definition instead (some
+  function of the tick grid) is cheaper and states nothing, but invents a
+  convention. Either moves generated bytes and owes a
+  `TAPE_PROTOCOL_VERSION` bump; neither is gated on tape research.
 
 - **`RunComplete` reports slightly less than the declared duration, and nothing
   on the wire lets a consumer tell.** The deadline is judged on the venue clock
@@ -450,70 +424,6 @@ instrument class is not a finding and does not need re-reporting.
   ruling, because by then the tape has already produced the print and aborting
   the serving path over it is the one thing no venue does. Open only as a
   known-covered case.
-
-- **An unvaluable policed account keeps trading with its risk rules
-  unenforced.** Reframed 2026-08-26 after an owner ruling, and the reframing is
-  the important part.
-
-  The wrong framing, which this entry carried for a long time: valuation is
-  "one hop only", so an account holding ETH under a USD policy with only ETHUSDT
-  and BTCUSD listed is unvaluable rather than valued through a chain, and a rate
-  surface would fix it.
-
-  Why that is wrong. What decides the value of 1 ETH is the tape and nothing
-  else: the ETHUSDT river last printed a number, and that number is denominated
-  in USDT because that is the instrument. Chaining to USD requires converting
-  USDT to USD, which no river prices. The only way to complete the chain is to
-  assume one USDT is one USD - an opinion about the world that the venue has
-  never measured, is in no fingerprint, and would be fabricating. A rate surface
-  is not a missing feature; it is a mechanism for inventing prices, and every
-  price it invented would flow into a liquidation decision. The one-hop rule is
-  the venue declining to hold a view it has not earned, which is the same
-  discipline as `read_market` returning `None` when a reading would be untrue
-  rather than imprecise.
-
-  So the defect is not "how do we value the unvaluable". It is what the venue
-  does when it genuinely cannot value an account. Today `sweeper.rs` logs
-  "cannot value this account in its policy currency; risk is not enforced this
-  pass" and moves on, so a policed account keeps trading with its rules switched
-  off, one pass at a time, with a warn as the only trace. Against the north-star
-  - a strategy that would have been liquidated must actually be liquidated - that
-  is the sharp end.
-
-  The owner ruling on the shape: it must be a required config setting, and if the
-  venue cannot deterministically compute everything correctly from what the user
-  specified, it dies screaming at boot rather than degrading at runtime.
-
-  The refinement that makes that buildable, since the venue cannot enumerate at
-  process start what symbols it will be asked to serve: **boarding is the boot
-  moment.** At boarding the venue knows both halves - the account and its policy
-  currency, and the exact instrument this passenger will trade - and a strategy
-  is single-instrument by settled premise, so that one symbol is the whole of
-  what this passenger can make the account hold. The check is therefore decidable
-  deterministically at connect. If a policed account's policy currency cannot
-  reach the bound instrument, the boarding is refused with a named reason.
-  Nothing is enumerated in advance, nothing is declared, serve-anything is
-  untouched: the symbol is still served to anyone who asks, it just cannot be
-  bound by that account under that policy. From the user's chair that is boot -
-  the connection fails immediately, before a single order, rather than forty
-  minutes into a run. It also cannot take the process down, which matters on a
-  venue serving fifty accounts.
-
-  This completes a rule the front door already half-enforces: `run.rs` and
-  `risk.rs` already refuse a policed account that *opens* holding anything other
-  than its policy currency. Opening and boarding are the only two ways currency
-  enters, so the two checks together close it, and the sweeper's warn becomes
-  unreachable rather than load-bearing.
-
-  Note when implementing: `reference/architecture.md` records that an order whose
-  shape would leave a holding nothing prices is already refused at entry by name,
-  so the entry-time guard exists and this is narrower than "nothing stops it".
-  Establish exactly what that guard covers before adding a second one.
-
-  Two smaller residues of the original entry: the mark is as stale as the last
-  sweep, inherited from the margin ledger; and the ledger-generality ruling still
-  wants shares, leverage and funding payments, each of which needs a holding
-  valued in a currency it is not denominated in.
 
 - **`Balance.locked` conflates three things** - order holds, maintenance
   collateral and unsettled credits - in one wire number with opposite remedies.

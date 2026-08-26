@@ -76,9 +76,9 @@ pub(crate) struct GenArgs {
     #[arg(long)]
     interval: Option<String>,
     /// Instrument to generate. A built-in venue symbol first, then an embedded
-    /// preset name (MNQ, MES, BTCUSDT). A preset brings its
+    /// preset name (NVDA, MNQ, MES, BTCUSDT). A preset brings its
     /// own session calendar, so a futures tape shows its closed weekend.
-    #[arg(long, default_value = "BTCUSDT")]
+    #[arg(long, default_value = "NVDA")]
     symbol: String,
     /// Resolve the instrument from an operator config TOML instead of a
     /// symbol, through the venue's real `Config::load` and profile
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(profile.def.symbol.as_ref(), "NOPE");
         assert!(matches!(
             profile.def.class,
-            mogwai_protocol::InstrumentClass::Spot { .. }
+            mogwai_protocol::InstrumentClass::Equity { .. }
         ));
     }
 

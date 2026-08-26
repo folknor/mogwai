@@ -17,7 +17,7 @@ The instrument set is open and the venue gates on nothing: a symbol arrives
 and is served, with the preset's shape when the name matches one and the
 default shape under the requested label when none does. The intake sequence -
 corpus, measurement, fit, preset - makes a river better, never decides
-whether it is served. The three shipped presets - MNQ, MES and BTCUSDT, with
+whether it is served. The four shipped presets - NVDA, MNQ, MES and BTCUSDT, with
 MES a stated stopgap borrowing the MNQ fit - are the current state, not the
 end state; several assessments have been made wrong by assuming the corpus is
 closed. The offline toolbox (`mogwai-lab` and what survives in `analysis/`)
@@ -112,7 +112,7 @@ one-leaf correction of `analysis/fingerprint.json`
 an exhaustive reader audit proved its sole consumer advisory and never on the
 generator's path. It does not generalize to any other leaf: the rule stays
 unconditional, and the next leaf needs its own audit and its own ruling.
-`TAPE_PROTOCOL_VERSION` next takes 28. If a non-tape artifact revision ever
+`TAPE_PROTOCOL_VERSION` next takes 29. If a non-tape artifact revision ever
 needs an identity of its own, give it a content hash or a method version
 rather than overloading this constant.
 

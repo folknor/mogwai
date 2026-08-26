@@ -426,16 +426,16 @@ fn a_launch_symbol_is_funding_checked_before_readiness() {
     // stderr ring. The ring now keeps its head, so this assertion holds whatever
     // the surrounding process exported, and it fails if that regresses.
     let spec = LaunchSpec {
-        symbol: Some("MNQ".to_owned()),
-        ..common::spec(&["--config", &fast_config()])
+        symbol: Some("BTCUSDT".to_owned()),
+        ..common::spec(&[])
     };
-    let error = launch(spec).expect_err("the USDT-only fixture cannot launch an MNQ consumer");
+    let error = launch(spec).expect_err("the USD-only fixture cannot launch a BTCUSDT consumer");
     let LaunchError::NoRecord { stderr } = error else {
         panic!("expected a missing-record boot refusal, got {error:?}");
     };
     let log = stderr.join("\n");
     assert!(
-        log.contains("MNQ") && log.contains("USD") && log.contains("does not fund"),
+        log.contains("BTCUSDT") && log.contains("USDT") && log.contains("does not fund"),
         "the launch refusal must name the requested shape and missing currency: {log}"
     );
 }

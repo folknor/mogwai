@@ -10,7 +10,7 @@
 #
 # The clock is accelerated for the same reason smoke-band-swept.toml accelerates
 # its own: the trigger waits on the NEXT PRINT through the stop price, and at
-# speed 1.0 the fitted BTCUSDT arrival process legitimately dwells tens of
+# speed 1.0 the borrowed fitted arrival process legitimately dwells tens of
 # seconds between prints, so a wall-bounded assertion would be a bet on the
 # tape's cadence rather than a gate on the trigger. At speed 100 every wall
 # second buys 100 simulated seconds of tape.

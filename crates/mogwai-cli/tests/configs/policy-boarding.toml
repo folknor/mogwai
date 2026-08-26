@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# The fixture behind the boarding door: no shipped preset is a USD-quoted spot
+# pair, and the door's reachable case needs one - a policed-USD account boards
+# it, buys, and ends up holding a base-asset balance line no policy rule can
+# value. BTCSETTLE is the second hop that line would fund and the door refuses.
+#
+# The venue balances fund every settlement currency named here, so nothing is
+# funding-barred at boot and each refusal below is the door it names rather
+# than a barred shape. USDT is funded for the same reason: BTCUSDT must resolve
+# for the shadowing pin to observe the funding refusal on it.
+seed = 42
+warmup_ns = 300000000000
+speed = 0.0
+symbol = "BTCUSD"
+
+[balances]
+USD = "1000000"
+USDT = "1000000"
+BTC = "1"
+
+[symbols.BTCUSD]
+price_precision = 2
+size_precision = 8
+price_increment = "0.01"
+size_increment = "0.00000001"
+
+[symbols.BTCUSD.class]
+kind = "spot"
+base = "BTC"
+quote = "USD"
+
+[symbols.BTCSETTLE]
+price_precision = 2
+size_precision = 8
+price_increment = "0.01"
+size_increment = "0.00000001"
+
+[symbols.BTCSETTLE.class]
+kind = "spot"
+base = "ETH"
+quote = "BTC"

@@ -545,6 +545,13 @@ pub fn fast_config() -> String {
     format!("{}/tests/configs/fast.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
+pub fn policy_boarding_config() -> String {
+    format!(
+        "{}/tests/configs/policy-boarding.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// A venue with a configured maker/taker fee table, so a fill's commission is
 /// a nonzero wire observable - the only reading of an armed `FeeSurcharge`
 /// that does not reach into the engine.

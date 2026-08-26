@@ -622,10 +622,12 @@ priced before its equity means anything. The engine keeps a last mark per
 symbol for every class, the sweeper prices every pair whose base the account
 holds, and `Engine::valuation_in` sums that currency's balance, each other
 balance valued through an instrument quoting it in that currency, and the
-unrealized on futures settling in it. An order whose shape would leave a holding
-nothing prices is refused at entry by name, and an account that reaches an
-unvaluable state some other way is warned about and left unenforced rather than
-judged against a wrong number.
+unrealized on futures settling in it. Opening refuses foreign balances on a
+policed account. Boarding then refuses a shape that does not settle in the
+policy currency before claiming the account, and order entry applies the same
+one-hop predicate. The sweeper warn remains a backstop for a spot fill swept
+before its first mark and for the base-asset line valued through the admitted
+pair's one hop; it never guesses a rate.
 
 When several priced instruments quote the same held currency into the policy
 currency, valuation uses the lexically first symbol. The choice is a stable
@@ -1123,7 +1125,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 27; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 28; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -1579,9 +1581,9 @@ resolution
 The instrument set is open, and that is why `mogwai-lab` is a library rather
 than a folder of scripts. A symbol is a request string, never an admission
 identity. `InstrumentDef` is derived through one path from the symbol and the
-operator overlay: an explicit preset, a matching preset, or the BTCUSDT default
+operator overlay: an explicit preset, a matching preset, or the NVDA default
 bundle. No second hardcoded default bundle exists, and no symbol is refused for
-wanting a fit. The three shipped presets - MNQ, MES and BTCUSDT - are the
+wanting a fit. The four shipped presets - NVDA, MNQ, MES and BTCUSDT - are the
 current state, not the end state.
 
 Config declares no closed instrument set. It supplies a default knob overlay

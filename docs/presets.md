@@ -23,7 +23,7 @@ name different generated paths.
 mogwai presets
 ```
 
-prints the three names. To see what a given preset actually sets, name it:
+prints the four names. To see what a given preset actually sets, name it:
 
 ```sh
 mogwai presets MNQ
@@ -54,7 +54,7 @@ symbol = "MNQ"
 That is a complete config. Resolution uses this precedence: a preset bundle,
 then default `[instrument]` knobs, then matching `[symbols.<SYM>]` knobs. A
 per-symbol `preset` beats a default preset key, which beats a preset matching
-the symbol, which beats the BTCUSDT default. An explicit preset remains useful
+the symbol, which beats the NVDA default. An explicit preset remains useful
 for serving one bundle under another name:
 
 ```toml
@@ -103,6 +103,19 @@ the MNQ knobs while remaining a different river and label from `MNQ`.
 
 ## What the shipped presets are
 
+- **NVDA** - standard US cash equity, and the default bundle every unmatched
+  symbol resolves through. Cent quote grid, whole shares, one share per
+  contract, settled in USD. It carries no fitted generator and no session
+  table: its cadence, size distribution and volatility scalar default from the
+  committed fingerprint medians with the tick grid and price decimals forced to
+  its own definition and uncalibrated top-of-book sizes, so it is a shape
+  contract rather than an NVDA tape. It makes no calendar claim - the default
+  bundle serves every unmatched label, and real cash-equity hours would shut
+  those markets most of the day; an operator wanting real hours writes a
+  `[symbols.NVDA.calendar]` table or registers a preset. No margin table, so
+  the default is a cash account, and `settlement_ns` is zero rather than the
+  real T+1, which is a deliberate deferral until the `Balance.locked` split is
+  ruled.
 - **MNQ** - Micro E-mini Nasdaq-100 future. Two dollars per index point,
   whole-contract sizing, the published CME Sunday-evening-through-
   Friday-evening session with the daily maintenance halt and settlement
@@ -157,14 +170,13 @@ entry and no generator-method edit.
 
 ## Serving a symbol without a preset
 
-Every wire-legal string is served. An unmatched symbol gets the BTCUSDT preset's
-spot, always-open, USDT-settled knobs under its own name. BTCUSDT is the default
-because it makes no calendar or margin claim about an unfitted symbol, its
-settlement currency is funded by the shipped balances, and its dynamics were
-fitted from trade-level archives. Name a futures preset explicitly when a
-future-shaped bundle is required. The unmatched symbol wears the default
-preset's shape, never its river, because its requested label enters the
-seed derivation - two symbols on the same bundle run different rivers.
+Every wire-legal string is served. An unmatched symbol gets the NVDA preset's
+cash-equity, always-open, USD-settled knobs under its own name. The default
+deliberately makes no calendar claim about an unfitted symbol. BTCUSDT remains
+the best-fitted tape, but tape fidelity is not a prerequisite for exchange
+machinery. The unmatched symbol wears the default preset's shape, never its
+river, because its requested label enters the seed derivation - two symbols on
+the same bundle run different rivers.
 
 A symbol nobody configured materializes its own river the first time it is
 asked for, and from then on it appears in `/instruments` alongside the
@@ -183,8 +195,7 @@ unfunded is recorded as funding-barred - a consumer that later asks for a symbol
 landing on that shape is refused when it binds, with a message naming the
 symbol and the currency.
 
-This bites the shipped default. The default balances fund USDT only, which
-covers BTCUSDT and every unmatched symbol resolving through it, but not the
-USD-settled MNQ and MES bundles. Fund USD in `[balances]` for a run whose
-consumers may ask for the index futures. The payoff is that a funds rejection on
-a served shape then means depletion and only depletion.
+This bites the shipped presets. The default balances fund USD, which covers
+NVDA, MNQ, MES and every unmatched symbol. BTCUSDT is funding-barred until USDT
+is added to `[balances]`. The payoff is that a funds rejection on a served shape
+then means depletion and only depletion.
