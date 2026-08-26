@@ -3,7 +3,7 @@
 
 //! Exact population variance, matching `statistics.pvariance` bit for bit.
 //!
-//! Why this exists. `check_cadence_feasible.py:187` calls
+//! Why this exists. The retired Python cadence-feasibility implementation calls
 //! `statistics.pvariance(gaps)`, which evaluates the variance as an exact
 //! rational over its binary64 inputs and rounds once at the end. The obvious
 //! port - sum the squared deviations from the rounded mean with `py_fsum` and

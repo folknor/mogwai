@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! CPython's `random.Random` to the extent `mnq_fit.py` uses it: seeding
+//! CPython's `random.Random` to the extent the retired Python fit implementation uses it: seeding
 //! from a small non-negative integer and `choice` over a sequence.
 //!
 //! This exists for exactly one estimator - `minute_range_envelope`, which

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `Refusal`, ported from `analysis/mnq_fit.py`'s `class Refusal(Exception)`:
+//! `Refusal`, ported from the retired Python fit implementation's `class Refusal(Exception)`:
 //! every fail-closed input-contract violation the stream contract and
 //! preflight raise. Refusals are the interface (task brief) - this type
 //! carries the message only, matching the Python side's plain

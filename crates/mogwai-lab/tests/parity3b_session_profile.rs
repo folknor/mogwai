@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Phase 3b gate 2: `mogwai_lab::session_profile` against the real NQ
-//! one-minute archive, compared with `analysis/fit_session_profile.py`'s own
+//! one-minute archive, compared with the retired Python session-profile implementation's own
 //! printed numbers.
 //!
 //! `#[ignore]`d: needs `research/market-data/nq-1m_bk.zip` on local disk.
@@ -107,7 +107,7 @@ fn parity3b_session_profile_reproduces_the_preset_dow_weight() {
     assert_eq!(rounded, shipped, "the recent-era day factors");
 
     // The acceptance artifacts, at the resolution
-    // `analysis/fit_session_profile.py` prints them - checked against a
+    // the retired Python session-profile implementation prints them - checked against a
     // direct run of that script over the same archive, scope by scope.
     let scope = |name: &str| -> (String, u64, String, String, String, String) {
         let s = &report["scopes"][name];

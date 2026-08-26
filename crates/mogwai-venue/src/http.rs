@@ -773,6 +773,28 @@ pub(crate) async fn process_order_cmd(
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
     let ts = sim_now_ns(sim);
+    // A closed market order needs no print to establish that it would take
+    // liquidity. Refuse it before price synthesis so an honestly empty reading
+    // inside a scheduled close is not mislabeled as a synthesis failure. Limits
+    // stay below the reading: whether they would take the stale print depends on
+    // the price the reading supplies.
+    if let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
+        order.order_type == OrderType::Market
+            && state
+                .rivers
+                .resolve_profile(&order.symbol)
+                .ok()
+                .and_then(|profile| profile.calendar.clone())
+                .is_some_and(|calendar| !calendar.is_open(ts))
+    }) {
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            "market closed",
+            ts,
+        );
+    }
     let (order_cmd, market_px) = market_reading(order_cmd, state, boat, ts, socket_symbol).await;
     // Re-sample after the market-price synthesis, which for a price-less market
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The

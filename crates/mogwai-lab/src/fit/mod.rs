@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The protocol-11 fit: `analysis/mnq_fit.py`'s `fit` mode, ported.
+//! The protocol-11 fit: the retired Python fit implementation's `fit` mode, ported.
 //!
 //! Layout mirrors the Python's own sections: `observe` is the one streaming
 //! corpus pass with its three chains, `curves` the closed-form refit

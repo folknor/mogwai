@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Cadence synthesis over raw Binance trade archives
-//! (`analysis/build_cadence.py`, `analysis/probe_binance_trades.py`): the
+//! (the retired Python cadence implementation, `analysis/probe_binance_trades.py`): the
 //! parent/child event-grouping probe, `PAIRS`/`WIDEN`/`band()`, and the
 //! parent/child shape solve. `probe_binance_trades.py`/
 //! `probe_binance_aggtrades.py` themselves stay Python (KEEP-class,
 //! `pair_harness.py`'s serving pair); this module ports only the internal
-//! machinery `build_cadence.py` needs: `EventStats` and its byte-line
+//! machinery the retired Python cadence implementation needs: `EventStats` and its byte-line
 //! Binance-trades `probe`.
 
 use std::collections::BTreeMap;
@@ -389,7 +389,7 @@ const FLOORS: &[(&str, f64)] = &[
 
 /// `build`: synthesizes `cadence.json` from the archives under
 /// `data_dir/<PAIR>-trades-2026-06.zip` for `PAIRS`, matching
-/// `build_cadence.py`'s `build()` (minus the `provenance.generated_utc`
+/// the retired Python cadence implementation's `build()` (minus the `provenance.generated_utc`
 /// timestamp, which is intentionally excluded here - a caller that writes
 /// the artifact stamps it itself, keeping this function pure/deterministic
 /// for the parity gate).

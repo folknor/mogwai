@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The frozen 6.2 ladder, plus the closure and forensic statistics it
-//! consumes. Ported from `analysis/mnq_fit.py`'s `closure_analysis`,
+//! consumes. Ported from the retired Python fit implementation's `closure_analysis`,
 //! `worsening_23_analysis`, `forensic_subchecks` and `evaluate_ladder`.
 //!
 //! Every rung is evaluated in order and every fired rung is recorded; the

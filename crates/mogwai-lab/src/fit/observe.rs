@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `observe()` from `analysis/mnq_fit.py` (spec 4.2-4.8): one streaming pass
+//! `observe()` from the retired Python fit implementation (spec 4.2-4.8): one streaming pass
 //! over the usable sessions with three independent chains - cadence over all
 //! sided parents, quote-mid returns over adjacent valid-quote parents inside
 //! one segment, and the shared-shape diagnostics over all sided parents,

@@ -238,7 +238,8 @@ fn corpus(name: &str, rows: &[(&str, &str, &str)]) -> std::path::PathBuf {
     path
 }
 
-/// The modal-tick tie. `characterize.py` picks the mode with
+/// The modal-tick tie. The retired Python characterization implementation
+/// picks the mode with
 /// `max(items(), key=count)` over an insertion-ordered dict, which keeps the
 /// first key on a tie; `max_by_key` keeps the last. This corpus produces tick
 /// increments of exactly `1` then `2`, one occurrence each, so the two rules
@@ -281,7 +282,8 @@ fn a_modal_tick_tie_keeps_the_first_increment_seen() {
 
 /// The price-decimals tie, worse than the tick tie in kind rather than degree:
 /// `price_dec_hist` was a `HashMap`, so its tie-break was not merely divergent
-/// from `characterize.py:387` but nondeterministic between runs of the same
+/// from the retired Python characterization implementation but
+/// nondeterministic between runs of the same
 /// input. Python reads the first decimal count seen.
 #[test]
 fn a_price_decimals_tie_keeps_the_first_count_seen() {

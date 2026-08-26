@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `analysis/tick_composition_ratios.py`: the BBO budget sizing policy.
+//! The BBO budget sizing policy, ported from the retired Python
+//! tick-composition implementation.
 //!
 //! Pairs protocol composition fixtures and applies the budget policy that
 //! decides the shipped reach ceilings - the sweep drain budget, the extend

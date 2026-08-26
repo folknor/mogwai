@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `analysis/check_cadence_feasible.py`'s L0 structural-proceed verdict.
+//! The L0 structural-proceed verdict of the retired Python
+//! cadence-feasibility implementation.
 //!
 //! Ported in full: [`next_count`] (the parent/child geometric-mixture
 //! inverse-CDF draw), [`verdict`] (the structural `PROCEED`/`CLOSE`/`STOP AND
@@ -10,7 +11,7 @@
 //! per-second density feasibility bands).
 //!
 //! [`simulate_markov`] is the default CLI path's density re-simulation, and
-//! it is a gate rather than a diagnostic: `check_cadence_feasible.py` exits
+//! it is a gate rather than a diagnostic: the retired Python cadence-feasibility implementation exits
 //! non-zero when the realized density misses the feasibility bands, so a port
 //! that stops after the structural verdict exits 0 where the script it
 //! replaces does not. The phase-3a record called this a secondary diagnostic;
@@ -279,7 +280,8 @@ pub fn simulate_markov(
 /// against CPython, and the history is kept because it is the reason this
 /// delegates rather than computing in floating point.
 ///
-/// `check_cadence_feasible.py:187` calls `statistics.pvariance(gaps)` with no
+/// The retired Python cadence-feasibility implementation calls
+/// `statistics.pvariance(gaps)` with no
 /// explicit `mu`, which does NOT subtract a rounded mean before squaring. It
 /// evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
 /// binary64 inputs and rounds once at the end. The obvious port - `py_fsum` over
@@ -352,7 +354,7 @@ mod gap_cv2_parity {
         (cadence, fingerprint)
     }
 
-    /// The CLI defaults, matching `check_cadence_feasible.py`'s.
+    /// The CLI defaults, matching the retired Python cadence-feasibility implementation's.
     fn default_params() -> MarkovParams {
         MarkovParams {
             quiet_fraction: 0.35,
@@ -369,7 +371,7 @@ mod gap_cv2_parity {
     /// used to disagree by two ULPs on `gap_cv2` while every other field agreed
     /// bit for bit.
     ///
-    /// From `python3 analysis/check_cadence_feasible.py --events 14` on CPython
+    /// From the retired Python cadence-feasibility implementation --events 14 on CPython
     /// 3.14.6: `gap_cv2` `0.6921791630839342`, `gap_mean`
     /// `0.0024246517715526728`, `gap_acf1` `-0.1481234936964859`, `gap_acf5`
     /// `-0.22459354537017304`, `mean` 203.0, `median` 203, `p95` 203,
@@ -401,7 +403,7 @@ mod gap_cv2_parity {
 
     /// The default 3,000,000-event run, the one the subcommand performs with no
     /// arguments and the one whose exit status is the gate. Pinned bit-exact
-    /// against `python3 analysis/check_cadence_feasible.py` on CPython 3.14.6,
+    /// against the retired Python cadence-feasibility implementation on CPython 3.14.6,
     /// `gap_cv2` included, because before this the density report at the
     /// default event count had no gate of its own at all - the parity test next
     /// to it asserts only the structural verdict.

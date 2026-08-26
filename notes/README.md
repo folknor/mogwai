@@ -55,8 +55,18 @@ these live durably in `reference/test-doctrine.md` and
 - **Trusting an inventory instead of the tree.** Point-in-time lists drift, this
   file included. Verify against the tree before acting on a list.
 - **Citing a frozen artifact by vibe.** `targets-frozen.json` was described as
-  `select_windows.py`'s gate in three documents; it was the BTCUSDT
-  microstructure target set and that script never touched it.
+  the retired Python window-selection implementation's gate in three documents;
+  it was the BTCUSDT microstructure target set and that script never touched it.
+- **Substituting a noun phrase for a filename with a script.** The 2026-08-26
+  citation sweep replaced nine retired script names with descriptions by plain
+  substring replacement, and corrupted a dozen durable sites: a name rewritten
+  inside a longer path, a phrase carrying its own article dropped into a
+  sentence that already had one, a filename that opened a sentence or wore a
+  line-number suffix left ungrammatical. One landed in a preset's provenance
+  table, which is a claim ledger. Every test stayed green, because nothing
+  lints prose. `scripts/retire_note_citations.py` now gates the four mechanical
+  shapes and refuses to write without `--write`, but the gate for the rest is a
+  human reading the lines - which is the actual lesson.
 - **Reading a summary and calling it the source.** The purchase report's summary
   of the sampling-frame verdict was wrong for days, and the deleted
   preregistration was wider than any summary of it carried. Read the deciding

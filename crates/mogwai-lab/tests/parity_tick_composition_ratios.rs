@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Phase 4b item 3: the `tick_composition_ratios.py` port against its blessed
+//! Phase 4b item 3: the tick-composition port against its blessed
 //! reference.
 //!
 //! Not `#[ignore]`d, and that is the point of this one. Every input is

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `run_fit` from `analysis/mnq_fit.py`: the protocol-11 session calibration.
+//! `run_fit` from the retired Python fit implementation: the protocol-11 session calibration.
 //!
 //! Scope, frozen: the two session arrays and `vol_scalar`, nothing else. No
 //! protocol-10 solve is executed - every other preset value resolves from

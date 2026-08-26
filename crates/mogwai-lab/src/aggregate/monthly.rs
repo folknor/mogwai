@@ -4,7 +4,7 @@
 //! The monthly aggregates (spec 3.5): pooling the per-session block records
 //! into the descriptive month, plus the 8-seed central blocks.
 //!
-//! Ported from `analysis/mnq_fit.py`'s `pool_block1_hists`,
+//! Ported from the retired Python fit implementation's `pool_block1_hists`,
 //! `hist_to_records`, `block1_summary`, `block1_blocks`, `pool_block2`,
 //! `finish_block2_cell`, `aggregate_block3`, `aggregate_block4`,
 //! `aggregate_permutations`, `tree_median` and `central_blocks_from_seeds`.

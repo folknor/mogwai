@@ -589,7 +589,7 @@ python3 analysis/plot_tape.py --csv analysis/out/asia-endless.csv --out analysis
 `preflight` runs the fail-closed TBBO corpus contract check against a
 delivered corpus directory and writes a hash-bound preflight artifact -
 `--corpus`, `--jobs-manifest` (read-only) and `--out` all default to the paths
-`analysis/mnq_fit.py` used. This command is the frozen July parity path.
+the retired Python fit implementation used. This command is the frozen July parity path.
 
 For a Stage M new-design month, produce its calendar-bound inventory and then
 run Tier 1a with the matching arguments:
@@ -616,13 +616,14 @@ binding, writing to `analysis/out/mnq-fit.json` by default rather than over the
 committed `analysis/mnq-fit.json`.
 
 `synth fingerprint` and `synth cadence` are the fingerprint and cadence
-synthesis paths (`analysis/build_fingerprint.py`/`build_cadence.py`):
+synthesis paths, ported from the retired Python fingerprint and cadence
+implementations:
 `fingerprint` reads `char_<PAIR>.json` reports plus a cadence measurement,
 `cadence` streams raw Binance trade archives. Neither writes into
 `analysis/` unless `--out` names a path there explicitly - the bare default
 is `analysis/out/`, which is gitignored. `cadence-feasible` reads a cadence
-measurement and prints the `check_cadence_feasible.py` L0
-structural-proceed verdict (`PROCEED`, `CLOSE` or `STOP AND ASK`) read off its
+measurement and prints the retired Python cadence-feasibility
+implementation's L0 structural-proceed verdict (`PROCEED`, `CLOSE` or `STOP AND ASK`) read off its
 `children_mean`/`children_single_frac` anchors, exiting nonzero on anything
 but `PROCEED`. It then re-simulates the arrival clock over `--events`
 (3,000,000 by default, matching the Python) and exits nonzero when the
@@ -634,7 +635,7 @@ Python has no such flag, so leaving it off is the matching behaviour.
 `--fingerprint` names the session profile the arrival clock consults.
 
 The simulation reproduces CPython's stream draw for draw, so its output is
-identical to `python3 analysis/check_cadence_feasible.py` field for field
+identical to the retired Python cadence-feasibility implementation field for field
 rather than merely close - bit for bit, including `gap_cv2`, which requires
 computing the population variance as the exact rational CPython's
 `statistics.pvariance` uses rather than in floating point. That identity is

@@ -24,7 +24,7 @@ mogwai-data.workspace = true
 mogwai-protocol.workspace = true
 # Phase 3b only: `summary`/`fit` walk against an `InstrumentProfile`, which
 # `mogwai-venue` defines and resolves through `Config::load` - the same path
-# `mnq_fit.py`'s scratch-config walks took.
+# the retired Python fit implementation's scratch-config walks took.
 mogwai-venue.workspace = true
 
 serde.workspace = true

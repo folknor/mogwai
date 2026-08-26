@@ -4,7 +4,7 @@
 //! The `gen --type summary` accumulator: the MNQ TBBO fit's calibration
 //! instrument, moved here from `mogwai-cli`'s `gen.rs` at phase 3b so the
 //! protocol-11 fit driver can run its walks in-process instead of shelling
-//! the `gen --type summary` subcommand the way `mnq_fit.py` did.
+//! the `gen --type summary` subcommand the way the retired Python fit implementation did.
 //!
 //! `gen.rs` keeps its CLI surface unchanged and calls straight into
 //! `summarize` here; `--type summary` output is byte-identical, which the

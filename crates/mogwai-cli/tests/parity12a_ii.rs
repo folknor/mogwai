@@ -44,7 +44,7 @@
 //! Both require a clean git tree, by construction: `run_measure`/
 //! `run_measure_with` bind `binding.harness_tree_commit` to `HEAD` and
 //! refuse outright over a dirty working tree (`require_clean_tree`, ported
-//! faithfully from `analysis/mnq_fit.py`). That is not a test-harness
+//! faithfully from the retired Python fit implementation). That is not a test-harness
 //! inconvenience - it is the artifact's own binding contract.
 
 use std::path::{Path, PathBuf};

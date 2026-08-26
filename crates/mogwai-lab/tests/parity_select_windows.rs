@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Phase 4b item 2: the `select_windows.py` port against its blessed reference.
+//! Phase 4b item 2: the window-selection port against its blessed reference.
 //!
 //! This absorption had no frozen artifact, so one was made first -
 //! `analysis/select-windows-blessed.json`, written by
-//! `scripts/bless_select_windows.py` from the Python's own functions while it
+//! the retired blessing script from the Python's own functions while it
 //! was still runnable. This gate matches the port to it.
 //!
 //! `#[ignore]`d and named `parity_select_windows_` because it re-reads the four
@@ -323,7 +323,8 @@ fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
     // The committed Python cache, not the regenerable gitignored one.
     //
     // This gate has to outlive the oracle. `analysis/cme_daily_features.json`
-    // is produced by `select_windows.py features`, and phase 4b item 7 retires
+    // is produced by the retired Python window-selection implementation's
+    // `features` mode, and phase 4b item 7 retires
     // that script - so a gate reading it would become permanently unrunnable
     // the moment the retirement lands, which is how a gate dies quietly rather
     // than loudly.

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The phase-0 stylized-fact characterization estimand layer
-//! (`analysis/characterize.py`): streaming ACF ring buffers, histogram
+//! (the retired Python characterization implementation): streaming ACF ring buffers, histogram
 //! quantiles, `LVL_BINS`/`lvl_bin`, duration dispersion, zero-change
 //! fraction, per-second counts. This module is the estimand layer the
 //! synthesis modules (`fingerprint`, `cadence`) build on. It is a byte-level
 //! port; every constant and formula below is named after its Python
-//! counterpart in `analysis/characterize.py`. That file is retired and no
+//! counterpart in the retired Python characterization implementation. That file is retired and no
 //! longer in the tree - the names are the record of how the port was proven,
 //! not a pointer to something a reader can open.
 //!
@@ -78,7 +78,7 @@ pub fn histogram_quantile(hist: &[i64], q: f64) -> Option<f64> {
 }
 
 /// Streaming O(1) accumulator of at-touch traded volume per level visit, a
-/// port of `characterize.py`'s `LevelVisits`.
+/// port of the retired Python characterization implementation's `LevelVisits`.
 pub struct LevelVisits {
     era_start_ts: f64,
     px: Option<f64>,
@@ -194,7 +194,7 @@ impl LevelVisits {
 }
 
 /// Streaming autocorrelation up to `max_lag` via ring buffer + cross-sums, a
-/// port of `characterize.py`'s `AutoCorr` (every lag retained, matching the
+/// port of the retired Python characterization implementation's `AutoCorr` (every lag retained, matching the
 /// default `lags=None` behaviour in `probe_binance_aggtrades.py`'s twin).
 pub struct AutoCorr {
     k: usize,
@@ -389,7 +389,8 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
     let mut tick_index: HashMap<String, usize> = HashMap::new();
     let mut tick_capped = false;
     // Insertion-ordered for the same reason as `tick_counts`:
-    // `characterize.py:387` takes `max(price_dec_hist.items(), key=count)` over
+    // the retired Python characterization implementation takes
+    // `max(price_dec_hist.items(), key=count)` over
     // a plain dict, so a tie keeps the first decimal count seen. A `HashMap`
     // here made the tie-break not merely divergent but nondeterministic across
     // runs of the same input.

@@ -16,10 +16,11 @@
 //! Depends on `mogwai-data`/`mogwai-protocol` read-only for the generated
 //! measurement side, and on `mogwai-venue` for exactly one thing: the
 //! `InstrumentProfile` a fit walk runs against, resolved through the
-//! venue's own `Config::load` the way `mnq_fit.py`'s scratch configs were.
+//! venue's own `Config::load` the way the retired Python fit implementation's scratch configs were.
 //! It never depends on `mogwai-engine`.
 //!
-//! The Python reference has retired. `analysis/mnq_fit.py` and the seven other
+//! The Python reference has retired. The fit implementation and the seven
+//! other
 //! absorbed scripts were authoritative through phase 4 - where this port and
 //! the Python disagreed, the Python won and the port changed - and phase 4b
 //! item 7 moved them to the gitignored `research/dead/` after a program-level

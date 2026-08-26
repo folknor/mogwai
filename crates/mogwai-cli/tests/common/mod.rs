@@ -594,6 +594,23 @@ pub fn no_warmup_config() -> String {
     )
 }
 
+/// A venue whose warmup ends at the first scheduled close, leaving real prints
+/// in the readable past while every order submitted after readiness is closed.
+pub fn scheduled_close_config() -> String {
+    format!(
+        "{}/tests/configs/scheduled-close.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// A venue whose run begins inside a scheduled close with no readable print.
+pub fn empty_scheduled_close_config() -> String {
+    format!(
+        "{}/tests/configs/empty-scheduled-close.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// A venue whose tape is paced, so a suppression window is observable as
 /// silence rather than drowned in an unpaced backlog.
 pub fn paced_config() -> String {

@@ -218,19 +218,6 @@ urgent; both modes must eventually be supported.
   until v2's shape is known, since a successor may want some of the corpus-side
   machinery.
 
-- **Nine deleted Python scripts are still referenced about forty times.**
-  `analysis/mnq_fit.py` alone has roughly thirty references across `mogwai-lab`
-  and `mogwai-cli`; `characterize.py`, `build_fingerprint.py`, `select_windows.py`,
-  `build_cadence.py`, `run_corpus.py`, `fit_session_profile.py`,
-  `check_cadence_feasible.py` and `tick_composition_ratios.py` account for the
-  rest, across doc comments, `docs/cli.md`, `crates/mogwai-venue/presets/mnq.toml`
-  and `mogwai-lab`'s `Cargo.toml`. Re-checked 2026-08-24: `AGENTS.md` is clean
-  now, the rest are not. One is
-  not prose: `mogwai-lab/src/fingerprint.rs` emits the runtime error
-  "analysis/cadence.json is required; run build_cadence.py first", instructing the
-  user to run a script deleted in the Rust port. `scripts/retire_note_citations.py`
-  is the existing tool for this sweep but is scoped to `crates/` and `brokkr.toml`.
-
 - `SegmentSource` overrides neither `seek_to` nor `fault`. An effectively
   infinite source inherits the O(distance) default walk that `mogwai-data`'s own
   `TickSource` doc warns about - the shape `GeneratedSource` needed

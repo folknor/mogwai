@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `build_diagnostics` from `analysis/mnq_fit.py` (spec 4.8): shared-shape
+//! `build_diagnostics` from the retired Python fit implementation (spec 4.8): shared-shape
 //! observed values beside the crypto-fitted reference they are compared
 //! against, plus the exposure-normalized count-vs-volume session curves.
 //! Findings, never gates.

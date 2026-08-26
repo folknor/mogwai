@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Slice 2c-i of the retired rewrite plan: the section-10 artifact
-//! assembler and its two validators, ported from `analysis/mnq_fit.py`'s
+//! assembler and its two validators, ported from the retired Python fit implementation's
 //! `assemble_measure12a_artifact`/`_assemble_measure12a`,
 //! `measure12a_schema_errors`, `measure12a_semantic_errors`,
 //! `load_brick_g_walks`, `json_safe` and `write_json_atomic`.

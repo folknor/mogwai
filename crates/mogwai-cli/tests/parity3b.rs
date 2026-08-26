@@ -22,7 +22,7 @@
 //!   `35e5b033133f12205cf26938db10d16b7bbd9f7f686cc82b91e265ffea1e1924`,
 //!   which is the sub-contract as it stood at the protocol-11 fit. The
 //!   protocol-12a constants joined `SUBCONTRACT_KEYS` afterwards, so
-//!   `analysis/mnq_fit.py`'s OWN `subcontract_hash()` returns
+//!   the retired Python fit implementation's OWN `subcontract_hash()` returns
 //!   `1ca79d9cd043e7ce4b8b633fdbcdf0547a02a26570ea9120eb0141254a8ad954`
 //!   today - byte-identical to what this port computes, and to what the
 //!   committed `analysis/out/mnq-fit-preflight.json` already records.

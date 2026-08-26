@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The frozen measurement sub-contract, ported byte-faithfully from
-//! `analysis/mnq_fit.py`'s `SUBCONTRACT_KEYS` block and `subcontract_hash()`.
+//! the retired Python fit implementation's `SUBCONTRACT_KEYS` block and `subcontract_hash()`.
 //!
 //! The hash binds `json.dumps({k: globals()[k] for k in SUBCONTRACT_KEYS},
 //! sort_keys=True, default=list)` on the Python side: compact separators
@@ -15,7 +15,7 @@
 //! notation), so this module hand-rolls a small Python-`json`-compatible
 //! serializer over an explicit value tree instead of deriving `Serialize`.
 //! `subcontract_dumps()`/`subcontract_hash()` are pinned by a unit test
-//! against the exact bytes and sha256 `analysis/mnq_fit.py` produces today.
+//! against the exact bytes and sha256 the retired Python fit implementation produces today.
 
 use std::collections::BTreeMap;
 
@@ -161,7 +161,7 @@ pub const FINAL_SEEDS: &[i64] = &[1, 2, 3, 4, 5, 6, 7, 8];
 /// The estimator burn-in prefix a summary walk generates before `--start` and
 /// then discards. The constant's own name in [`tree`] stays `SUMMARY_WARMUP`,
 /// which is inherited and frozen: that map is a transcription of
-/// `analysis/mnq_fit.py`'s constant names, and its bytes are the sub-contract
+/// the retired Python fit implementation's constant names, and its bytes are the sub-contract
 /// hash every committed measurement and preflight artifact records.
 pub const SUMMARY_BURN_IN: &str = "3d";
 
@@ -568,7 +568,7 @@ fn tree() -> PyValue {
     PyValue::Dict(m)
 }
 
-/// The protocol-12a half of the key set, verbatim from `mnq_fit.py`'s own
+/// The protocol-12a half of the key set, verbatim from the retired Python fit implementation's own
 /// section marker: everything after the `# Protocol 12a` comment in
 /// `SUBCONTRACT_KEYS`. Taken from that comment rather than inferred, because
 /// the boundary is a claim about which constants a mode reads and the Python
@@ -662,7 +662,7 @@ pub fn subcontract_dumps_for(mode: Mode) -> String {
 
 /// The sub-contract hash for one mode.
 ///
-/// A new binding, with no Python counterpart: `mnq_fit.py` has only the flat
+/// A new binding, with no Python counterpart: the retired Python fit implementation has only the flat
 /// [`subcontract_hash`], and that flat hash is what cross-language parity is
 /// checked against, so it is untouched. These are for artifacts written from
 /// here on, which record the hash of the constants their own mode actually
@@ -680,7 +680,7 @@ pub fn subcontract_hash_for(mode: Mode) -> String {
     crate::delivery::hex_digest(&hasher.finalize())
 }
 
-/// The exact bytes `analysis/mnq_fit.py`'s `subcontract_hash()` hashes.
+/// The exact bytes the retired Python fit implementation's `subcontract_hash()` hashes.
 pub fn subcontract_dumps() -> String {
     let mut out = String::new();
     dump(&tree(), &mut out);
@@ -699,7 +699,7 @@ mod tests {
     use super::*;
 
     /// Ground truth captured verbatim from a live
-    /// `python3 -c "...json.dumps(...)"` run against `analysis/mnq_fit.py`
+    /// `python3 -c "...json.dumps(...)"` run against the retired Python fit implementation
     /// (2026-08-06). If the Python constants ever move, this fixture and
     /// `EXPECTED_HASH` must move with them - the whole point of the hash is
     /// that the two sides cannot silently drift.
@@ -772,7 +772,7 @@ mod tests {
     /// What survives the oracle, and - said plainly - what does not.
     ///
     /// Until phase 4b item 7 this file carried a test that parsed
-    /// `mnq_fit.py`'s `SUBCONTRACT_KEYS` at its `# Protocol 12a` section marker
+    /// the retired Python fit implementation's `SUBCONTRACT_KEYS` at its `# Protocol 12a` section marker
     /// and compared the two sides. That marker was the only independent
     /// authority on the classification, because the boundary is a claim about
     /// which mode reads which constant, and no amount of Rust can settle that
@@ -811,7 +811,7 @@ mod tests {
             PROTOCOL_12A_KEYS.len(),
             40,
             "the 12a set was 40 keys when the Python marker last validated it, verified against \
-             `mnq_fit.py` before the retirement moved it. A change here is a classification \
+             the retired Python fit implementation before the retirement moved it. A change here is a classification \
              decision with no oracle left to check it, so it needs its own argument rather than \
              a quiet edit"
         );
@@ -821,7 +821,7 @@ mod tests {
     /// If any two coincided the split would be decorative.
     ///
     /// These are regression pins on values of our own, not parity claims:
-    /// `mnq_fit.py` has no per-mode hash to compare against, which is the whole
+    /// the retired Python fit implementation has no per-mode hash to compare against, which is the whole
     /// reason these are new rather than ported.
     #[test]
     fn the_scoped_hashes_are_distinct_and_pinned() {

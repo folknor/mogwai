@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
+seed = 42
+warmup_ns = 300000000000
+speed = 0.0
+
+[balances]
+USDT = "100000"
+
+[instrument]
+preset = "BTCUSDT"
+
+[instrument.calendar]
+utc_offset_minutes = 0
+settlement_minute_of_day = 3
+open_windows = [{ start_minute = 5760, end_minute = 5764 }]

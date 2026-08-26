@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `analysis/fit_session_profile.py`: the calendar-conditional
-//! `SessionProfile` fit for MNQ from the NQ one-minute archive.
+//! The calendar-conditional `SessionProfile` fit for MNQ from the NQ
+//! one-minute archive, ported from the retired Python session-profile
+//! implementation.
 //!
 //! Ownership model, assumed here as it is there: `SessionCalendar` owns hard
 //! closure, `SessionProfile` owns relative arrival and volatility while

@@ -11,7 +11,7 @@
 //!   per-parent `VolTrace` records from a walk.
 //!
 //! Until this engine lands, the two sides were two independent
-//! implementations - `analysis/mnq_fit.py`'s `_M12aSession`/`_m12a_block*`
+//! implementations - the retired Python fit implementation's `_M12aSession`/`_m12a_block*`
 //! and `crates/mogwai-cli/src/measure12a.rs`'s `Measure12aAcc` - whose
 //! agreement was checked only by comparing artifacts. That is the
 //! cross-language float-mismatch defect class the rewrite exists to kill.
@@ -57,7 +57,7 @@ mod screen;
 
 pub use screen::{ScreenReduced, ScreenSessionAcc, ScreenWindow};
 
-/// Derived beside the sub-contract in `analysis/mnq_fit.py` (they sit after
+/// Derived beside the sub-contract in the retired Python fit implementation (they sit after
 /// the `SUBCONTRACT_KEYS` block, so they are not hash inputs).
 pub const HORIZON_PAIRS: [(u64, u64); 4] = [(1, 5), (5, 15), (15, 60), (60, 300)];
 /// `VARIANT_TAGS`: sign = 0, magnitude = 1 (spec 3.4a).

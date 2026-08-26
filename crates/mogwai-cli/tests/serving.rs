@@ -38,9 +38,9 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    account_ttl_config, band_config, fast_config, fees_config, http_get, http_post_json,
-    mnq_preset_config, paced_config, perpetual_config, spawn, tiny_fanout_config,
-    two_symbols_config,
+    account_ttl_config, band_config, empty_scheduled_close_config, fast_config, fees_config,
+    http_get, http_post_json, mnq_preset_config, paced_config, perpetual_config,
+    scheduled_close_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, TradeTick, VenueMessage};
@@ -305,6 +305,136 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
         }
     }
     panic!("no mismatch OrderRejected arrived");
+}
+
+/// Two guards refuse a closed market, and this test's three assertions do not
+/// cover them evenly - stated here because the uneven part is invisible while
+/// everything is green, and a later edit that drops the group half would leave
+/// a test that still passes and checks strictly less.
+///
+/// `CLOSED-MARKET` reaches the pre-synthesis market-order guard, which sits
+/// above the market reading. Disabling the stale-print-taker guard below does
+/// not move it, so it discriminates only the upper guard.
+///
+/// `CLOSED-TAKER` is a marketable limit, so the upper guard cannot see it: only
+/// `first_stale_print_taker` refuses it, and `CLOSED-RESTING` proves the whole
+/// group goes with it. Those two are the assertions that bind the lower guard,
+/// verified by reverting it and watching this test fail on `CLOSED-TAKER`
+/// alone.
+///
+/// The fixture asserts a real pre-close print exists before submitting
+/// anything, because with an empty river the market order would be refused for
+/// having no price at all and the closure would never be reached.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn scheduled_close_refuses_market_takers_and_whole_groups_over_the_socket() {
+    let venue = spawn(&["--config", &scheduled_close_config()]);
+    let (status, history) = http_get(
+        &venue.http_base(),
+        "/operator/trades?symbol=BTCUSDT&start=0&end=240000000000&limit=1",
+    );
+    assert_eq!(status, 200, "the pre-close river is readable: {history}");
+    let prints: Vec<TradeTick> = serde_json::from_str(&history).unwrap();
+    assert_eq!(
+        prints.len(),
+        1,
+        "the test must carry a real pre-close print"
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("bind the scheduled river");
+
+    let commands = [
+        format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"CLOSED-MARKET","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
+            venue.symbol
+        ),
+        format!(
+            r#"{{"type":"SubmitOrderGroup","orders":[{{"client_order_id":"CLOSED-RESTING","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc","link":{{"order_list_id":"CLOSED-GROUP","contingency":"Oco","linked_order_ids":["CLOSED-TAKER"]}}}},{{"client_order_id":"CLOSED-TAKER","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"999999999","time_in_force":"Gtc","link":{{"order_list_id":"CLOSED-GROUP","contingency":"Oco","linked_order_ids":["CLOSED-RESTING"]}}}}]}}"#,
+            venue.symbol, venue.symbol
+        ),
+    ];
+
+    for command in commands {
+        socket.send(Message::Text(command.into())).await.unwrap();
+    }
+
+    let deadline = common::deadline(Duration::from_secs(10));
+    let mut rejected = std::collections::BTreeMap::new();
+    while rejected.len() < 3 {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the closed-market refusals arrive")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderRejected {
+                client_order_id,
+                reason,
+                ..
+            }) if client_order_id.starts_with("CLOSED-") => {
+                rejected.insert(client_order_id, reason);
+            }
+            Ok(VenueMessage::OrderAccepted {
+                client_order_id, ..
+            }) if client_order_id.starts_with("CLOSED-") => {
+                panic!("closed order {client_order_id} reached the engine")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(rejected.len(), 3);
+    assert_eq!(rejected["CLOSED-MARKET"], "market closed");
+    assert_eq!(rejected["CLOSED-TAKER"], "market closed");
+    assert_eq!(
+        rejected["CLOSED-RESTING"],
+        "order group rejected whole: CLOSED-TAKER was refused because market closed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_closed_market_without_a_readable_print_is_not_a_synthesis_failure() {
+    let venue = spawn(&["--config", &empty_scheduled_close_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("bind the empty closed river");
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"EMPTY-CLOSE","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    socket.send(Message::Text(submit.into())).await.unwrap();
+
+    let deadline = common::deadline(Duration::from_secs(10));
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the refusal arrives")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderRejected {
+                client_order_id,
+                reason,
+                ..
+            }) if client_order_id == "EMPTY-CLOSE" => {
+                assert_eq!(reason, "market closed");
+                return;
+            }
+            Ok(VenueMessage::OrderAccepted {
+                client_order_id, ..
+            }) if client_order_id == "EMPTY-CLOSE" => {
+                panic!("the closed market order reached the engine")
+            }
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]

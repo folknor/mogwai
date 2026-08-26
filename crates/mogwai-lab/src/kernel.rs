@@ -9,14 +9,14 @@
 //! serialization the parity gates compare with.
 //!
 //! Every function here is a port of the same-named helper in
-//! `analysis/mnq_fit.py`; `splitmix64` and `tuple_mix` additionally have a
+//! the retired Python fit implementation; `splitmix64` and `tuple_mix` additionally have a
 //! bit-identical twin in `crates/mogwai-cli/src/measure12a.rs` (retiring at
 //! phase 2c) and in `crates/mogwai-protocol/src/seeds.rs`. Nothing here is
 //! allowed to differ by so much as a rounding convention: these are the
 //! functions whose output is compared byte-for-byte across two languages.
 
 /// Bit-identical to `crates/mogwai-protocol/src/seeds.rs`, to
-/// `analysis/mnq_fit.py`'s `splitmix64` and to the `mogwai-cli` twin.
+/// the retired Python fit implementation's `splitmix64` and to the `mogwai-cli` twin.
 #[must_use]
 pub const fn splitmix64(x: u64) -> u64 {
     let x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -208,7 +208,8 @@ pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
 /// exact total equals the true sum, then rounds that total once, half-even.
 /// The two disagree on inputs where compensation is not enough, so a port that
 /// routes both through one helper is wrong wherever Python distinguishes them.
-/// `analysis/build_fingerprint.py`'s `hour_vol` does exactly that: line 168
+/// The retired Python fingerprint implementation's `hour_vol` does exactly
+/// that: line 168
 /// uses builtin `sum` and line 170 uses `statistics.fmean`, which on 3.14 is
 /// `fsum(data) / n`.
 ///

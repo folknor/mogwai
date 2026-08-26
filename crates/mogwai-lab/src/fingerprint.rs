@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Synthesis of the generator fingerprint (`analysis/build_fingerprint.py`):
+//! Synthesis of the generator fingerprint (the retired Python fingerprint implementation):
 //! reads every `char_<PAIR>.json` under a directory plus `cadence.json` and
 //! produces the fingerprint contract - golden stylized-fact targets with
 //! tolerances, the pooled UTC session profile, and the level-queue verdict.
@@ -18,7 +18,7 @@ use crate::error::{LabError, LabResult};
 const ANCHOR: &str = "XBTUSD";
 
 /// The four proceed conditions a trades-only queue-ahead fill model must
-/// clear, matching `build_fingerprint.py`'s `LEVEL_CONDITIONS` order.
+/// clear, matching the retired Python fingerprint implementation's `LEVEL_CONDITIONS` order.
 const LEVEL_CONDITIONS: [(&str, &str); 4] = [
     (
         "single_print_frac <= 0.50",
@@ -55,7 +55,7 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// Reads one numeric field of a level block, refusing rather than
 /// substituting.
 ///
-/// `build_fingerprint.py:61-64` indexes `single_print_frac`,
+/// The retired Python fingerprint implementation indexes `single_print_frac`,
 /// `vol_dispersion` and `size_dispersion` directly, so a level block missing
 /// any of them raises `KeyError`. Substituting `0.0` did not merely diverge:
 /// it manufactured a pass, because two of the four conditions are lower
@@ -119,7 +119,7 @@ pub fn level_verdict(level: &Value, single_fracs: &[f64]) -> LabResult<Value> {
 /// # Errors
 /// [`LabError::Refusal`] on a stale pair (missing `level` block) or
 /// disagreeing histogram binning across pairs, matching
-/// `build_fingerprint.py`'s `ValueError`s.
+/// the retired Python fingerprint implementation's `ValueError`s.
 pub fn level_queue(anchor_report: &Value, reports: &BTreeMap<String, Value>) -> LabResult<Value> {
     let mut stale: Vec<&str> = reports
         .iter()
@@ -129,7 +129,7 @@ pub fn level_queue(anchor_report: &Value, reports: &BTreeMap<String, Value>) -> 
     stale.sort_unstable();
     if !stale.is_empty() {
         return Err(LabError::refusal(format!(
-            "char_<PAIR>.json predates the level measurement, re-run run_corpus.py for: {}",
+            "char_<PAIR>.json predates the level measurement; re-run `mogwai characterize` for: {}",
             stale.join(", ")
         )));
     }
@@ -250,7 +250,7 @@ fn rng(values: &[f64]) -> Value {
 }
 
 /// `rng_typed`: as [`rng`], but over `Value`s so an all-integer input keeps
-/// `min`/`max` as JSON integers, matching `build_fingerprint.py`'s
+/// `min`/`max` as JSON integers, matching the retired Python fingerprint implementation's
 /// `rng()` (`min(vals)`/`max(vals)` over whatever Python type the values
 /// already are).
 fn rng_typed(values: &[Value]) -> Value {
@@ -476,19 +476,20 @@ pub fn load_reports(char_dir: &Path) -> LabResult<BTreeMap<String, Value>> {
 /// Reads the committed `cadence.json`.
 ///
 /// # Errors
-/// [`LabError::Refusal`] if the file is absent (mirrors `build_fingerprint.py`'s
+/// [`LabError::Refusal`] if the file is absent (mirrors the retired Python fingerprint implementation's
 /// `FileNotFoundError`), or propagates I/O/JSON failure.
 pub fn load_cadence(path: &Path) -> LabResult<Value> {
     if !path.exists() {
         return Err(LabError::refusal(
-            "analysis/cadence.json is required; run build_cadence.py first",
+            "analysis/cadence.json is required; run `mogwai synth cadence` first",
         ));
     }
     let text = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
 }
 
-/// `build_fingerprint.py`'s `main()` synthesis, minus the `findings.md`
+/// The retired Python fingerprint implementation's `main()` synthesis, minus
+/// the `findings.md`
 /// side artifact (a human-readable report the phase-3a brief does not gate
 /// on): reads every `char_<PAIR>.json` in `char_dir` plus `cadence.json` and
 /// returns the fingerprint contract.
@@ -501,7 +502,7 @@ pub fn build_fingerprint(char_dir: &Path, cadence_path: &Path) -> LabResult<Valu
     let cadence = load_cadence(cadence_path)?;
     if reps.is_empty() {
         return Err(LabError::refusal(
-            "no char_*.json found; run run_corpus.py first",
+            "no char_*.json found; run `mogwai characterize` first",
         ));
     }
     let pairs: Vec<String> = reps.keys().cloned().collect();
@@ -892,5 +893,16 @@ mod tests {
             .join("cadence.json");
         let cadence = load_cadence(&path).unwrap();
         assert_eq!(cadence["anchor"].as_str(), Some("BTCUSDT"));
+    }
+
+    #[test]
+    fn missing_cadence_names_the_live_synthesis_command() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("this-cadence-file-does-not-exist.json");
+        let error = load_cadence(&path).expect_err("the absent cadence must refuse");
+        assert_eq!(
+            error.to_string(),
+            "refusal: analysis/cadence.json is required; run `mogwai synth cadence` first"
+        );
     }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! [`ObsContext`]: the observed-side metric evaluators over a set of
-//! per-session records, ported from `analysis/mnq_fit.py`'s class of the same
+//! per-session records, ported from the retired Python fit implementation's class of the same
 //! name. Every statistic is a function of a session-multiplicity vector, so
 //! the point estimate (all ones), the 10,000 bootstrap replicates and the
 //! leave-one-week folds all run one code path.

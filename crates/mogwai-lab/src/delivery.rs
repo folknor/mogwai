@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Delivery identity binding (`analysis/mnq_fit.py` spec 4.1): jobs manifest +
+//! Delivery identity binding (the retired protocol-10 fit spec, 4.1): jobs manifest +
 //! delivered manifest + rehash, before a byte of CSV. The lab reads
 //! `analysis/databento-jobs.json` read-only (per AGENTS.md/the phase-1 brief) -
 //! nothing here ever writes it.

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai session-profile`: the calendar-conditional session fit over a
-//! one-minute bar archive (`analysis/fit_session_profile.py`).
+//! one-minute bar archive (the retired Python session-profile implementation).
 //!
 //! The second CLI gap the 2026-08-08 program review found. `mogwai-lab`
 //! carried the fit as a library, but nothing exposed it, so retiring the

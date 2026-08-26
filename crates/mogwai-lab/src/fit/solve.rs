@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The CRN solve machinery of `analysis/mnq_fit.py` (protocol-10 spec 4.75,
+//! The CRN solve machinery of the retired Python fit implementation (protocol-10 spec 4.75,
 //! carried into protocol 11): `coarse_grid`, `trisect` and `solve_scalar`.
 //!
 //! The invariants this module exists to preserve, all of them load-bearing
@@ -275,7 +275,7 @@ mod tests {
         v["best_candidate"].as_f64().unwrap()
     }
 
-    /// `mnq_fit.py` selftest: "trisection converges on a plain objective".
+    /// the retired Python fit implementation selftest: "trisection converges on a plain objective".
     #[test]
     fn trisection_converges_on_a_plain_objective() {
         let solve = solve_scalar(&mut |x| (x - 3.2).abs(), 0.0, 10.0, 11, false, None, None);

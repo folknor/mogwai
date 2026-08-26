@@ -5,14 +5,16 @@
 //!
 //! This closes the gap that blocked the Python retirement. `mogwai_lab`
 //! carried the ported estimand layer as a library with no way to run it, and
-//! the multi-pair driver (`analysis/run_corpus.py`) had already been deleted,
-//! so retiring `analysis/characterize.py` would have left nothing in either
+//! the multi-pair driver (the retired Python corpus driver) had already been deleted,
+//! so retiring the single-pair characterization script would have left
+//! nothing in either
 //! language able to produce `char_<PAIR>.json` - the input
 //! `mogwai synth fingerprint` reads, and the first step of onboarding any new
 //! instrument.
 //!
-//! It covers BOTH Python entry points deliberately. `characterize.py` took one
-//! pair and wrote one report; `run_corpus.py` fanned that across a
+//! It covers both Python entry points deliberately. The retired Python
+//! characterization implementation took one
+//! pair and wrote one report; the retired Python corpus driver fanned that across a
 //! representative pair set in a process pool and printed a cross-pair table so
 //! the stylized facts could be eyeballed for universality. A port of only the
 //! first would have re-created the same gap one level down.
@@ -22,7 +24,8 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde_json::Value;
 
-/// `run_corpus.py`'s `DEFAULT_PAIRS`: a representative subset rather than the
+/// The retired Python corpus driver's `DEFAULT_PAIRS`: a representative
+/// subset rather than the
 /// full corpus. The model is symbol-agnostic, so the corpus only has to show
 /// the stylized-fact shape repeats across instruments and bound the
 /// per-instrument scalars; a handful of pairs settles both far cheaper than
@@ -31,10 +34,12 @@ const DEFAULT_PAIRS: [&str; 8] = [
     "XBTUSD", "ETHUSD", "USDTUSD", "SOLUSD", "ADAUSD", "XDGUSD", "XRPUSD", "DOTUSD",
 ];
 
-/// `run_corpus.py` capped its process pool here so peak IO stays sane.
+/// The retired Python corpus driver capped its process pool here so peak IO
+/// stays sane.
 const MAX_WORKERS: usize = 6;
 
-/// `characterize.py`'s `DATA_DIR` default. Offline-analysis input only, never
+/// The retired Python characterization implementation's `DATA_DIR` default.
+/// Offline-analysis input only, never
 /// a venue runtime knob.
 const DEFAULT_DATA_DIR: &str = "/home/folk/Kraken";
 
@@ -101,7 +106,8 @@ pub(crate) fn run(args: CharacterizeArgs) -> anyhow::Result<()> {
         args.pairs.clone()
     };
 
-    // `run_corpus.py` skipped missing or empty inputs by name rather than
+    // The retired Python corpus driver skipped missing or empty inputs by name
+    // rather than
     // failing the whole sweep, so one absent pair does not cost the others.
     let mut usable: Vec<(String, PathBuf)> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -156,10 +162,10 @@ pub(crate) fn run(args: CharacterizeArgs) -> anyhow::Result<()> {
                             // The output name comes from the report's own
                             // `pair`, never from the CLI argument. Python
                             // derives that field as the basename minus
-                            // extension (`characterize.py:247`) and writes
-                            // `char_<rep["pair"]>.json` (`:487`), so a
+                            // extension and writes
+                            // `char_<rep["pair"]>.json`, so a
                             // path-shaped argument names its report after the
-                            // FILE. Formatting the raw argument instead turned
+                            // file. Formatting the raw argument instead turned
                             // `characterize path/to/KEUR.csv` into
                             // `char_path/to/KEUR.csv.json`, a nested directory
                             // `load_reports` cannot see - which severed the
@@ -173,7 +179,7 @@ pub(crate) fn run(args: CharacterizeArgs) -> anyhow::Result<()> {
                             match mogwai_lab::aggregate::artifact::write_json_atomic(&out, &report)
                             {
                                 // The cross-pair table keys off the same
-                                // derived name, so `run_corpus.py`'s row labels
+                                // derived name, so the retired Python corpus driver's row labels
                                 // read `KEUR` rather than a path fragment.
                                 Ok(()) => {
                                     results.lock().expect("results lock").push((name, report));
@@ -194,7 +200,8 @@ pub(crate) fn run(args: CharacterizeArgs) -> anyhow::Result<()> {
     if reports.len() < requested.len() - skipped.len() {
         anyhow::bail!("one or more pairs failed to characterize; see the messages above");
     }
-    // `run_corpus.py` ordered the table by trade count, descending.
+    // The retired Python corpus driver ordered the table by trade count,
+    // descending.
     reports.sort_by(|a, b| {
         field(&b.1, &["n_trades"])
             .partial_cmp(&field(&a.1, &["n_trades"]))

@@ -3,8 +3,8 @@
 
 //! Phase-3a parity gates (the retired rewrite plan): reproduce the
 //! committed `analysis/fingerprint.json` and `analysis/cadence.json` from
-//! their recorded inputs, and the `check_cadence_feasible.py` structural
-//! verdict. Ignored - they need `analysis/char_*.json` (gitignored, local
+//! their recorded inputs, and the retired Python cadence-feasibility
+//! implementation's structural verdict. Ignored - they need `analysis/char_*.json` (gitignored, local
 //! corpus output) and/or `research/market-data/*-trades-2026-06.zip` on
 //! disk, and are named `parity3a_*` to match the `parity12a_*` convention.
 
@@ -87,7 +87,8 @@ fn parity3a_cadence_feasible_verdict_matches_the_committed_cadence() {
     let cadence: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("analysis/cadence.json")).unwrap())
             .unwrap();
-    // `check_cadence_feasible.py`'s `verdict()` over the committed
+    // The retired Python cadence-feasibility implementation's `verdict()` over
+    // the committed
     // cadence.json prints `parent/child verdict: PROCEED` and proceeds -
     // reproduced exactly here.
     assert_eq!(

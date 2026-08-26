@@ -705,64 +705,70 @@ fn effective_preset_walk(
     name: &str,
     stack: &mut Vec<String>,
 ) -> anyhow::Result<(toml::Table, toml::Table)> {
-    if stack
-        .iter()
-        .any(|ancestor| ancestor.eq_ignore_ascii_case(name))
-    {
-        stack.push(name.to_owned());
-        anyhow::bail!(
-            "instrument preset inheritance cycle: {}",
-            stack.join(" -> ")
-        );
-    }
-    stack.push(name.to_owned());
-    let raw: toml::Table = if let Some(table) = cfg.and_then(|cfg| {
-        cfg.instrument_presets
+    let entry_depth = stack.len();
+    let result = (|| {
+        if stack
             .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            .map(|(_, table)| table.clone())
-    }) {
-        table
-    } else {
-        let text =
-            preset_text(name).ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
-        toml::from_str(text)?
-    };
-    let mut instrument = raw
-        .get("instrument")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| anyhow::anyhow!("preset {name} has no instrument table"))?
-        .clone();
-    let own_provenance = raw
-        .get("provenance")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| anyhow::anyhow!("preset {name} has no provenance table"))?;
-    let (mut merged, mut provenance) = if let Some(parent) = instrument.remove("preset") {
-        let parent = parent
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("preset {name} instrument.preset must be a string"))?;
-        effective_preset_walk(cfg, parent, stack)?
-    } else {
-        (toml::Table::new(), toml::Table::new())
-    };
-    let overrides = instrument
-        .remove("override")
-        .and_then(|value| value.as_table().cloned())
-        .unwrap_or_default();
-    for (key, value) in instrument {
-        if merged.insert(key.clone(), value).is_some() {
-            anyhow::bail!("preset {name} restates inherited key {key}; use instrument.override");
+            .any(|ancestor| ancestor.eq_ignore_ascii_case(name))
+        {
+            stack.push(name.to_owned());
+            anyhow::bail!(
+                "instrument preset inheritance cycle: {}",
+                stack.join(" -> ")
+            );
         }
-    }
-    for (path, value) in overrides {
-        replace_dotted(&mut merged, &path, value)?;
-    }
-    for (path, value) in own_provenance {
-        provenance.insert(path.clone(), value.clone());
-    }
-    validate_provenance(name, &merged, &provenance)?;
-    stack.pop();
-    Ok((merged, provenance))
+        stack.push(name.to_owned());
+        let raw: toml::Table = if let Some(table) = cfg.and_then(|cfg| {
+            cfg.instrument_presets
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, table)| table.clone())
+        }) {
+            table
+        } else {
+            let text = preset_text(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
+            toml::from_str(text)?
+        };
+        let mut instrument = raw
+            .get("instrument")
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| anyhow::anyhow!("preset {name} has no instrument table"))?
+            .clone();
+        let (mut merged, mut provenance) = if let Some(parent) = instrument.remove("preset") {
+            let parent = parent.as_str().ok_or_else(|| {
+                anyhow::anyhow!("preset {name} instrument.preset must be a string")
+            })?;
+            effective_preset_walk(cfg, parent, stack)?
+        } else {
+            (toml::Table::new(), toml::Table::new())
+        };
+        let own_provenance = raw
+            .get("provenance")
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| anyhow::anyhow!("preset {name} has no provenance table"))?;
+        let overrides = instrument
+            .remove("override")
+            .and_then(|value| value.as_table().cloned())
+            .unwrap_or_default();
+        for (key, value) in instrument {
+            if merged.insert(key.clone(), value).is_some() {
+                anyhow::bail!(
+                    "preset {name} restates inherited key {key}; use instrument.override"
+                );
+            }
+        }
+        for (path, value) in overrides {
+            replace_dotted(&mut merged, &path, value)?;
+        }
+        for (path, value) in own_provenance {
+            provenance.insert(path.clone(), value.clone());
+        }
+        validate_provenance(name, &merged, &provenance)?;
+        Ok((merged, provenance))
+    })();
+    stack.truncate(entry_depth);
+    result
 }
 
 fn validate_provenance(
@@ -3151,14 +3157,9 @@ mod tests {
     /// guard would miss, so both are here.
     #[test]
     fn a_runtime_preset_inheritance_cycle_refuses_boot() {
-        // The provenance table is not decoration here: it is checked before the
-        // parent is resolved, so a fixture without one is refused for the wrong
-        // reason and never reaches the guard this test is about.
         let inheriting = |parent: &str| {
-            toml::from_str::<toml::Table>(&format!(
-                "[instrument]\npreset = \"{parent}\"\n[provenance]\n"
-            ))
-            .unwrap()
+            toml::from_str::<toml::Table>(&format!("[instrument]\npreset = \"{parent}\"\n"))
+                .unwrap()
         };
         for edges in [
             vec![("loop", "loop")],
@@ -3183,6 +3184,14 @@ mod tests {
                 "the refusal must name the cycle, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_preset_walk_restores_the_callers_frontier() {
+        let mut stack = vec!["caller's frame".to_owned()];
+        effective_preset_walk(None, "NO-SUCH-PRESET", &mut stack)
+            .expect_err("an unknown preset must refuse");
+        assert_eq!(stack, ["caller's frame"]);
     }
 
     /// The forex validator's negative half. Each of these is a shape that

@@ -5,7 +5,7 @@
 //! qualification helpers, the family inventories and the simultaneous
 //! envelope with its Amendment-D refusal-ownership rules.
 //!
-//! Ported from `analysis/mnq_fit.py`'s `stat_*` closures, `q1_*` helpers,
+//! Ported from the retired Python fit implementation's `stat_*` closures, `q1_*` helpers,
 //! `conditional_adequacy_bins`, `build_family_metrics` and
 //! `evaluate_family`.
 //!

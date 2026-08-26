@@ -3,7 +3,7 @@
 
 //! `mogwai select-windows`: the bar-frame intake station.
 //!
-//! The CLI half of `analysis/select_windows.py`. The library computes; this
+//! The CLI half of the retired Python window-selection implementation. The library computes; this
 //! renders, caches and drives. The split matters for the same reason it did for
 //! `characterize`: the estimand layer stays a pure function of its input, so the
 //! parity gate has no live field to exclude.
@@ -16,10 +16,11 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use mogwai_lab::select_windows as sw;
 
-/// `select_windows.py`'s `MARKET_DATA`, relative to the repository root.
+/// The retired Python window-selection implementation's `MARKET_DATA`,
+/// relative to the repository root.
 const DEFAULT_MARKET_DATA: &str = "research/market-data";
 
-/// `select_windows.py`'s `CACHE`.
+/// The retired Python window-selection implementation's `CACHE`.
 const DEFAULT_CACHE: &str = "analysis/cme_daily_features.json";
 
 #[derive(Args)]
@@ -58,7 +59,8 @@ fn market_data(args: &SelectWindowsArgs) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MARKET_DATA))
 }
 
-/// The cache's on-disk shape, matching what `select_windows.py features`
+/// The cache's on-disk shape, matching what the retired Python
+/// window-selection implementation's `features` mode
 /// writes: `{symbol: {session: {feature: value}}}`.
 type CacheJson = std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>;
 

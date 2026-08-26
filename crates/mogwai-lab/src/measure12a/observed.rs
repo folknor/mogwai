@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The observed front-end of the unified block engine: a port of
-//! `analysis/mnq_fit.py`'s `measure12a_observe`. One chronological pass over
+//! the retired Python fit implementation's `measure12a_observe`. One chronological pass over
 //! the TBBO stream, one session retained at a time.
 //!
 //! Parent inference here is the frozen observed rule: a parent is a

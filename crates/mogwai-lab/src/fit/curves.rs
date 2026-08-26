@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The protocol-11 hour-curve constructors of `analysis/mnq_fit.py`
+//! The protocol-11 hour-curve constructors of the retired Python fit implementation
 //! (spec 4.1-4.6): exposure tables, the shared hour-only normalization,
 //! materialization, and the two record shapes a curve rides the artifact in.
 

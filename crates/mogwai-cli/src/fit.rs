@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai fit`: the protocol-11 session calibration, ported from
-//! `analysis/mnq_fit.py`'s `fit` mode (phase 3b of
+//! the retired Python fit implementation's `fit` mode (phase 3b of
 //! the retired rewrite plan).
 //!
 //! The driver itself lives in `mogwai_lab::fit::driver`; this module is the

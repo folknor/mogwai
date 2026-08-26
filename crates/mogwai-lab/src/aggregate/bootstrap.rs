@@ -6,7 +6,7 @@
 //! nearest-rank median and the cumulative-count [`QuantileSupport`] that
 //! makes 10,000 replicates of a pooled quantile tractable.
 //!
-//! Ported from `analysis/mnq_fit.py`'s `bootstrap_multiplicities`,
+//! Ported from the retired Python fit implementation's `bootstrap_multiplicities`,
 //! `fold_multiplicities`, `weighted_median_votes` and `class
 //! QuantileSupport`. Every one of these is bit-reproducible by construction:
 //! the block starts come from `splitmix64` over a frozen base seed, and no

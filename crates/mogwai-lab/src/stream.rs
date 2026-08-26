@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The TBBO `.csv.zst` stream contract (`analysis/mnq_fit.py`
+//! The TBBO `.csv.zst` stream contract (the retired Python fit implementation
 //! `iter_csv_zst`/`column_indices`/`Row`/`classify_book`/`parse_stream`/
 //! `group_parents_batch`). Ordering, off-grid prices, the seam
 //! duplicate-detection window, CRLF handling and the header contract are all
@@ -211,7 +211,7 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
 /// Reads one integer column, refusing rather than panicking on a malformed
 /// value.
 ///
-/// This used to `panic!`, mirroring `mnq_fit.py`'s `parse_stream`, which
+/// This used to `panic!`, mirroring the retired Python fit implementation's `parse_stream`, which
 /// carries no named refusal for these conversions either and dies on a
 /// non-integer field. The mirror was deliberate while both implementations had
 /// to agree, and it is fixed here as phase 4b item 6 - before the Python
@@ -245,7 +245,7 @@ fn parse_field_i64(
 }
 
 /// The streaming pass over the ordered files as one stream
-/// (`analysis/mnq_fit.py` `parse_stream`): 19-digit ns timestamps, monotone
+/// (the retired Python fit implementation `parse_stream`): 19-digit ns timestamps, monotone
 /// ordering across the file boundary, no duplicate row at the seam, the
 /// per-price grid, strict B/A/N sides, action `T` on every row.
 pub struct ParseStream {

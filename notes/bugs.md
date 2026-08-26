@@ -342,30 +342,6 @@ UTC hour later than this table places them". So the cost is not a constant edit.
 Giving the calendar a daylight rule is a schema change reaching every preset, and
 that is the decision this finding actually carries.
 
-### D2. Nine deleted Python scripts are still referenced about forty times
-
-`analysis/mnq_fit.py` alone has roughly thirty references across `mogwai-lab` and
-`mogwai-cli`, ten in `mogwai-lab/src/subcontract.rs` alone; `characterize.py`,
-`build_fingerprint.py`, `select_windows.py`, `build_cadence.py`, `run_corpus.py`,
-`fit_session_profile.py`, `check_cadence_feasible.py` and
-`tick_composition_ratios.py` account for the rest, across doc comments,
-`docs/cli.md`, `notes/` and `Cargo.toml`.
-
-Corrected 2026-08-26: `AGENTS.md` was in that list and is now clean, so the sweep
-is crates, `docs/cli.md`, `notes/` and `Cargo.toml`. All nine scripts are
-confirmed absent from `analysis/`.
-
-`scripts/retire_note_citations.py` is the existing tool for this sweep but is
-scoped to `crates/` and `brokkr.toml`.
-
-### D2a. The deleted-script instruction a user can actually hit
-
-Split out of D2 on 2026-08-26 because it is the one part with user-visible blast
-radius and it should not wait on a forty-citation prose sweep.
-`mogwai-lab/src/fingerprint.rs` emits the runtime error "analysis/cadence.json is
-required; run build_cadence.py first", instructing the user to run a script
-deleted in the Rust port. A one-line fix, independent of everything else in D2.
-
 ### D4. `SegmentSource` overrides neither `seek_to` nor `fault`
 
 An effectively infinite source inherits the O(distance) default walk that
@@ -488,34 +464,6 @@ the intake sequence is what makes a preset honest and none has been run.
   arm rather than an extension of an existing one.
 
 ---
-
-### E9. A preset cycle test written the obvious way passes vacuously
-
-Filed 2026-08-24 from round 5. The provenance check runs before the parent is
-resolved, so a preset missing `[provenance]` is refused for that reason rather
-than for the cycle it declares. The cycle guard itself is real and does refuse,
-but a fixture written the natural way never reaches it and goes green without
-testing anything - the vacuous-gate family, in a guard landed the same day.
-
-Either resolve the parent chain before validating provenance, or make the
-refusal name which check fired so a fixture cannot pass for the wrong reason.
-
-Narrowed 2026-08-26. The ordering defect is intact - the "has no provenance
-table" bail still sits above the `effective_preset_walk` recursion - but the
-test is no longer the hazard: `a_runtime_preset_inheritance_cycle_refuses_boot`
-emits `[provenance]` deliberately, with a comment saying why. So what remains is
-the ordering itself and the next fixture someone writes naively, not a green test
-proving nothing today.
-
-Related, and the reason an operator would not notice: the cycle detail lands in
-the anyhow context chain rather than the top line, so what is seen is "instrument
-preset X is invalid" unless the renderer walks the chain.
-
-### E10. `effective_preset_walk` does not pop its stack on an error return
-
-Filed 2026-08-24 from round 5. The frontier shape, and harmless today only
-because the stack is abandoned along with the error. It stops being harmless the
-moment the walk is reused across attempts.
 
 ## F. Adapter
 
@@ -877,50 +825,6 @@ urgency: verify a section is fully duplicated here, then delete it there, and
 keep in todo.md only what was never extracted.
 
 ---
-
-### G17. The closed-market refusal has no end-to-end socket coverage
-
-Filed 2026-08-24 from round 3. Every assertion on this guard is unit-level,
-against the predicate or the boundary helper. The path from `process_order_cmd`
-through `refuse_all` to a consumer-visible market-closed frame is untested, which
-is why a boundary-level regression in that guard landed green: the round 3 fix
-pass admitted a whole order group whenever its first closed-session member was
-non-marketable, and a full gate could not see it.
-
-Wants a passenger submitting into a scheduled close over a real socket and
-reading the refusal frame, including the group case with a marketable member
-behind a non-marketable one.
-
-Attempted and withdrawn in round 3's fix pass, and the reason it withdrew is
-itself a finding, now filed as G18. The short version: on a river with no print
-at or before sim-now, a market order never reaches this guard at all, so the
-scenario a socket test would naturally reach for produces a different refusal
-than the one it means to pin. A test closing this entry has to put prints in
-the river's readable past before the close it submits into, or it will pass on
-the wrong branch.
-
-### G18. A close with no readable print behind it refuses market orders as a synthesis failure
-
-Filed 2026-08-26 from round 3's cold review, out of the round's own scope.
-
-`process_order_cmd` refuses a price-less market order with "venue could not
-synthesize a market price at sim-now" before it ever asks whether the market is
-closed. The two guards are in that order because a price-less market order on a
-listed symbol normally means the synthesis task died, and blaming the consumer
-for the venue's failure would be worse.
-
-Inside a scheduled close on a river carrying no print at or before sim-now -
-a run whose origin sits inside the close is the plain case - the reading is
-legitimately absent because the market is shut, and the venue answers with its
-own-fault story instead of "market closed". A consumer reading that frame is
-told the venue broke when what happened is that it asked during a weekend.
-Resting orders are unaffected: a limit with no reading is judged non-marketable
-and rests, which is correct.
-
-The fix is guard order plus a way to tell the two absences apart, and it moves a
-refusal reason on the wire, so it wants its own round and its own bite-check
-rather than riding along with the observability work. It is also the thing that
-makes G17 hard to test, so the two want closing together.
 
 ## H. Measurement and method owed
 

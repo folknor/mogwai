@@ -5,7 +5,7 @@
 //!
 //! The subcommand landed with library-level coverage of the estimand layer and
 //! none of the write path, which is where it broke: `resolve_path` accepts a
-//! path-shaped argument exactly as `characterize.py` does, but the report name
+//! path-shaped argument exactly as the retired Python characterization implementation does, but the report name
 //! was formatted from the raw CLI argument rather than from the report's own
 //! `pair` field. `mogwai characterize path/to/KEUR.csv` therefore wrote
 //! `char_path/to/KEUR.csv.json` - a nested directory that
@@ -13,8 +13,9 @@
 //! directory itself. The intake chain broke on precisely the input form the
 //! help text advertises, and no test ran the command.
 //!
-//! Python's behaviour is the contract: `characterize.py:247` derives `pair` as
-//! the basename minus extension, and `:487` writes `char_<rep["pair"]>.json`.
+//! Python's behaviour is the contract: the retired Python characterization
+//! implementation derives `pair` as the basename minus extension, then writes
+//! `char_<rep["pair"]>.json`.
 //! These tests drive the real binary, because the defect lived in the CLI and a
 //! library test would have missed it exactly as the original coverage did.
 

@@ -14,7 +14,7 @@
 //! 2. A non-integer value in any of the six integer columns panicked inside the
 //!    conversion itself.
 //!
-//! Both were mirrored deliberately from `analysis/mnq_fit.py`'s `parse_stream`,
+//! Both were mirrored deliberately from the retired Python fit implementation's `parse_stream`,
 //! which dies the same way, and both are fixed here before the Python retires -
 //! the order the review signature is conditional on, so the reference this
 //! knowingly diverges from is still runnable while the mismatch lands.

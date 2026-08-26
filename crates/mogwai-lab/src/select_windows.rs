@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `analysis/select_windows.py`: the bar-frame intake station.
+//! The bar-frame intake station, ported from the retired Python
+//! window-selection implementation.
 //!
 //! Chooses which tick-data windows to buy, using cheap 1-minute bars as a
 //! sampling frame. Bars cannot see microstructure - aggregation destroys
@@ -23,8 +24,8 @@
 //! and writes only a regenerable gitignored cache, and `targets-frozen.json` -
 //! called its gate in three documents - is the BTCUSDT target set this never
 //! touches. So `analysis/select-windows-blessed.json` was blessed from the
-//! Python first (`scripts/bless_select_windows.py`) and this is matched against
-//! it.
+//! Python first, by the retired blessing script that sat beside it, and this
+//! is matched against it.
 //!
 //! One approved deviation, and it is not cosmetic - see [`squared`]. The Python
 //! squares with `** 2`, which routes through libm's `pow` and is not correctly
@@ -97,7 +98,7 @@ const MIN_MONTH_SESSIONS: usize = 15;
 
 /// Squares a deviation, with one multiply.
 ///
-/// The approved deviation from `select_windows.py`. The Python writes
+/// The approved deviation from the retired Python window-selection implementation. The Python writes
 /// `(v - mean) ** 2`, and CPython's `float ** int` calls libm's `pow`, which is
 /// not correctly rounded: over the domain these features occupy it disagrees
 /// with the correctly rounded product in roughly one value in 1,163. A single

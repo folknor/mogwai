@@ -129,7 +129,7 @@ fn run_cadence(args: CadenceArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `check_cadence_feasible.py`'s `EVENTS`.
+/// The retired Python cadence-feasibility implementation's `EVENTS`.
 const DEFAULT_MARKOV_EVENTS: usize = 3_000_000;
 
 #[derive(Args)]

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `run_preflight`/`mode_preflight` (`analysis/mnq_fit.py` spec 4.1): the
+//! `run_preflight`/`mode_preflight` (the retired protocol-10 fit spec, 4.1): the
 //! fail-closed input-contract pass over the delivered TBBO corpus, and the
 //! artifact it persists. The parity gate for phase 1 is this module
 //! reproducing `analysis/out/mnq-fit-preflight.json` value-identically.

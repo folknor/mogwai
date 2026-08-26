@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai measure`: slice 2c-ii of the retired rewrite plan, ported
-//! from `analysis/mnq_fit.py`'s `mode_measure12a`. The live Brick M run -
+//! from the retired Python fit implementation's `mode_measure12a`. The live Brick M run -
 //! the observed pass over the delivered corpus, the eight final walks run
 //! in-process through the lab engine and content-compared (cost excluded)
 //! against the read-only Brick G cache, phase-2b/2c-i aggregation and

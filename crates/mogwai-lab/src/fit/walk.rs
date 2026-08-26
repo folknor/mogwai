@@ -3,7 +3,8 @@
 
 //! The protocol-11 walk layer: one `gen --type summary` evaluation, cached.
 //!
-//! `mnq_fit.py` shelled out to `gen --type summary` once per walk
+//! The retired Python fit implementation shelled out to `gen --type summary`
+//! once per walk
 //! and cached the result under `analysis/out/mnq-fit-scratch/cache`, keyed by
 //! `sha256(json.dumps({overrides, seed, start_ns, length, warmup, commit},
 //! sort_keys=True))`. This port runs the walk in-process through

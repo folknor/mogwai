@@ -7,7 +7,7 @@
 //! one full-month weighted minute-range p99.9 and `> 968` exceedance rate
 //! off the counterfactual.
 //!
-//! Ported from `analysis/mnq_fit.py`'s `observed_bin_shares`,
+//! Ported from the retired Python fit implementation's `observed_bin_shares`,
 //! `count_substitution`, `class CountSubEval`, `obs_shares_under`,
 //! `count_substitution_closures` and `gap_closure`.
 //!

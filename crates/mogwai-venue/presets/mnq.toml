@@ -16,7 +16,8 @@ maintenance_per_contract = "1800"
 breach_action = "liquidate"
 # Fitted from the delivered July 2026 MNQ TBBO month (job
 # GLBX-20260805-HAPEWPABKG, 22 usable sessions, 29.6M parents over 34.7M
-# sided prints) under the frozen harness analysis/mnq_fit.py; the fit
+# sided prints) under the frozen harness of the retired Python fit
+# implementation; the fit
 # artifact analysis/mnq-fit.json carries every estimator definition,
 # solve record and per-target verdict. Estimator summaries: cadence is
 # pooled over inferred parents (contiguous timestamp-plus-side runs,
