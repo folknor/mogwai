@@ -269,16 +269,22 @@ impl AccountPolicy {
         // the one-hop limit recorded against account valuation.
         if !self.is_unpoliced()
             && let Some(policy_currency) = &self.currency
-            && let Some(other) = self
+        {
+            let mut others = self
                 .opening_balances
                 .keys()
-                .find(|currency| *currency != policy_currency)
-        {
-            return Err(format!(
-                "opening_balances.{other} is not the policy currency {policy_currency}; a policed \
-                 account may open only in the currency its thresholds are stated in, because \
-                 equity is computed in that currency alone and the venue has no exchange rate"
-            ));
+                .filter(|currency| *currency != policy_currency)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            others.sort_unstable();
+            if !others.is_empty() {
+                return Err(format!(
+                    "opening_balances currencies {} are not the policy currency {policy_currency}; a policed \
+                     account may open only in the currency its thresholds are stated in, because \
+                     equity is computed in that currency alone and the venue has no exchange rate",
+                    others.join(", ")
+                ));
+            }
         }
         Ok(())
     }
@@ -747,12 +753,15 @@ mod tests {
                     .collect();
             })
         };
-        let refusal = funded(vec![("USD", 50_000), ("EUR", 50_000)])
+        let refusal = funded(vec![("USD", 50_000), ("JPY", 50_000), ("EUR", 50_000)])
             .validate()
-            .expect_err("a policed account may not open in two currencies");
-        assert!(
-            refusal.contains("EUR") && refusal.contains("USD"),
-            "the refusal must name the offending currency and the policy one, got {refusal:?}"
+            .expect_err("a policed account may not open outside its policy currency");
+        assert_eq!(
+            refusal,
+            "opening_balances currencies EUR, JPY are not the policy currency USD; a policed \
+             account may open only in the currency its thresholds are stated in, because equity \
+             is computed in that currency alone and the venue has no exchange rate",
+            "the refusal must name every conflicting currency in stable order"
         );
         funded(vec![("USD", 50_000)])
             .validate()

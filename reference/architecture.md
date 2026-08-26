@@ -652,6 +652,39 @@ The queue and a process-wide permit bound parsed command work before it reaches
 the blocking pool or engine mutex, and a full bound is a visible
 `AdmissionRejected` the engine never sees.
 
+There are two output-byte admissions on the order path, they answer different
+questions, and only one of them is the malformed-versus-capacity contract.
+
+Engine-output admission is `worst_case_output_bytes` against the book shape,
+taken under the engine lock just before the engine is allowed to mutate. It is
+reached only after protocol validation has cleared the command, so a malformed
+group never reaches it and cannot be reported as venue capacity. That ordering
+is part of the refusal contract rather than an optimization, and it is now
+enforced rather than remembered: `boundary_outcome` mints a `BoundaryCleared`
+witness on the arm where its own validation found no fault, `ExecLanes::reserve`
+demands one, and the witness's field is private to the boundary module, so no
+future call site can size engine output for a command nobody validated. The
+sizing function still charges the actual member count rather than clamping it at
+`MAX_GROUP_ORDERS` - the count is exact, so the bound cannot undercount whatever
+it is handed, and a clamp would stop being an upper bound the moment an invalid
+command did get through. The ordering, not a clamp, is what keeps the number
+operationally small.
+
+Boundary-refusal admission is the other one, and it exists because the command
+is malformed. A refusal is a produced frame, so it is charged too: one
+`BOUNDARY_REFUSAL_BYTES` per frame the refusal will write, which for a group is
+one per member that arrived. That count is deliberately not clamped either -
+this path has no validated member count to use, since an over-long group is one
+of the things validation refuses, and clamping would reserve for fewer frames
+than the refusal writes. `MAX_INBOUND_MESSAGE_BYTES` is what bounds it: a 64 KiB
+decoded frame cannot carry an unbounded member list. If even that small
+reservation cannot be met, the consumer is answered a retryable
+`AdmissionRejected` rather than the malformed refusal, because the venue has no
+output budget in which to state the refusal. So capacity can preempt a malformed
+verdict here, and the verdict is deferred rather than lost - the retry that
+finds budget gets it. The stronger claim, that a malformed request is never
+reported as capacity, is true of engine-output admission and of that alone.
+
 That frame carries `retryable`, as data rather than as prose, and the reason is
 what happens to it downstream. A consumer's adapter must map it onto its own
 stack's event for the same subject, and nautilus's `OrderRejected` has one field

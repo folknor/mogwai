@@ -1,15 +1,108 @@
 # Bug-loop carry-forward
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
-its own round. Every brief carries the relevant slice forward. Current as of round 1 of
-`notes/bugs-protocol-cli.md`, whose section is directly below. The
-bugs-venue-serving, bugs-venue-mechanics and bugs-engine arcs beneath it are
-closed and judged sound; the close-pass records are at the bottom.
-`notes/bugs-protocol-cli.md` still carries findings 5 through 8 and a
-structural observation for round 2, and `notes/bugs-adapter.md` has not been
-worked at all, which is why this carry-forward stays live. The
-bugs-protocol-cli arc also owes a close pass over its own commits once its
-rounds are done.
+its own round. Every brief carries the relevant slice forward. Current through
+round 2 of the now-exhausted `notes/bugs-protocol-cli.md`, whose decisions are
+directly below. The bugs-venue-serving, bugs-venue-mechanics and bugs-engine
+arcs beneath it are closed and judged sound; the close-pass records are at the
+bottom. `notes/bugs-adapter.md` has not been worked at all, which is why this
+carry-forward stays live. The bugs-protocol-cli arc owes a close pass over its
+own three commits next, and the adapter arc after that.
+
+What the close pass should look hardest at, from this round: the round-2 fix
+pass closed a finding by writing a sentence into `reference/architecture.md`,
+and the sentence was false about the very path the finding named. Both halves of
+that are worth carrying into the adapter arc - a durable claim is owed the same
+verification as a code change, and closing a "the ordering happens to be safe"
+finding with prose closes nothing.
+
+## Machinery agents may build on and must not break, from bugs-protocol-cli round 2
+
+- **`http::BoundaryCleared` is a witness, and it is the enforcement of finding
+  7.** `boundary_outcome` returns `Result<BoundaryCleared, OrderOutcome>` and
+  mints the witness on the arm where its own validation found no fault;
+  `ExecLanes::reserve` demands one. The struct's field is private to `http`, so
+  the boundary is the only code in the crate that can produce it and no future
+  call site can size engine output for a command nobody validated. Round 2's
+  first attempt closed finding 7 by writing the ordering into
+  `reference/architecture.md`, and the sentence it wrote was false; a sentence
+  in a reference document is not enforcement, which is the general lesson.
+- **There are two output-byte admissions on the order path and they are not the
+  same contract.** Engine-output admission (`worst_case_output_bytes` under the
+  engine lock) is unreachable without the witness, so a malformed command never
+  reaches it and never reads as capacity. Boundary-refusal admission exists
+  *because* the command is malformed - a refusal is a produced frame and is
+  charged - so a boundary with no budget to state its refusal answers a
+  retryable `AdmissionRejected` instead, and the malformed verdict is deferred
+  to the retry rather than lost. Both are stated in `reference/architecture.md`
+  and the second is pinned by
+  `a_boundary_refusal_it_cannot_afford_is_answered_as_capacity`, bitten on all
+  three of its assertions.
+- **Neither reservation clamps its member count at `MAX_GROUP_ORDERS`, and the
+  reasons differ.** `worst_case_output_bytes` charges the actual count because a
+  clamp would stop being an upper bound the moment an invalid command did reach
+  the engine; the count is exact, so it can never undercount, and it is the
+  ordering rather than a clamp that keeps the number operationally small.
+  `boundary_frame_count` charges the actual count because it answers a command
+  that already failed validation - an over-long group is one of the things
+  validation fails it for - so a clamp there would reserve for fewer frames than
+  `boundary_refusal` writes. What bounds that one is
+  `MAX_INBOUND_MESSAGE_BYTES`, not the validator. The old claim on
+  `try_reserve_boundary_frames` that `MAX_GROUP_ORDERS` bounds it was false and
+  is corrected.
+
+## Decisions from bugs-protocol-cli round 2
+
+- **The per-order-type field table is refused as an implementation and built as
+  a test, and this is not to be relitigated.** The decisive argument is that the
+  cell finding 1 was missing - `Market` against `price` - inverts across
+  `stamp_market_price`, so a static per-type table would have to state one of
+  the two values and be wrong on the other side of the stamp. A table that could
+  not have held the defect it was proposed for is not the implementation's
+  shape. Nor are the protocol and engine matches two copies of one lattice: the
+  protocol owns the full wire shape including phase-specific pricing, trailing
+  offsets, expiry and linkage, while the engine deliberately repeats a narrower
+  defensive subset and then adds instrument and book rules, and the one recorded
+  drift between them (the post-only list) was closed by a shared predicate,
+  which is the shape already in use. What the proposal was right about is
+  exhaustiveness, and that half is built:
+  `every_order_type_owes_or_bars_each_price_field` states all nine rows of
+  required-or-forbidden over `price`, `trigger_price`, `trail_offset` and
+  `limit_offset` as data and asserts every cell in both directions, so a new
+  `OrderType` fails to compile until its row is written and a wrong row fails
+  the test. `the_market_price_cell_is_the_one_the_phase_decides` covers the cell
+  the table cannot hold. Both bitten by deleting the corresponding guard arm.
+- The claims in `docs/cli.md` about the launcher were re-verified against
+  `launch.rs` and `serve.rs` rather than taken from the fix pass: the owner
+  loop's `try_wait` on both arms with `reaped` read from the `exit` slot before
+  the teardown kill, `read_ready`'s `take` wrapping the raw stream rather than
+  the `BufReader`, `record_stderr_line`'s single elision marker, and
+  `arm_parent_death_signal` comparing a zero or negative `--launcher-pid`
+  against `getppid()` and bailing before any signal target exists. All hold.
+- `validate_modify_order`'s corrected doc was verified against the engine half
+  it defers to: `on_modify` is where a trigger amend is refused on anything but
+  an untriggered conditional, and where a price amend is refused on a market
+  remainder. The two-phase split the doc now describes is the code.
+- **A flat test count was a finding again, and the answer this time was
+  benign.** The round-2 fix pass reported a multi-currency regression added and
+  the gate count did not move, because its only test edit rewrote
+  `policed_opening_balances_may_not_leave_the_policy_currency` in place, from a
+  two-currency `contains` pair to a three-currency full-message equality. The
+  rewrite is a real strengthening and both of its halves bite - reversing the
+  sort fires the stable-order assertion, truncating the list to one fires the
+  names-every-currency one - but "added" was the wrong word for it. Read the
+  count after every fix pass; twice in this session the count was right and the
+  summary was not.
+- No `TAPE_PROTOCOL_VERSION` bump is owed, verified rather than assumed.
+  Nothing under `mogwai-data`, `analysis/` or the committed fingerprint changed,
+  and no edit in this round reaches a generator constant, an arrival clock, a
+  seed derivation, the fill band's draw or the tape origin. Order validation and
+  output admission are not the tape generation path.
+  `TAPE_PROTOCOL_VERSION` is 24.
+- Least examined by this round: whether a boundary refusal that loses its race
+  for budget is observable to a consumer as anything other than a retry - the
+  new regression drives `boundary_outcome` directly rather than a socket, and no
+  socket test starves the held budget at the boundary.
 
 ## Machinery agents may build on and must not break, from bugs-protocol-cli round 1
 

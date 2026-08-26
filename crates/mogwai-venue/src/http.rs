@@ -175,6 +175,24 @@ pub(crate) enum OrderOutcome {
     Diagnostic(VenueMessage),
 }
 
+/// Proof that a command has been through `boundary_error` and was found
+/// well-formed. `ExecLanes::reserve` demands one, which is how the "validate
+/// before you size engine output" ordering is enforced rather than merely
+/// documented.
+///
+/// The field is private to this module, so `boundary_outcome` below is the only
+/// code in the crate that can mint one - it does so on the arm where its own
+/// validation returned no reason. A future call site that wants to reserve
+/// engine output has to obtain the witness, and the only way to obtain it is to
+/// have run the validation. This matters because `worst_case_output_bytes`
+/// sizes a group from its actual member count with no reference to
+/// `MAX_GROUP_ORDERS`: the count is exact for whatever it is handed, so the
+/// reservation can never undercount, but it is only operationally small for a
+/// group validation has already bounded. Reserve first and a 300-member group
+/// earns a multi-megabyte reservation and, on failing it, a retryable
+/// `AdmissionRejected` - a capacity story for what is a malformed request.
+pub(crate) struct BoundaryCleared(());
+
 /// Name what a refusal refused, so the consumer can translate it per command -
 /// a refused cancel must not read as a rejected order.
 pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
@@ -459,7 +477,17 @@ fn refuse_all(
 
 /// How many boundary refusal frames `cmd` can produce, which is what its
 /// reservation is sized from. One for everything except a group, which owes one
-/// per member and is bounded by `MAX_GROUP_ORDERS`.
+/// per member.
+///
+/// The count is the members that arrived, deliberately, and it is not bounded
+/// by `MAX_GROUP_ORDERS`: this function's whole purpose is to size the refusal
+/// of a command that has already failed validation, and an over-long group is
+/// one of the things validation fails it for. The frames owed are the members
+/// present, because every one of them is answered; clamping at
+/// `MAX_GROUP_ORDERS` would reserve for fewer frames than `boundary_refusal`
+/// then writes. What keeps the count finite is `MAX_INBOUND_MESSAGE_BYTES` -
+/// a 64 KiB inbound frame cannot carry an unbounded member list - so the worst
+/// reachable reservation here is bounded by the decoder, not by the validator.
 ///
 /// The floor of one is the empty group, and it is a real wire shape rather than
 /// a defensive clamp: `{"type":"SubmitOrderGroup","orders":[]}` decodes, is
@@ -497,13 +525,36 @@ fn boundary_frame_count(cmd: &Command) -> NonZeroUsize {
 ///    never asked, so nothing mutated: no venue order id burned, no order
 ///    resting.
 ///
-/// The websocket order carrier uses this one gate for every command. `None`
-/// means the command cleared the protocol boundary.
-fn boundary_outcome(order_cmd: &Command, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
-    let reason = boundary_error(order_cmd)?;
+/// The websocket order carrier uses this one gate for every command. `Ok` is
+/// the witness that the command cleared the protocol boundary, and it is the
+/// only one minted anywhere in the crate.
+///
+/// One case here is not a malformed verdict at all: a refusal is a produced
+/// frame, so it is charged against the same held budget, and a boundary that
+/// cannot afford to state its refusal answers a retryable `AdmissionRejected`
+/// instead. Capacity therefore can preempt a malformed verdict, on this path
+/// and only on this path - the engine-output reservation further down is
+/// reached only through the witness, so it never sees a malformed command at
+/// all. The refusal is not lost, it is deferred: the retry that finds budget
+/// gets it. `reference/architecture.md` states the two admissions apart for
+/// the same reason.
+#[expect(
+    clippy::result_large_err,
+    reason = "the Err is the outcome this command already came to, moved straight to the caller's \
+              own return; boxing it would allocate on the refusal path to shrink a value that is \
+              returned exactly once"
+)]
+fn boundary_outcome(
+    order_cmd: &Command,
+    lanes: &ExecLanes,
+    ts: u64,
+) -> Result<BoundaryCleared, OrderOutcome> {
+    let Some(reason) = boundary_error(order_cmd) else {
+        return Ok(BoundaryCleared(()));
+    };
     let Some(reservation) = lanes.try_reserve_boundary_frames(boundary_frame_count(order_cmd))
     else {
-        return Some(OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
+        return Err(OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
             subject: admission_subject(order_cmd),
             reason: "execution output admission budget exhausted".into(),
             retryable: true,
@@ -515,9 +566,9 @@ fn boundary_outcome(order_cmd: &Command, lanes: &ExecLanes, ts: u64) -> Option<O
         // The reservation is not needed after all: nothing goes on the
         // held lane, so drop it and give the bytes straight back.
         drop(reservation);
-        return Some(OrderOutcome::Diagnostic(events.remove(0)));
+        return Err(OrderOutcome::Diagnostic(events.remove(0)));
     }
-    Some(OrderOutcome::Refused {
+    Err(OrderOutcome::Refused {
         events,
         reservation,
     })
@@ -536,9 +587,13 @@ pub(crate) async fn process_order_cmd(
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
     let ts = sim_now_ns(sim);
-    if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
-        return outcome;
-    }
+    // The witness travels the length of this function to the engine-output
+    // reservation below. It is the whole enforcement of step 1 preceding step
+    // 4: nothing else in the crate can produce a `BoundaryCleared`.
+    let cleared = match boundary_outcome(&order_cmd, lanes, ts) {
+        Ok(cleared) => cleared,
+        Err(outcome) => return outcome,
+    };
     // A submit names its own symbol on the wire; it is checked against the
     // river this socket bound, never overridden by it. Without the check a
     // consumer could bind one river and trade another.
@@ -782,7 +837,7 @@ pub(crate) async fn process_order_cmd(
     }
     let mut engine = account_state.engine.lock().await;
     let shape = engine.book_shape();
-    let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
+    let Some(reservation) = lanes.reserve(&order_cmd, &shape, &cleared) else {
         // The engine has NOT been asked to process anything, so nothing
         // mutated: the refusal is the whole effect of this command.
         return OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
@@ -3630,5 +3685,80 @@ mod calendar_tests {
             boundary_error(&empty).is_some(),
             "an empty group is refused at the boundary"
         );
+    }
+
+    /// A refusal is a produced frame, so the boundary charges for it - and a
+    /// boundary that cannot afford to state its refusal answers a retryable
+    /// `AdmissionRejected` instead of the malformed verdict.
+    ///
+    /// Recorded as a behaviour because a durable document asserted the opposite:
+    /// that malformed input never reaches an output-byte reservation and can
+    /// never be reported as venue capacity. That is true of the engine-output
+    /// reservation, which the `BoundaryCleared` witness now makes unreachable
+    /// without validation, and false of this one, which exists only because the
+    /// command is malformed. The refusal is deferred, not lost, so `retryable`
+    /// is the honest half of the frame and is asserted here.
+    #[test]
+    fn a_boundary_refusal_it_cannot_afford_is_answered_as_capacity() {
+        let malformed = Command::SubmitOrderGroup {
+            orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["OUTSIDER"])],
+        };
+        assert!(
+            boundary_error(&malformed).is_some(),
+            "the fixture must be malformed, or this test proves nothing about refusals"
+        );
+        assert_eq!(
+            boundary_frame_count(&malformed).get(),
+            2,
+            "two members owe two refusal frames, which is what the budget below is set against"
+        );
+
+        // Room for exactly one refusal frame, so a two-member refusal cannot be
+        // afforded and a one-member one can.
+        let starved = crate::admission::AdmissionLimits {
+            held_budget_bytes: mogwai_protocol::sizing::BOUNDARY_REFUSAL_BYTES,
+            ..crate::admission::AdmissionLimits::default()
+        };
+        let (lanes, _rx) = ExecLanes::detached_with(starved);
+        match boundary_outcome(&malformed, &lanes, 11) {
+            Err(OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
+                retryable, ..
+            })) => assert!(
+                retryable,
+                "the malformed verdict is deferred until there is budget to state it, so the \
+                 consumer must be told to retry"
+            ),
+            other => panic!(
+                "a refusal the boundary cannot reserve for must be answered as capacity, got {}",
+                outcome_name(&other)
+            ),
+        }
+
+        // The same command against a budget that fits it: the malformed verdict
+        // itself, one frame per member. Without this half the assertion above
+        // passes for a boundary that answered `AdmissionRejected` always.
+        let (roomy, _rx) = ExecLanes::detached_with(crate::admission::AdmissionLimits::default());
+        match boundary_outcome(&malformed, &roomy, 11) {
+            Err(OrderOutcome::Refused { events, .. }) => assert_eq!(
+                events.len(),
+                2,
+                "with budget, every member is answered its own refusal"
+            ),
+            other => panic!(
+                "a malformed group the boundary can afford must be refused as malformed, got {}",
+                outcome_name(&other)
+            ),
+        }
+    }
+
+    /// Name an outcome for a panic message without cloning its frames.
+    fn outcome_name(outcome: &Result<BoundaryCleared, OrderOutcome>) -> &'static str {
+        match outcome {
+            Ok(_) => "cleared",
+            Err(OrderOutcome::Produced { .. }) => "Produced",
+            Err(OrderOutcome::Refused { .. }) => "Refused",
+            Err(OrderOutcome::NotAdmitted(_)) => "NotAdmitted",
+            Err(OrderOutcome::Diagnostic(_)) => "Diagnostic",
+        }
     }
 }

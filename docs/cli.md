@@ -224,6 +224,23 @@ the launcher and not the venue. Teardown signals the group explicitly and
 `PR_SET_PDEATHSIG` covers the launcher dying outright, so nothing is left
 relying on that path.
 
+The launcher's less visible bounds are deliberate too. Its owner loop checks
+for child exit on both the shutdown and polling paths and records whether the
+child was already reaped before it attempts teardown, so a naturally completed
+run cannot be turned into a false teardown failure by a second kill. Readiness
+is capped at the child stream before buffering, so an overlong first line
+cannot make the parser's refusal merely post-hoc. Captured stderr keeps its
+head and tail under one fixed bound, inserting one elision marker when the
+middle is first discarded; the boot error at the head therefore survives a
+long backtrace. Timeout and launcher-thread failure both flow through the same
+unconditional kill and reap before `launch` returns an error.
+
+`--launcher-pid` is parsed as an `i32` because that is the operating system pid
+type, while the shipped launcher can only render its own non-negative process
+id. A manually supplied zero or negative value is compared with `getppid()` and
+refused before any signal target is used, so it cannot acquire the special
+process-group meaning a negative argument would have to `kill`.
+
 The venue otherwise inherits the launcher's environment. `LaunchSpec::env` sets
 variables on top of it, and the one that usually wants setting is `RUST_LOG`: the
 venue's `mogwai=info` default applies only when `RUST_LOG` is unset, so a caller

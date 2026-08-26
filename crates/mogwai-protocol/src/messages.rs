@@ -1627,10 +1627,14 @@ impl QueryKind {
     }
 }
 
-/// API-boundary guard for a `Command::ModifyOrder`'s `price`/`quantity`
-/// pair, mirroring `validate_submit_order` in style. At least one of the two
-/// must be present - both absent decodes as a no-op amend that changes
-/// nothing - and whichever is present must be strictly positive.
+/// API-boundary guard for a `Command::ModifyOrder`'s `price`, `quantity` and
+/// `trigger_price` fields, mirroring `validate_submit_order` in style. At least
+/// one of the three must be present - all absent decodes as a no-op amend that
+/// changes nothing - and whichever is present must be strictly positive.
+///
+/// This is the phase-independent wire-shape gate. Whether a stated field is
+/// legal for the resting order's type is decided by the engine, which owns the
+/// order being amended and its instrument-aware rules.
 pub fn validate_modify_order(
     price: Option<Decimal>,
     quantity: Option<Decimal>,
@@ -3192,5 +3196,156 @@ mod tests {
             panic!("wrong frame shape")
         };
         assert_eq!(client_order_id.len(), MAX_ECHOED_ID_LEN);
+    }
+
+    /// Whether a price-shaped field is owed or barred for a given order type.
+    /// Every cell of the lattice below is one of the two - none of the four
+    /// fields is genuinely optional on any type - which is what makes an
+    /// exhaustive table possible in the first place.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Cell {
+        Required,
+        Forbidden,
+    }
+
+    /// The lattice `validate_submit_order`'s eighteen guard arms compute, stated
+    /// as data: for each order type, whether `price`, `trigger_price`,
+    /// `trail_offset` and `limit_offset` are owed or barred.
+    ///
+    /// Written out here rather than folded into the validator, which is the
+    /// standing ruling on the structural proposal from the protocol/CLI bug
+    /// hunt. The rules that are not cells - post-only, the conditional-versus-IOC
+    /// conflict, `expire_time` against the time in force, the linkage walk, and
+    /// the market-price rule that inverts across `SubmitPhase` - cannot be
+    /// expressed here, and the phase-dependent one is exactly the cell that was
+    /// missing when this hunt started. A table that could not have held the
+    /// defect it was proposed for is not the implementation's shape; it is a
+    /// good test, because a new `OrderType` variant fails to compile until its
+    /// row is stated.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "one row per order type is the whole point: two types agreeing on all four \
+                  fields today is data, and merging their arms would hide the day one of them \
+                  stops agreeing"
+    )]
+    const fn lattice(order_type: OrderType) -> [Cell; 4] {
+        use Cell::{Forbidden as No, Required as Yes};
+        // [price, trigger_price, trail_offset, limit_offset]
+        match order_type {
+            OrderType::Market => [No, No, No, No],
+            OrderType::Limit => [Yes, No, No, No],
+            OrderType::StopMarket => [No, Yes, No, No],
+            OrderType::StopLimit => [Yes, Yes, No, No],
+            OrderType::TrailingStopMarket => [No, Yes, Yes, No],
+            OrderType::MarketIfTouched => [No, Yes, No, No],
+            OrderType::LimitIfTouched => [Yes, Yes, No, No],
+            OrderType::MarketToLimit => [Yes, No, No, No],
+            OrderType::TrailingStopLimit => [No, Yes, Yes, Yes],
+        }
+    }
+
+    const EVERY_ORDER_TYPE: [OrderType; 9] = [
+        OrderType::Market,
+        OrderType::Limit,
+        OrderType::StopMarket,
+        OrderType::StopLimit,
+        OrderType::TrailingStopMarket,
+        OrderType::MarketIfTouched,
+        OrderType::LimitIfTouched,
+        OrderType::MarketToLimit,
+        OrderType::TrailingStopLimit,
+    ];
+
+    /// The order this type's row says is well formed, before any field is
+    /// perturbed.
+    fn canonical(order_type: OrderType) -> SubmitOrder {
+        let [price, trigger, trail, limit] = lattice(order_type);
+        let owed = |cell: Cell| (cell == Cell::Required).then_some(Decimal::from(100));
+        SubmitOrder {
+            client_order_id: "LATTICE".into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Buy,
+            order_type,
+            quantity: Decimal::ONE,
+            price: owed(price),
+            trigger_price: owed(trigger),
+            trail_offset: owed(trail),
+            limit_offset: owed(limit),
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            link: None,
+        }
+    }
+
+    /// Every cell of the price-field lattice, asserted in both directions: the
+    /// canonical order for each type validates, and flipping any one field to
+    /// the opposite of what its row states is refused.
+    ///
+    /// This is the gate the eighteen ordered guard arms did not have. Finding 1
+    /// of the protocol/CLI hunt was a cell no arm covered, falling through to
+    /// `Ok(())`, and reading eighteen guards to compute their complement is not
+    /// something anyone does reliably. Adding an order type without covering it
+    /// now fails to compile at `lattice`, and covering it wrongly fails here.
+    #[test]
+    fn every_order_type_owes_or_bars_each_price_field() {
+        for order_type in EVERY_ORDER_TYPE {
+            let base = canonical(order_type);
+            assert_eq!(
+                validate_submit_order(&base, SubmitPhase::PreStamp),
+                Ok(()),
+                "the canonical {order_type:?} must validate, or the row below tests nothing"
+            );
+
+            let row = lattice(order_type);
+            for (index, cell) in row.into_iter().enumerate() {
+                let mut flipped = base.clone();
+                // Present becomes absent for a required field, absent becomes
+                // present for a forbidden one. Either way the order now
+                // contradicts exactly one cell of its own row.
+                let opposite = (cell == Cell::Forbidden).then_some(Decimal::from(100));
+                match index {
+                    0 => flipped.price = opposite,
+                    1 => flipped.trigger_price = opposite,
+                    2 => flipped.trail_offset = opposite,
+                    _ => flipped.limit_offset = opposite,
+                }
+                let field = ["price", "trigger_price", "trail_offset", "limit_offset"][index];
+                assert!(
+                    validate_submit_order(&flipped, SubmitPhase::PreStamp).is_err(),
+                    "{order_type:?} states {field} {cell:?}, so the opposite must be refused"
+                );
+            }
+        }
+    }
+
+    /// The one cell that inverts across the venue's price stamp, and therefore
+    /// the one the table above deliberately cannot hold.
+    ///
+    /// `Market` bars a price on the wire and owes one after `stamp_market_price`
+    /// has put the venue's own reading on it. A static per-type table would have
+    /// to state one of the two and would be wrong on the other side of the
+    /// stamp, which is why the phase is a required argument instead.
+    #[test]
+    fn the_market_price_cell_is_the_one_the_phase_decides() {
+        let bare = canonical(OrderType::Market);
+        let mut stamped = bare.clone();
+        stamped.price = Some(Decimal::from(100));
+
+        assert_eq!(validate_submit_order(&bare, SubmitPhase::PreStamp), Ok(()));
+        assert_eq!(
+            validate_submit_order(&stamped, SubmitPhase::PreStamp),
+            Err("Market order must not carry a price")
+        );
+        assert_eq!(
+            validate_submit_order(&stamped, SubmitPhase::PostStamp),
+            Ok(())
+        );
+        assert_eq!(
+            validate_submit_order(&bare, SubmitPhase::PostStamp),
+            Err("Market order must carry the price the venue stamped")
+        );
     }
 }

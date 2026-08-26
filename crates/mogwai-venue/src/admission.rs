@@ -574,7 +574,24 @@ impl ExecLanes {
 
     /// Reserve worst-case output for `cmd` against `shape`. `None` means the
     /// caller must refuse without letting the engine see the command.
-    pub(crate) fn reserve(&self, cmd: &Command, shape: &BookShape) -> Option<Reservation> {
+    ///
+    /// The `BoundaryCleared` witness is the enforcement of an ordering that
+    /// used to be an unwritten property of one call site.
+    /// `worst_case_output_bytes` sizes a group from its actual member count and
+    /// never consults `MAX_GROUP_ORDERS`, which is correct - the count is exact,
+    /// so the bound cannot undercount whatever it is handed - but it is only an
+    /// operationally small number for a group protocol validation has already
+    /// bounded. Reserving before validating would charge an over-long group
+    /// megabytes and, on the failure, answer a retryable `AdmissionRejected`:
+    /// a capacity story told about a malformed request, which is exactly the
+    /// conflation `OrderOutcome::Diagnostic` exists to avoid. Requiring the
+    /// witness makes the ordering unskippable rather than remembered.
+    pub(crate) fn reserve(
+        &self,
+        cmd: &Command,
+        shape: &BookShape,
+        _cleared: &crate::http::BoundaryCleared,
+    ) -> Option<Reservation> {
         self.held_budget
             .try_reserve(worst_case_output_bytes(cmd, shape))
     }
@@ -599,10 +616,15 @@ impl ExecLanes {
     /// no `AccountState`. Used by the pre-engine refusal paths, which have no
     /// `BookShape` in hand.
     ///
-    /// A `SubmitOrderGroup` is refused
-    /// whole, so its refusal is one frame per member rather than one frame -
-    /// and the count is bounded by `MAX_GROUP_ORDERS`, which is what keeps this
-    /// a reservation rather than an unbounded write.
+    /// A `SubmitOrderGroup` is refused whole, so its refusal is one frame per
+    /// member rather than one frame - counted off the members that arrived, not
+    /// clamped at `MAX_GROUP_ORDERS`. This path is reached precisely because
+    /// the command failed validation, and an over-long group is one of the
+    /// things it fails for, so there is no validated count available here and a
+    /// clamp would reserve for fewer frames than the refusal writes. What keeps
+    /// this a reservation rather than an unbounded write is
+    /// `MAX_INBOUND_MESSAGE_BYTES`: the members are bounded by what fits in one
+    /// 64 KiB decoded frame.
     ///
     /// `NonZeroUsize` rather than `usize` with a clamp inside. Every refusal
     /// produces at least one frame, so a zero-frame reservation is not a small
