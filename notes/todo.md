@@ -61,11 +61,7 @@ what unblocks what.
    ruling 2026-08-26: the standing chart gate covers tape generation, and
    the crossing moved no tape byte. The calibration landing does owe one,
    because its preset constants move generated quote bytes.
-2. **Tests and tooling**: the gate-ceiling work - declared durations,
-   reconnect-ladder spacing as a parameter, and whatever turns
-   `test_threads = 16` red. Force-multiplying rather than product work;
-   interleave it while slate 1 waits on a gate.
-3. **The adapter and consumer surface**: the perpetual funding publisher is
+2. **The adapter and consumer surface**: the perpetual funding publisher is
    the buildable piece, a test pinning the `MarketToLimit` refusal makes that
    gap loud, `DuplicateNextFill` waits on the next pin. The unsent broadarrow
    message is pulled out of this ranking entirely: write it immediately, it
@@ -516,56 +512,12 @@ instrument class is not a finding and does not need re-reporting.
 
 ## Tests and tooling
 
-- **Triage every test for parallel safety, and kill every fixed duration and
-  wait.** `[test.profiles.gate]` and `[test.profiles.dev]` both sit at
-  `test_threads = 8`, a measured compromise rather than a resolution: at 16 the
-  run goes red as a wrong answer rather than a watchdog timeout, so the ceiling
-  is set by our least robust test rather than by the machine.
-
-  The triage is done and its result is the load-bearing part, because the raw
-  count was hiding the shape. The often-quoted "73 sleep sites" is a count over
-  the whole of `crates/`, and about forty-four are production pacing - the
-  launcher's owner loop, the adapter clock and reconnect ladder, the boat and
-  sweeper cadences - which price no test. The test and test-support sites number
-  thirty-one: sixteen under `mogwai-cli/tests`, fifteen under
-  `mogwai-adapter/tests`. Of those:
-
-  - **Eighteen are poll intervals inside a deadline-bounded loop.** The wanted
-    shape already: the loop ends on a condition, the deadline is the failure
-    path, and the sleep only decides how often the condition is asked about. Not
-    a gate cost. Leave them.
-  - **Six are negative-observation windows** - the adapter's blackout, stranger
-    socket and dial-cap watches, `havoc.rs`'s "the data client must never ship
-    divergences" window, its bound-to-another-run disconnect watch, and
-    `serving.rs`'s settle before reading the absence of a market-reading warn.
-    The assertion is that something does not happen for a span, so the duration
-    is the subject rather than a bet on it. Shortening one weakens the test.
-    Leave them, and do not let a later sweep mistake them for convertible.
-  - **Three are cases where the duration is the thing under test.**
-  - **Two were converted** and the convertible class is now empty.
-  - **Two are blocked**, on a decision or a missing seam: `serving.rs`'s
-    market-reading gate spaces attempts 500 ms apart and that spacing is the
-    whole flake margin of the assertion below it, so moving it changes the test's
-    statistics; and `data_client_transport.rs`'s segmented-head test sleeps 20 ms
-    so the reader observes two reads rather than one, where the condition is "the
-    reader has consumed the first segment" and no seam exposes it.
-
-  So the gate's ceiling does not come from sleeps. The concentration the 164s
-  profile found is declared `--duration` runs and reconnect ladders spending
-  their attempts - durations a test asked the venue for. Aim there: a lifecycle
-  test's declared duration, and whether the ladder's attempt spacing can be a
-  parameter the test passes.
-
-  One number in this entry is unsupported and should be re-run rather than
-  inherited: the claim that a serial lane for the socket-backed tests floors at
-  74s against the flat setting's 53s appears nowhere in `brokkr.toml`. The file
-  records the serial-versus-8 story and the cliff at 16; the 74/53 pair does not
-  appear. The other figures - 164s, 1,608 tests, the top-20 concentration - are
-  in the gate profile's own comment.
-
-  Anything called settled here needs repeated runs: `test_threads = 8` went red
-  after three green runs at 8, having already gone red at 16, and three passes
-  are not evidence about an intermittent race.
+- **Two timing sites remain deliberately blocked.** `serving.rs`'s
+  market-reading gate spaces attempts 500 ms apart, and that spacing is the
+  assertion's measured flake margin. `data_client_transport.rs`'s segmented-head
+  test waits 20 ms for the reader to consume its first segment, and no seam
+  exposes that condition. Neither duration can move without changing the test or
+  adding the missing seam.
 
 - **A budget-carrying test cannot be routed into the `timing` sweep
   automatically, and the fix is a brokkr-level feature.** `brokkr.toml` states

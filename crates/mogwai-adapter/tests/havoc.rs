@@ -770,7 +770,29 @@ async fn a_close_after_trades_leg_does_not_replay_its_batch_on_the_reconnect() {
         trades.push(trade_json(20, "101.00"));
     }
     let base_url = bound_stub(Arc::clone(&state)).await;
-    let (_client, mut rx) = connect_data_client(base_url, &state, None).await;
+    // The redial below is setup, not the subject, so its spacing is passed
+    // rather than inherited: `ConnHavoc::default()` spaces the first retry a
+    // full second apart and this test pays that second for nothing. A flat
+    // 20 ms rung - initial and max equal, so the default factor of 2.0 never
+    // compounds and the uncapped attempt count is irrelevant against a stub
+    // that accepts the second upgrade - leaves the handshake wait below two
+    // orders of magnitude of headroom against its own three-second deadline.
+    //
+    // What the shorter rung cannot do is move the assertion. The 400 ms
+    // negative-observation window opens only after the second handshake is a
+    // fact, so a replay is measured from the reconnect and not from the close;
+    // the window's own margin is untouched by how long the client waited to
+    // dial.
+    let (_client, mut rx) = connect_data_client(
+        base_url,
+        &state,
+        Some(conn_havoc(ConnHavoc {
+            reconnect_delay_initial_ms: 20,
+            reconnect_delay_max_ms: 20,
+            ..ConnHavoc::default()
+        })),
+    )
+    .await;
 
     let first = next_trade(&mut rx).await;
     let second = next_trade(&mut rx).await;

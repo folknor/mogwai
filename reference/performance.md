@@ -1675,3 +1675,36 @@ arrives with a release-checkable reconstruction. Whatever is ever built must
 preserve the rounds 1 and 2 invariants: the incremental cache and a fresh
 fold stay in exact agreement, and `margin_equity_sell_holds` counts a
 price-less resting sell for quantity while contributing no price.
+
+## 2026-08-26 gate ceiling
+
+Host `plantasjen`, debug test profile, warm build, 1,993 executed test pairs in
+the `gate` profile - a pair is one test in one sweep, and this profile runs the
+`workspace` and `instrumented` sweeps, so the figure is not comparable to a
+count of distinct test names. The serial gate took 180.8 s. At eight threads it took
+80.4 s. Ten probe runs at sixteen threads reported no failure and took 78.9 to
+82.8 s each. Ten more runs on the final tree also reported no failure: eight
+took 78.9 to 81.9 s, one took 90.4 s and one host-contended run took 194.1 s.
+The acceptance evidence is no failure in the final ten, not proof that the old
+intermittent wrong answer cannot recur; under independent runs it excludes a
+per-run failure rate of 26 percent or worse at 95 percent confidence and
+nothing weaker.
+
+The three `bounded-run.toml` consumers cost 6.627 s summed at speed 1, about
+8.2 percent of the eight-thread gate wall. A speed-2 probe reduced their
+focused walls from 2.209 s each to about 1.42 s across twenty repeats of each
+caller, but the warm gate remained 80.5 s. The fixture probe was therefore
+reverted: a family-relative saving that does not move the gate wall does not
+pay for the thinner liveness margin. One caveat on that probe's relaunch
+evidence: `watch_a_bounded_run` keeps discarded venues in a private field and
+reports nothing on success, so a relaunch is invisible to a passing run and no
+observable in the tree today distinguishes twenty clean repeats from twenty
+that each relaunched. Any future attempt at this fixture owes that observable
+before it can claim relaunch churn did not appear.
+
+The socket-test census found one forced redial still using the default
+one-second reconnect rung. Passing a flat 20 ms rung to
+`a_close_after_trades_leg_does_not_replay_its_batch_on_the_reconnect` reduced
+its focused wall from 1.413 s to about 0.65 s across twenty green repeats. Its
+400 ms negative-observation window begins only after the second handshake, so
+the conversion changes setup cost without weakening what the test observes.

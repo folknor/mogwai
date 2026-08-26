@@ -128,6 +128,23 @@ A dozen non-biting tests among what the arcs paid for.
   can read, and where the interval itself is the race, make the interval a
   parameter and pass one the test cannot lose to. The launcher's owner loop is
   the worked example: `LaunchedVenue::polls` plus `launch_with_poll`.
+- Not every wait in a test is wall fat, and a sweep aimed at the gate wall is
+  exactly where the difference gets lost. The 2026-08 parallel-safety triage
+  classified every test-side wait in `crates/` and only one class was
+  convertible, which it then emptied. What remains, and what a later sweep must
+  leave alone: a poll interval inside a deadline-bounded loop, where the loop
+  ends on a condition and the interval only decides how often it is asked; a
+  negative-observation window, where the assertion is that something does not
+  happen for a span, so shortening the span weakens the test; and a case where
+  the duration is itself the thing under test. What is convertible is spacing a
+  test pays for and never observes - reconnect-ladder rungs are the worked
+  example, passed as a `ConnHavoc` through a client config's `havoc` field
+  rather than inherited from `ConnHavoc::default()`, with the doc comment
+  deriving the assertion's remaining margin from the rung arithmetic. The two
+  shapes can sit in one test: the adapter's close-after-trades replay watch in
+  `havoc.rs` passes a 20 ms rung for the setup redial and keeps its 400 ms
+  silence window untouched, because that window opens only after the redial is
+  established.
 - The lane and profile splits bite, and they are two splits, not one. `brokkr
   check` runs tests in dev and multi-threaded; `brokkr test` runs them at
   `--test-threads=1`, dev by default with `--release` on demand. A test

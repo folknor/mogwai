@@ -199,10 +199,10 @@ debug = true
 [test.profiles.dev]
 description = "The edit loop: both dev sweeps, no release build"
 sweeps = ["workspace", "instrumented"]
-# The same 8 the gate runs, and the safer of the two lanes to run it in: this
-# lane never includes the ignored socket and lifecycle tests, which are where
-# the measured cliff at 16 lived.
-test_threads = 8
+# This lane never included the ignored socket and lifecycle tests where the old
+# 16-thread cliff lived, so 16 here is profile consistency rather than an
+# independent ceiling measurement.
+test_threads = 16
 
 # The wall-clock lane, run deliberately: `brokkr check --profile timing`. It is
 # not part of the gate and is not meant to be - `reference/performance.md` keeps
@@ -292,17 +292,23 @@ include_ignored = true
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace", "instrumented"]
 include_ignored = true
-# Serial, this gate took 3m01s: 164s of test execution, so the wall was the sum
-# of 1,608 tests rather than the longest of them. That is not a compute bill -
-# the top 20 tests are 54% of it and most of them are waiting, on a declared
-# `--duration` or a reconnect ladder. At 8 the gate runs in about a minute with
-# per-test times unmoved (the slowest tape walk went 7.622s to 7.768s), which is
-# what says the tests are not starving each other.
+# Measured 2026-08-26 on 1,993 executed test pairs - a pair is one test in one
+# sweep and this profile runs both sweeps above, so the figure is not a count of
+# distinct test names: 3m00.8s serial, 1m20.4s at
+# 8, and 1m18.9s to 1m22.8s at 16. The current top 20 account for about half
+# the serial test execution and are still dominated by generator walks and
+# deliberate wall waits. The old 16-thread wrong answer did not recur in ten
+# probe runs or ten more runs on the final tree. The final ten included eight
+# walls from 1m18.9s to 1m21.9s, one at 1m30.4s and one host-contended 3m14.1s
+# run. Ten independent greens exclude only a per-run failure rate of 26% or
+# worse at 95% confidence; they do not prove the lane cannot flake.
 #
-# 16 is past the cliff. The one test that could not take parallelism at all is
-# now `#[ignore]`d and skipped below; the rest of that story, and the work that
-# would let this go higher, is G1 in `notes/bugs.md`.
-test_threads = 8
+# The three bounded-run tests cost 6.627s summed at speed 1, about 8.2% of the
+# 8-thread gate wall. Speed 2 cut their focused walls to about 1.42s each but
+# left the warm gate at 1m20.5s versus 1m20.4s before, so the fixture change was
+# reverted. One forced-redial test now passes a 20ms rung and fell from 1.413s
+# to about 0.65s without changing its 400ms negative-observation window.
+test_threads = 16
 skip = [
     # The declared-deadline family is gone from this list, and the note stays
     # because the shape recurs. Two entries sat here - the completion gates
