@@ -3746,6 +3746,7 @@ pub(crate) fn account_changed(out: &[VenueMessage]) -> bool {
         | VenueMessage::FillSnapshot(_)
         | VenueMessage::Trade(_)
         | VenueMessage::Quote(_)
+        | VenueMessage::FundingRate { .. }
         | VenueMessage::Heartbeat { .. }
         | VenueMessage::FeedLagged { .. }
         | VenueMessage::HavocDiagnostic { .. }

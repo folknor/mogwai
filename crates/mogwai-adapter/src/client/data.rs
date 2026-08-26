@@ -32,9 +32,10 @@ use nautilus_common::{
         data::{
             BarsResponse, DataResponse, InstrumentResponse, InstrumentsResponse, QuotesResponse,
             RequestBars, RequestInstrument, RequestInstruments, RequestQuotes, RequestTrades,
-            SubscribeBars, SubscribeInstrument, SubscribeInstruments, SubscribeQuotes,
-            SubscribeTrades, TradesResponse, UnsubscribeBars, UnsubscribeInstrument,
-            UnsubscribeInstruments, UnsubscribeQuotes, UnsubscribeTrades,
+            SubscribeBars, SubscribeFundingRates, SubscribeInstrument, SubscribeInstruments,
+            SubscribeQuotes, SubscribeTrades, TradesResponse, UnsubscribeBars,
+            UnsubscribeFundingRates, UnsubscribeInstrument, UnsubscribeInstruments,
+            UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
 };
@@ -255,12 +256,33 @@ impl MogwaiDataClient {
         Ok(())
     }
 
+    fn subscribe_funding_inner(&self, symbol: &str) -> anyhow::Result<()> {
+        let _delivery = self
+            .quote_delivery
+            .lock()
+            .map_err(|_| anyhow::anyhow!("market delivery mutex poisoned"))?;
+        self.subscribe_symbol(symbol.into(), SubKind::Funding)?;
+        let cached = self
+            .subs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?
+            .get(symbol)
+            .and_then(|state| state.cached_funding.clone());
+        if let Some(cached) = cached
+            && let Some(def) = instrument_def(&self.instruments, symbol)
+        {
+            emit_funding(&cached, &self.sink()?, &def, self.sim);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     /// The mirror of `subscribe_symbol`, and equally local: dropping the last
     /// subscriber of every kind stops forwarding ticks. A row that has cached
-    /// a quote remains resident so a later quote subscription can replay the
-    /// current book; an as-yet uncached row is retired. Nothing is sent to the
-    /// venue, which keeps pushing the run's one tape either way.
+    /// a quote or a funding rate remains resident so a later subscription of
+    /// that kind can replay the current book or the standing rate; a row that
+    /// has cached neither is retired. Nothing is sent to the venue, which keeps
+    /// pushing the run's one tape either way.
     fn unsubscribe_symbol(&mut self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
         let mut subs = self
             .subs
@@ -268,7 +290,8 @@ impl MogwaiDataClient {
             .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
         if let Some(state) = subs.get_mut(&symbol) {
             state.decrement(kind);
-            if state.total() == 0 && state.cached_quote.is_none() {
+            if state.total() == 0 && state.cached_quote.is_none() && state.cached_funding.is_none()
+            {
                 subs.remove(&symbol);
             }
         }
@@ -713,6 +736,10 @@ impl DataClient for MogwaiDataClient {
         self.subscribe_quotes_inner(&symbol, || {})
     }
 
+    fn subscribe_funding_rates(&mut self, cmd: SubscribeFundingRates) -> anyhow::Result<()> {
+        self.subscribe_funding_inner(&symbol_from_instrument(cmd.instrument_id))
+    }
+
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.instrument_id);
         self.subscribe_symbol(symbol, SubKind::Trades)
@@ -764,6 +791,10 @@ impl DataClient for MogwaiDataClient {
 
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
         self.unsubscribe_symbol(symbol_from_instrument(cmd.instrument_id), SubKind::Quotes)
+    }
+
+    fn unsubscribe_funding_rates(&mut self, cmd: &UnsubscribeFundingRates) -> anyhow::Result<()> {
+        self.unsubscribe_symbol(symbol_from_instrument(cmd.instrument_id), SubKind::Funding)
     }
 
     fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
@@ -1331,6 +1362,15 @@ enum SubKind {
     Trades,
     Quotes,
     Bars,
+    Funding,
+}
+
+#[derive(Debug, Clone)]
+struct CachedFunding {
+    rate: rust_decimal::Decimal,
+    interval_ns: u64,
+    next_funding_ns: u64,
+    ts_event: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1338,12 +1378,14 @@ struct SubState {
     trades: usize,
     quotes: usize,
     bars: usize,
+    funding: usize,
     cached_quote: Option<mogwai_protocol::QuoteTick>,
+    cached_funding: Option<CachedFunding>,
 }
 
 impl SubState {
     fn total(&self) -> usize {
-        self.trades + self.quotes + self.bars
+        self.trades + self.quotes + self.bars + self.funding
     }
 
     fn increment(&mut self, kind: SubKind) {
@@ -1351,6 +1393,7 @@ impl SubState {
             SubKind::Trades => self.trades += 1,
             SubKind::Quotes => self.quotes += 1,
             SubKind::Bars => self.bars += 1,
+            SubKind::Funding => self.funding += 1,
         }
     }
 
@@ -1359,6 +1402,7 @@ impl SubState {
             SubKind::Trades => self.trades = self.trades.saturating_sub(1),
             SubKind::Quotes => self.quotes = self.quotes.saturating_sub(1),
             SubKind::Bars => self.bars = self.bars.saturating_sub(1),
+            SubKind::Funding => self.funding = self.funding.saturating_sub(1),
         }
     }
 }
@@ -1577,6 +1621,31 @@ async fn handle_market_message(
                 sim,
             );
         }
+        VenueMessage::FundingRate {
+            symbol,
+            rate,
+            interval_ns,
+            next_funding_ns,
+            ts_event,
+        } => {
+            let cached = CachedFunding {
+                rate,
+                interval_ns,
+                next_funding_ns,
+                ts_event,
+            };
+            // The same guard the quote path takes, and the same one for the
+            // same reason: a rate replayed by a subscribe must not be overtaken
+            // by a rate arriving live while that replay is in flight.
+            let _delivery = lock_recover(quote_delivery, "market delivery");
+            if retain_funding(subs, &symbol, cached.clone()) {
+                let Some(def) = instrument_def(instruments, &symbol) else {
+                    warn_missing_instrument_once(missing_instrument_warnings, &symbol);
+                    return;
+                };
+                emit_funding(&cached, sink, &def, sim);
+            }
+        }
         VenueMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring venue heartbeat on data path");
         }
@@ -1696,32 +1765,82 @@ fn handle_quote_message(
     emit_quote(quote, sink, &def, sim);
 }
 
+/// Cache one market fact against its symbol's row, and answer whether that
+/// symbol has a live subscription of the kind that fact feeds.
+///
+/// One helper rather than one per fact, and the sharing is the point: a
+/// pre-subscription BBO or funding rate must survive until the local
+/// subscription is activated, but an arbitrary wire symbol must not grow this
+/// map forever. One run serves one configured instrument, so more than this
+/// many orphan symbols is malformed input and is dropped without allocating a
+/// row. Both caches live in the same map, so they must be bounded by one count
+/// over one predicate - a second bound of its own would let either path push
+/// the shared orphan set past what the other expects.
+///
+/// The bound counts only orphans - rows no subscription of any kind refers to -
+/// so a client with many live subscriptions cannot crowd itself out of the
+/// pre-subscription cache. Nothing here evicts: an existing row is always
+/// updated, so a symbol that once got a cache row can never lose it to a flood
+/// of junk symbols arriving after it.
+fn retain_market_fact(
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    symbol: &Symbol,
+    what: &'static str,
+    write: impl FnOnce(&mut SubState) -> bool,
+) -> bool {
+    const MAX_ORPHAN_MARKET_SYMBOLS: usize = 64;
+    let mut states = lock_recover(subs, "subscriptions");
+    let orphans = states.values().filter(|state| state.total() == 0).count();
+    if !states.contains_key(symbol) && orphans >= MAX_ORPHAN_MARKET_SYMBOLS {
+        tracing::warn!(symbol = %symbol, "dropping {what}: orphan market cache is full");
+        return false;
+    }
+    write(states.entry(std::sync::Arc::clone(symbol)).or_default())
+}
+
 fn retain_quote(
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     quote: &mogwai_protocol::QuoteTick,
 ) -> bool {
-    let mut states = lock_recover(subs, "subscriptions");
-    // A pre-subscription BBO must survive until the local subscription is
-    // activated, but an arbitrary wire symbol must not grow this map forever.
-    // One run serves one configured instrument, so more than this many orphan
-    // symbols is malformed input and is dropped without allocating a row.
-    //
-    // The bound counts only orphans - rows no subscription refers to - so a
-    // client with many live subscriptions cannot crowd itself out of the
-    // pre-subscription cache. Nothing here evicts: an existing row is always
-    // updated, so a symbol that once got a cache row can never lose it to a
-    // flood of junk symbols arriving after it.
-    const MAX_ORPHAN_QUOTE_SYMBOLS: usize = 64;
-    let orphans = states.values().filter(|state| state.total() == 0).count();
-    if !states.contains_key(&quote.symbol) && orphans >= MAX_ORPHAN_QUOTE_SYMBOLS {
-        tracing::warn!(symbol = %quote.symbol, "dropping quote: orphan quote cache is full");
-        return false;
-    }
-    let state = states
-        .entry(std::sync::Arc::clone(&quote.symbol))
-        .or_default();
-    state.cached_quote = Some(quote.clone());
-    state.quotes > 0
+    retain_market_fact(subs, &quote.symbol, "quote", |state| {
+        state.cached_quote = Some(quote.clone());
+        state.quotes > 0
+    })
+}
+
+fn retain_funding(
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    symbol: &Symbol,
+    funding: CachedFunding,
+) -> bool {
+    retain_market_fact(subs, symbol, "funding rate", |state| {
+        state.cached_funding = Some(funding);
+        state.funding > 0
+    })
+}
+
+fn emit_funding(
+    funding: &CachedFunding,
+    sink: &UnboundedSender<DataEvent>,
+    def: &InstrumentDef,
+    sim: SimClock,
+) {
+    let id = match convert::instrument_id(def) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(symbol = %def.symbol, error = %err, "dropping funding rate: unrepresentable instrument symbol");
+            return;
+        }
+    };
+    let update = convert::funding_rate_update(
+        id,
+        funding.rate,
+        funding.interval_ns,
+        funding.next_funding_ns,
+        funding.ts_event,
+        now_unix_nanos(sim),
+    );
+    drop(sink.send(DataEvent::Data(Data::FundingRate(update))));
 }
 
 fn emit_quote(
@@ -2114,6 +2233,83 @@ mod quote_cache_tests {
         assert_eq!(cached.ts_event, 7);
     }
 
+    #[tokio::test]
+    async fn funding_frames_are_gated_cached_and_published() {
+        let def = InstrumentDef {
+            symbol: "BTCUSDT.P".into(),
+            class: mogwai_protocol::InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: rust_decimal::Decimal::ONE,
+                asset_class: mogwai_protocol::WireAssetClass::Cryptocurrency,
+                funding_interval_ns: 28_800_000_000_000,
+                funding_rate: rust_decimal::Decimal::new(1, 4),
+                index_symbol: None,
+                funding_clamp: rust_decimal::Decimal::ZERO,
+            },
+            price_precision: 2,
+            size_precision: 3,
+            price_increment: rust_decimal::Decimal::new(1, 2),
+            size_increment: rust_decimal::Decimal::new(1, 3),
+        };
+        let symbol = Arc::clone(&def.symbol);
+        let instruments = Arc::new(Mutex::new(HashMap::from([(Arc::clone(&symbol), def)])));
+        let warnings = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        let delivery = Arc::new(Mutex::new(()));
+        let bars = Arc::new(Mutex::new(HashMap::new()));
+        let (sink, mut events) = unbounded_channel();
+        let frame = VenueMessage::FundingRate {
+            symbol: Arc::clone(&symbol),
+            rate: rust_decimal::Decimal::new(125, 6),
+            interval_ns: 28_800_000_000_000,
+            next_funding_ns: 57_600_000_000_000,
+            ts_event: 28_800_000_000_000,
+        };
+
+        handle_market_message(
+            frame.clone(),
+            &sink,
+            &instruments,
+            &warnings,
+            &subs,
+            &delivery,
+            &bars,
+            SimClock::identity(),
+        )
+        .await;
+        assert!(
+            events.try_recv().is_err(),
+            "an unsubscribed rate was forwarded"
+        );
+        assert!(
+            lock_recover(&subs, "test")[&symbol]
+                .cached_funding
+                .is_some()
+        );
+
+        lock_recover(&subs, "test")
+            .get_mut(&symbol)
+            .unwrap()
+            .increment(SubKind::Funding);
+        handle_market_message(
+            frame,
+            &sink,
+            &instruments,
+            &warnings,
+            &subs,
+            &delivery,
+            &bars,
+            SimClock::identity(),
+        )
+        .await;
+        let DataEvent::Data(Data::FundingRate(update)) = events.try_recv().unwrap() else {
+            panic!("subscribed funding rate was not published");
+        };
+        assert_eq!(update.rate, rust_decimal::Decimal::new(125, 6));
+        assert_eq!(update.interval, Some(480));
+    }
+
     #[test]
     fn orphan_quote_cache_is_bounded() {
         let subs = Arc::new(Mutex::new(HashMap::new()));
@@ -2121,6 +2317,35 @@ mod quote_cache_tests {
             retain_quote(&subs, &quote_for(&format!("S{i}"), i));
         }
         assert_eq!(lock_recover(&subs, "test").len(), 64);
+    }
+
+    #[test]
+    fn orphan_funding_cache_is_bounded_without_freezing_existing_rows() {
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        let cached = |ts_event| CachedFunding {
+            rate: rust_decimal::Decimal::new(ts_event as i64, 6),
+            interval_ns: 60_000_000_000,
+            next_funding_ns: ts_event + 60_000_000_000,
+            ts_event,
+        };
+        for i in 0..64 {
+            assert!(!retain_funding(&subs, &format!("S{i}").into(), cached(i)));
+        }
+        assert!(!retain_funding(&subs, &"LATE".into(), cached(65)));
+        assert!(!lock_recover(&subs, "test").contains_key("LATE"));
+        assert!(!retain_funding(&subs, &"S0".into(), cached(99)));
+        assert_eq!(
+            lock_recover(&subs, "test")["S0"]
+                .cached_funding
+                .as_ref()
+                .unwrap()
+                .ts_event,
+            99
+        );
+
+        let mut states = lock_recover(&subs, "test");
+        states.get_mut("S0").unwrap().increment(SubKind::Funding);
+        assert_eq!(states["S0"].total(), 1);
     }
 
     #[test]

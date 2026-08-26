@@ -2214,7 +2214,8 @@ pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
         | M::FeedLagged { .. }
         | M::HavocDiagnostic { .. }
         | M::Trade(_)
-        | M::Quote(_) => Audience::Venue,
+        | M::Quote(_)
+        | M::FundingRate { .. } => Audience::Venue,
         M::AccountState(state) => Audience::Account(&state.account_id),
         M::OrderAccepted { venue_order_id, .. }
         | M::OrderTriggered { venue_order_id, .. }

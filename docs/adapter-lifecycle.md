@@ -176,6 +176,14 @@ config error as an unreachable venue.
 
 ## The data client has the same shape, without the guard
 
+The data client implements nautilus funding-rate subscriptions for perpetuals.
+Each epoch-aligned venue funding frame is forwarded as `Data::FundingRate`, and
+the most recent rate is replayed to a subscriber joining between instants. The
+instrument metadata also preserves the interval, interest, index symbol and
+clamp under `mogwai_` keys. These frames are market prices, not cash receipts:
+the ledger charges a multi-instant sweep at one pass-end rate, so a balance
+cannot be reconciled from the published per-instant rates.
+
 `MogwaiDataClient`'s sink is resolved the same way, from the same kind of
 thread-local, and it is unguarded today - a data client connected without
 starting goes quiet rather than refusing. The ordering requirement is therefore

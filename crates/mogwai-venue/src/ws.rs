@@ -1238,7 +1238,7 @@ async fn run_writer(
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut out_rx: mpsc::Receiver<Outbound>,
     mut tape: tokio::sync::broadcast::Receiver<TapeFrame>,
-    snapshot: Option<TapeFrame>,
+    snapshots: Vec<TapeFrame>,
     account_state: Arc<crate::run::Account>,
     sim: mogwai_protocol::SimClock,
 ) {
@@ -1254,10 +1254,10 @@ async fn run_writer(
     let mut priority_open = true;
     let mut held_open = true;
     let mut tape_open = true;
-    if let Some(frame) = snapshot
-        && writer.write_market(&mut sink, frame).await.is_err()
-    {
-        return;
+    for frame in snapshots {
+        if writer.write_market(&mut sink, frame).await.is_err() {
+            return;
+        }
     }
     while priority_open || held_open {
         let event = tokio::select! {

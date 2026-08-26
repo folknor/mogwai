@@ -95,6 +95,19 @@ pub enum Resting {
 /// schedule a property of the clock rather than of when a run happened to boot.
 /// Half-open with `from_ns` exclusive, so a span abutting the previous one funds
 /// each instant exactly once however the sweep passes are cut.
+/// The counter above, for the one caller outside this crate that must agree
+/// with it: `mogwai-venue`'s tape thread enumerates the instants themselves in
+/// order to publish a rate at each, and a lifted copy of this arithmetic is
+/// free to drift from it silently - both halves green, neither checking the
+/// other. The venue's `funding_instants_match_the_engines_counter` ties the two
+/// through this function. It is not a general-purpose API and nothing else
+/// should call it; the schedule a consumer sees is the published frame.
+#[doc(hidden)]
+#[must_use]
+pub fn funding_instants_crossed(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
+    funding_instants(from_ns, to_ns, interval_ns)
+}
+
 fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 || to_ns <= from_ns {
         return 0;
@@ -1772,6 +1785,11 @@ impl Engine {
     /// The span is half-open, `from_ns` exclusive and `to_ns` inclusive, matching
     /// the settlement walk - so an instant is funded exactly once however the
     /// sweep passes are cut.
+    ///
+    /// A multi-instant span is charged as the number of crossed instants times
+    /// one rate at the pass-end mark and index. Funding data frames instead
+    /// price each instant at its standing mark, so they are market prices, not
+    /// receipts, and cannot be used to reconcile the resulting balance change.
     pub fn apply_funding(&mut self, from_ns: u64, to_ns: u64, ts: u64) -> MarkOutcome {
         let mut paid = false;
         let symbols: Vec<Symbol> = self.instruments.keys().cloned().collect();

@@ -1991,6 +1991,21 @@ pub enum VenueMessage {
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
+    /// The funding rate this river's perpetual exchanges at a funding instant.
+    /// Market truth, not account truth: it is emitted whether or not a position
+    /// pays, because the rate is a price of the instrument.
+    ///
+    /// This is not a cash receipt. The ledger charges a swept span at one
+    /// pass-end rate, while this frame prices one instant at the mark standing
+    /// at that instant. The numbers can differ when the mark moves.
+    FundingRate {
+        symbol: Symbol,
+        #[serde(with = "rust_decimal::serde::str")]
+        rate: Decimal,
+        interval_ns: u64,
+        next_funding_ns: u64,
+        ts_event: u64,
+    },
     /// Venue-originated liveness signal. Carries the venue wall clock
     /// unix-ns so the frame is non-empty and timestamp-comparable, but no
     /// market or execution payload. Consumers may ignore it; its job is to keep
@@ -2141,9 +2156,10 @@ impl VenueMessage {
             // Heartbeat is a liveness signal, not execution traffic: `DelayAcks`
             // must not perturb its cadence. It also must survive `StallData`,
             // so writer gates use `is_market_data()` rather than this category.
-            VenueMessage::Trade(_) | VenueMessage::Quote(_) | VenueMessage::Heartbeat { .. } => {
-                EventKind::Data
-            }
+            VenueMessage::Trade(_)
+            | VenueMessage::Quote(_)
+            | VenueMessage::FundingRate { .. }
+            | VenueMessage::Heartbeat { .. } => EventKind::Data,
             // The query replies are execution-channel traffic: `DelayAcks`
             // holds them and `GoDark` drops them (delivery is havoc-able),
             // while their content stays a truthful book read - the invariant
@@ -2184,7 +2200,10 @@ impl VenueMessage {
     /// bucket but is a liveness signal, not channel data.
     #[must_use]
     pub fn is_market_data(&self) -> bool {
-        matches!(self, VenueMessage::Trade(_) | VenueMessage::Quote(_))
+        matches!(
+            self,
+            VenueMessage::Trade(_) | VenueMessage::Quote(_) | VenueMessage::FundingRate { .. }
+        )
     }
 }
 
@@ -3087,6 +3106,16 @@ mod tests {
                     ts_event: 11,
                 }),
                 r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#,
+            ),
+            (
+                VenueMessage::FundingRate {
+                    symbol: "BTCUSDT".into(),
+                    rate: Decimal::new(125, 6),
+                    interval_ns: 28_800_000_000_000,
+                    next_funding_ns: 57_600_000_000_000,
+                    ts_event: 28_800_000_000_000,
+                },
+                r#"{"type":"FundingRate","symbol":"BTCUSDT","rate":"0.000125","interval_ns":28800000000000,"next_funding_ns":57600000000000,"ts_event":28800000000000}"#,
             ),
             (
                 VenueMessage::RunComplete {

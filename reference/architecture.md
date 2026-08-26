@@ -1125,7 +1125,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 28; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 29; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -1229,17 +1229,22 @@ corpus supplies them for MNQ (and, by stated inheritance, MES) as of protocol
 evidence covers spot. Displacement is not
 capped by width: the published BBO is only the top level, so an aggressive
 parent may print beyond the touch without making the book malformed. A connecting WebSocket
-receives the current BBO snapshot before later tape frames, and the adapter
-retains that snapshot until its host activates quote delivery.
+receives the current BBO and funding-rate snapshots, when either exists, before
+later tape frames. The adapter retains each until its host activates the
+corresponding quote or funding delivery.
 
-That snapshot is conditional, and a consumer must not read it as a
-snapshot-first wire contract. `Tape::subscribe_with_snapshot` hands back an
-option: the boat retains the last quote it published, so a socket binding in
-the window between a boat's first trade and its first quote is handed no
-snapshot and sees that trade as its first market frame. Nothing is hidden by
-the absence - the snapshot is missing only when no quote has been published on
-that river yet, and the tape's own first quote follows immediately, so there is
-no case where a bound socket holds a stale BBO or none at all for long. A test
+Those snapshots are conditional, and a consumer must not read them as a
+snapshot-first wire contract. `Tape::subscribe_with_snapshot` hands back
+whichever of the two the boat has: it retains the last quote it published, so a
+socket binding in the window between a boat's first trade and its first quote is
+handed no quote and sees that trade as its first market frame, and it retains
+the last funding rate it published, so a socket binding before the boat crosses
+its first funding instant is handed no rate. Nothing is hidden by either
+absence - a snapshot is missing only when nothing of that kind has been
+published on that river yet, and the tape's own first quote follows
+immediately, so there is no case where a bound socket holds a stale BBO or none
+at all for long. A funding rate is the slower of the two by construction,
+because an instant arrives once an interval and not once a tick. A test
 or a consumer that requires the first frame to be a quote is asserting
 something stronger than the venue promises, and it will lose that bet at boot;
 drain to a deadline instead. `scripts/smoke.py` did exactly that and flaked

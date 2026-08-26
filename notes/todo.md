@@ -61,9 +61,9 @@ what unblocks what.
    ruling 2026-08-26: the standing chart gate covers tape generation, and
    the crossing moved no tape byte. The calibration landing does owe one,
    because its preset constants move generated quote bytes.
-2. **The adapter and consumer surface**: the perpetual funding publisher is
-   the buildable piece, a test pinning the `MarketToLimit` refusal makes that
-   gap loud, `DuplicateNextFill` waits on the next pin. The unsent broadarrow
+2. **The adapter and consumer surface**: a test pinning the `MarketToLimit`
+   refusal makes that gap loud, and `DuplicateNextFill` waits on the next pin.
+   The unsent broadarrow
    message is pulled out of this ranking entirely: write it immediately, it
    costs an hour and every week it waits their scenarios run against a wire
    shape that 422s.
@@ -473,14 +473,12 @@ instrument class is not a finding and does not need re-reporting.
   test submits a `MarketToLimit` today, which is how the gap stayed invisible; a
   test pinning the refusal's reason would at least make it loud.
 
-- **`perpetual`'s four funding fields are still dropped silently at
-  `convert::instrument_any`.** `funding_interval_ns`, `funding_rate`,
-  `index_symbol` and `funding_clamp` have nowhere to go on nautilus's
-  `CryptoPerpetual`. Lower impact than the forex loss and deliberately not
-  given the same refusal: no arithmetic result is wrong, and nautilus exposes
-  funding through the separate `DataEvent::FundingRate` channel, so the shape
-  to build is a publisher on that channel rather than a bail. Nothing has been
-  built for it and nothing warns, which is the part worth remembering.
+- **Price funding per instant in the ledger.** `apply_funding` currently charges
+  `N * rate(pass-end mark, pass-end index)` for a span crossing `N` funding
+  instants. On a multi-instant sweep with a moving mark, the cash charged can
+  match no instant's actual price. The ledger is the approximating side, not
+  the publisher. Closing this means walking the instants and supplying the
+  engine with marks for each instant, which it does not currently receive.
 
 - **`DuplicateNextFill` may certify nothing against a nautilus host - recheck at
   the next pin.** At nautilus 0.62.0, `commit_fill` emits `fill.clone()` with the

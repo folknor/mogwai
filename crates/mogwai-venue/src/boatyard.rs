@@ -44,7 +44,7 @@ use tokio::sync::Semaphore;
 use crate::{
     config::now_ns,
     source::{RiverKey, Rivers},
-    tape::{Tape, TapeSpawn},
+    tape::{Tape, TapeFunding, TapeSpawn},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -390,6 +390,22 @@ impl Boatyard {
             })
             .map_err(BoardRefusal::Placement);
         let boat = cursor.map(|cursor| {
+            let funding = match self.rivers.resolve_profile(req.river.symbol()) {
+                Ok(profile) => profile
+                    .def
+                    .class
+                    .funding()
+                    .filter(|terms| terms.interval_ns != 0)
+                    .map(|terms| TapeFunding {
+                        symbol: Arc::clone(&profile.def.symbol),
+                        terms,
+                        rivers: Arc::clone(&self.rivers),
+                    }),
+                Err(error) => {
+                    tracing::warn!(symbol = req.river.symbol(), %error, "boat will publish no funding frames because its profile could not be resolved");
+                    None
+                }
+            };
             let cursor: Box<dyn TickSource + Send> = match key.window_end_ns() {
                 Some(end_ns) => Box::new(WindowCursor {
                     inner: cursor,
@@ -409,6 +425,7 @@ impl Boatyard {
                     fault_tx: self.fault_tx.clone(),
                     extremes: Arc::clone(&extremes),
                     vol_window: Arc::clone(&vol_window),
+                    funding,
                 },
             );
             let cancel = tape.cancel_flag();

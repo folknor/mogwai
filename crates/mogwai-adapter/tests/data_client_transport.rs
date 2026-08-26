@@ -44,7 +44,7 @@ use nautilus_common::{
     live::runner::replace_data_event_sender,
     messages::{
         DataEvent,
-        data::{DataResponse, SubscribeQuotes, SubscribeTrades},
+        data::{DataResponse, SubscribeFundingRates, SubscribeQuotes, SubscribeTrades},
     },
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -325,6 +325,121 @@ async fn an_unrepresentable_quote_is_dropped_not_panicked() {
     match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
         DataEvent::Data(Data::Quote(quote)) => assert_eq!(quote.ts_event, UnixNanos::from(9)),
         other => panic!("the task did not survive to the valid quote: {other:?}"),
+    }
+}
+
+const FUNDING_JSON: &str = r#"{"type":"FundingRate","symbol":"BTCUSDT","rate":"0.000125","interval_ns":28800000000000,"next_funding_ns":57600000000000,"ts_event":28800000000000}"#;
+
+/// A pushed funding frame reaches the sink as `Data::FundingRate` when the host
+/// has subscribed. `handle_market_message` dispatches on a `_ => {}` catch-all,
+/// so unlike the exec leg nothing here is guarded by the compiler and this test
+/// is the only thing standing between the frame and a silent drop.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_pushed_funding_rate_reaches_a_subscribed_host() {
+    let state = Arc::new(StubState::default());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws frames mutex")
+        .push(FUNDING_JSON.to_string());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client
+        .subscribe_funding_rates(SubscribeFundingRates::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe funding rates before connect");
+    state.push_gate.open();
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::FundingRate(update)) => {
+            assert_eq!(update.instrument_id, instrument_id());
+            assert_eq!(update.rate, rust_decimal::Decimal::new(125, 6));
+            assert_eq!(update.interval, Some(480));
+            assert_eq!(
+                update.next_funding_ns,
+                Some(UnixNanos::from(57_600_000_000_000_u64))
+            );
+            assert_eq!(update.ts_event, UnixNanos::from(28_800_000_000_000_u64));
+        }
+        other => panic!("expected a funding rate, got {other:?}"),
+    }
+}
+
+/// The two halves the previous test cannot show: an unsubscribed frame is
+/// dropped, and a host subscribing after it arrives is handed the cached rate
+/// immediately rather than waiting up to a whole interval for the next instant.
+///
+/// The trade is the barrier that makes the drop observable. Asserting absence
+/// needs something that must arrive afterwards, or the assertion passes just as
+/// well against a client that had not read the socket yet.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn an_unsubscribed_funding_rate_is_cached_and_replayed_not_forwarded() {
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_trades.lock().expect("ws frames mutex");
+        frames.push(FUNDING_JSON.to_string());
+        frames.push(
+            r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":28800000000001}"#.to_string(),
+        );
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client
+        .subscribe_trades(SubscribeTrades::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe trades before connect");
+    state.push_gate.open();
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::Trade(trade)) => {
+            assert_eq!(trade.ts_event, UnixNanos::from(28_800_000_000_001_u64));
+        }
+        other => panic!("the unsubscribed funding rate was forwarded: {other:?}"),
+    }
+
+    client
+        .subscribe_funding_rates(SubscribeFundingRates::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe funding rates after the frame");
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::FundingRate(update)) => {
+            assert_eq!(update.rate, rust_decimal::Decimal::new(125, 6));
+            assert_eq!(update.ts_event, UnixNanos::from(28_800_000_000_000_u64));
+        }
+        other => panic!("expected the cached rate to be replayed, got {other:?}"),
     }
 }
 

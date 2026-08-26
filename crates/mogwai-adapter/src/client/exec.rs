@@ -3204,6 +3204,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
         // reply to a request this half did not make.
         VenueMessage::Trade(_)
         | VenueMessage::Quote(_)
+        | VenueMessage::FundingRate { .. }
         | VenueMessage::HistoryPage { .. }
         | VenueMessage::HistoryRejected { .. }
         | VenueMessage::HavocDiagnostic { .. }

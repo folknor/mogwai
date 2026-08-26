@@ -10,7 +10,7 @@ use mogwai_protocol::{
 };
 use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
-    data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
+    data::{FundingRateUpdate, QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
     enums::{
         AggressorSide, AssetClass, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerType,
     },
@@ -343,6 +343,29 @@ pub(crate) fn quote_tick(
     .context("convert quote tick")
 }
 
+pub(crate) fn funding_rate_update(
+    instrument_id: InstrumentId,
+    rate: Decimal,
+    interval_ns: u64,
+    next_funding_ns: u64,
+    ts_event: u64,
+    ts_init: UnixNanos,
+) -> FundingRateUpdate {
+    const MINUTE_NS: u64 = 60_000_000_000;
+    let interval = interval_ns
+        .is_multiple_of(MINUTE_NS)
+        .then_some(interval_ns / MINUTE_NS)
+        .and_then(|minutes| u16::try_from(minutes).ok());
+    FundingRateUpdate::new(
+        instrument_id,
+        rate,
+        interval,
+        Some(UnixNanos::from(next_funding_ns)),
+        UnixNanos::from(ts_event),
+        ts_init,
+    )
+}
+
 pub(crate) fn instrument_any(
     def: &InstrumentDef,
     ts_init: UnixNanos,
@@ -557,6 +580,29 @@ fn crypto_perpetual(
     let quote = Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
     let settlement = Currency::from_str(settlement)
         .with_context(|| format!("unknown settlement currency {settlement}"))?;
+    let info = def.class.funding().map(|terms| {
+        let mut info = Params::new();
+        info.insert(
+            "mogwai_funding_interval_ns".into(),
+            terms.interval_ns.into(),
+        );
+        info.insert(
+            "mogwai_funding_rate".into(),
+            serde_json::Value::String(terms.interest.to_string()),
+        );
+        info.insert(
+            "mogwai_index_symbol".into(),
+            terms
+                .index_symbol
+                .as_ref()
+                .map_or(serde_json::Value::Null, |symbol| symbol.clone().into()),
+        );
+        info.insert(
+            "mogwai_funding_clamp".into(),
+            serde_json::Value::String(terms.clamp.to_string()),
+        );
+        info
+    });
     let contract = nautilus_model::instruments::CryptoPerpetual::new_checked(
         id,
         symbol,
@@ -581,7 +627,7 @@ fn crypto_perpetual(
         None,
         None,
         None,
-        None,
+        info,
         UnixNanos::from(0),
         ts_init,
     )
@@ -605,6 +651,67 @@ mod tests {
             price_increment: Decimal::new(1, 2),
             size_increment: Decimal::new(1, 8),
         }
+    }
+
+    #[test]
+    fn perpetual_funding_survives_in_instrument_metadata() {
+        let def = InstrumentDef {
+            symbol: "BTCUSDT.P".into(),
+            class: InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Cryptocurrency,
+                funding_interval_ns: 28_800_000_000_000,
+                funding_rate: Decimal::new(125, 6),
+                index_symbol: Some("BTCUSDT".into()),
+                funding_clamp: Decimal::new(5, 3),
+            },
+            price_precision: 2,
+            size_precision: 3,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::new(1, 3),
+        };
+        let InstrumentAny::CryptoPerpetual(contract) =
+            instrument_any(&def, UnixNanos::from(7)).expect("perpetual converts")
+        else {
+            panic!("perpetual must produce a crypto perpetual");
+        };
+        let info = contract.info.expect("funding metadata");
+        assert_eq!(
+            info.get_u64("mogwai_funding_interval_ns"),
+            Some(28_800_000_000_000)
+        );
+        assert_eq!(info.get_str("mogwai_funding_rate"), Some("0.000125"));
+        assert_eq!(info.get_str("mogwai_index_symbol"), Some("BTCUSDT"));
+        assert_eq!(info.get_str("mogwai_funding_clamp"), Some("0.005"));
+    }
+
+    #[test]
+    fn funding_interval_conversion_never_rounds() {
+        let id = InstrumentId::from("BTCUSDT.P.MOGWAI");
+        let exact = funding_rate_update(
+            id,
+            Decimal::new(1, 4),
+            120_000_000_000,
+            180_000_000_000,
+            60_000_000_000,
+            UnixNanos::from(9),
+        );
+        assert_eq!(exact.interval, Some(2));
+        assert_eq!(exact.rate, Decimal::new(1, 4));
+        let fractional =
+            funding_rate_update(id, Decimal::ZERO, 60_000_000_001, 1, 1, UnixNanos::from(1));
+        assert_eq!(fractional.interval, None);
+        let oversized = funding_rate_update(
+            id,
+            Decimal::ZERO,
+            60_000_000_000 * (u64::from(u16::MAX) + 1),
+            1,
+            1,
+            UnixNanos::from(1),
+        );
+        assert_eq!(oversized.interval, None);
     }
 
     #[test]
