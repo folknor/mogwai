@@ -61,8 +61,9 @@ use crate::{
     client::shared::{
         HavocDelivery, HavocFilter, abort_tasks, conn_havoc, enqueue_havoc,
         fetch_clock_or_identity, flush_havoc_into_pump, inbound_havoc, instrument_def, join_url,
-        lock_recover, now_unix_nanos, request_timeout_secs, run_identity_check, seed_instruments,
-        spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
+        lock_recover, now_unix_nanos, request_timeout_secs, run_identity_check,
+        schedule_reorder_flush, seed_instruments, spawn_latency_pump, symbol_from_instrument,
+        track_task, wait_connected,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -1252,6 +1253,14 @@ impl ExecutionClient for MogwaiExecutionClient {
                     async move {
                         let mut filter = handler_filter.lock().await;
                         enqueue_havoc(&mut filter, venue_msg, sim, &handler_deliver);
+                        if let Some(token) = filter.held_token() {
+                            schedule_reorder_flush(
+                                Arc::clone(&handler_filter),
+                                token,
+                                sim,
+                                handler_deliver.clone(),
+                            );
+                        }
                     }
                 },
                 move || {
@@ -1943,6 +1952,70 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueM
     }
 }
 
+/// Where an `OrderRejected` came from, which decides how much of the mirror it
+/// is allowed to close.
+///
+/// The two origins carry different evidence. A `Venue` rejection is the venue's
+/// own verdict, arriving over the wire or as an `AdmissionRejected` the venue
+/// sent: whatever it says about the order is true, and the only question left is
+/// whether nautilus's order state machine can express it. A `LocalTransport`
+/// rejection is synthesized here for a command whose frame we believe never
+/// left - and that belief is a guess, not a fact. `run_ws_connection`'s receipt
+/// book documents the ambiguous window in as many words: bytes can reach the
+/// venue before the writer task is aborted, and the retained receipt is reported
+/// undelivered anyway.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RejectOrigin {
+    Venue,
+    LocalTransport,
+}
+
+/// The mirror statuses from which a submit rejection may be applied, given
+/// where the rejection came from.
+///
+/// This is deliberately an enumeration rather than `!status.is_closed()`. The
+/// two sets are not the same, and reading the negation as "safe" is how the
+/// regression this replaced shipped:
+///
+/// - Against nautilus's own state machine (`OrderStatus::transition` in
+///   `model/src/orders/mod.rs` of the pinned release), `OrderEventAny::Rejected`
+///   has an arm from exactly `Initialized`, `Submitted`, `Accepted`,
+///   `Triggered`, `PendingUpdate` and `PendingCancel`. `PartiallyFilled`,
+///   `Emulated` and `Released` are all open by `is_closed`, and every one of
+///   them answers `InvalidStateTransition`. So the old predicate admitted three
+///   statuses whose event nautilus would refuse and whose mirror row it would
+///   close anyway - a regression the mirror could not heal, since the mirror is
+///   the reconciliation truth source.
+/// - `Accepted` and `Triggered` stay in the `Venue` set on purpose, and this is
+///   not an oversight to be tightened later. `mogwai_engine`'s `orders.rs`
+///   genuinely rejects a resting order after acceptance: a post-only stop-limit
+///   that becomes marketable is closed with `OrderRejected` at that moment.
+///   Nautilus's own table marks the same arm "StopLimit order". Dropping those
+///   would discard a real verdict.
+/// - A `LocalTransport` rejection admits only `Initialized` and `Submitted` -
+///   the statuses in which the venue has confirmed nothing about the order. If
+///   the mirror has seen an accept, a trigger, a partial fill or a pending
+///   amendment, the venue demonstrably received the submit, so "the frame never
+///   left" is already known to be false and the synthesized rejection is the
+///   wrong half of the ambiguous window. Refusing it leaves the order where the
+///   venue's own events put it, which is the truth.
+const fn admits_submit_rejection(status: OrderStatus, origin: RejectOrigin) -> bool {
+    match origin {
+        RejectOrigin::Venue => matches!(
+            status,
+            OrderStatus::Initialized
+                | OrderStatus::Submitted
+                | OrderStatus::Accepted
+                | OrderStatus::Triggered
+                | OrderStatus::PendingUpdate
+                | OrderStatus::PendingCancel
+        ),
+        RejectOrigin::LocalTransport => {
+            matches!(status, OrderStatus::Initialized | OrderStatus::Submitted)
+        }
+    }
+}
+
 /// The prefix a retryable venue refusal's reason carries, so a consumer can
 /// tell backpressure from a business rejection without reading prose.
 ///
@@ -2037,6 +2110,16 @@ fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
 /// traveled the wire, so there is nothing for the venue-havoc pipeline to model,
 /// and routing a terminal reject through a `drop_prob` draw could discard it
 /// entirely, leaving nautilus and the mirror stuck forever.
+///
+/// The submit rejection carries `RejectOrigin::LocalTransport`, which is what
+/// keeps "the frame never left" from overruling evidence that it did. The
+/// receipt book's window is ambiguous by construction - the bytes may have
+/// reached the venue before the writer was aborted - so a mirror row that has
+/// already seen an accept, a trigger, a partial fill or a pending amendment is
+/// proof the submit landed, and the synthesized rejection is refused there
+/// rather than closing an order the venue still owns. What remains wedged in
+/// that case is nothing: the order is live at the venue and its own events
+/// resolve it.
 fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &ExecContext) {
     if let ExecWsCommand::Cancel { client_order_id } = cmd {
         if let Some(client_order_id) = wire_client_order_id(client_order_id) {
@@ -2055,17 +2138,22 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
         // leave the rest in `Submitted` forever.
         let ts_event = now_unix_nanos(ctx.sim).as_u64();
         for order in orders {
-            handle_exec_message(
+            handle_exec_message_from(
                 VenueMessage::OrderRejected {
                     client_order_id: order.client_order_id.clone(),
                     reason: err.to_string(),
                     ts_event,
                 },
                 ctx,
+                RejectOrigin::LocalTransport,
             );
         }
     } else {
-        handle_exec_message(reject_for(cmd, err, ctx.sim), ctx);
+        handle_exec_message_from(
+            reject_for(cmd, err, ctx.sim),
+            ctx,
+            RejectOrigin::LocalTransport,
+        );
     }
 }
 
@@ -2233,9 +2321,12 @@ impl ExecState {
     /// Leaving the row costs nothing: the ring is already bounded by
     /// `REMEMBERED_GROUPS` and a re-submitted list id is replaced by
     /// `remember_group`, so removal was an early free rather than the bound.
-    /// The duplicate rejection it now permits is absorbed by the terminal-state
-    /// guard in `handle_exec_message` - an order already `Rejected` does not
-    /// move - which is where a duplicate belongs, rather than in an error log.
+    /// The duplicate rejection it now permits is absorbed by
+    /// `admits_submit_rejection`, which `handle_exec_message_from`'s
+    /// `OrderRejected` arm consults: `Rejected` is not in either origin's
+    /// admitted set, so the second copy leaves the record alone and emits
+    /// nothing - which is where a duplicate belongs, rather than in an error
+    /// log.
     fn peek_group(&self, order_list_id: &str) -> Option<Vec<ClientOrderId>> {
         self.groups
             .iter()
@@ -2338,7 +2429,16 @@ struct OrderRecord {
     seen_trades: std::collections::HashSet<TradeId>,
 }
 
+/// Applies a venue-originated message to the mirror and to nautilus.
+///
+/// Every caller but `synthesize_transport_reject` is holding something the venue
+/// actually sent, so this is the ordinary entry point;
+/// `handle_exec_message_from` is the one that takes a different origin.
 fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
+    handle_exec_message_from(msg, ctx, RejectOrigin::Venue);
+}
+
+fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin: RejectOrigin) {
     match msg {
         VenueMessage::OrderTriggered { client_order_id, venue_order_id, ts_event } => {
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else { return; };
@@ -2430,18 +2530,21 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
                 return;
             };
-            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-                // Unconditional, unlike the terminal-state guards on the other
-                // arms, and deliberately so: the engine emits `Rejected` as an
-                // order's sole lifecycle event, so no reordered pair can arrive
-                // to regress a later terminal state. The one reachable overwrite
-                // is a synthesized transport reject for an order the venue
-                // actually processed, which is the known unrecoverable
-                // desync (the mirror cannot heal it without a venue-truth query
-                // surface) and not something a guard here would fix.
-                record.status = OrderStatus::Rejected;
-                record.ts_last = UnixNanos::from(ts_event);
-                record.clone()
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                // Refusals can be synthesized by admission and transport paths,
+                // and reorder havoc can put either behind a later lifecycle
+                // event, so this rejection may well be describing an order the
+                // mirror has already moved past. `admits_submit_rejection`
+                // enumerates the statuses this rejection may close, per its
+                // origin; everything else keeps the status it has and emits
+                // nothing, because the mirror is the reconciliation truth
+                // source and nautilus's own FSM would refuse the event anyway.
+                let stale = !admits_submit_rejection(record.status, reject_origin);
+                if !stale {
+                    record.status = OrderStatus::Rejected;
+                    record.ts_last = record.ts_last.max(UnixNanos::from(ts_event));
+                }
+                (record.clone(), stale)
             }) else {
                 // The local mirror does not know this order, so we lack the
                 // real strategy_id/instrument_id the emit requires. We cannot
@@ -2460,6 +2563,16 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 );
                 return;
             };
+            if stale {
+                tracing::warn!(
+                    order = %client_order_id,
+                    status = ?record.status,
+                    origin = ?reject_origin,
+                    "rejection refused by the mirror: this status does not admit \
+                     a submit rejection from this origin; keeping it"
+                );
+                return;
+            }
             let event = OrderRejected::new(
                 ctx.trader_id,
                 record.strategy_id,
@@ -3440,6 +3553,191 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mirror seeded with one order in `status`, plus the context that reads
+    /// it. `ts_last` is 20 so a rejection stamped earlier can be seen to leave
+    /// it alone.
+    fn a_mirrored_order(status: OrderStatus) -> (Arc<Mutex<ExecState>>, ExecContext) {
+        let state = Arc::new(Mutex::new(ExecState::default()));
+        lock_recover(&state, "test state").orders.insert(
+            ClientOrderId::from("O-1"),
+            OrderRecord {
+                strategy_id: nautilus_model::identifiers::StrategyId::from("S-1"),
+                instrument_id: InstrumentId::from("EURUSD.MOGWAI"),
+                order_side: OrderSide::Buy,
+                order_type: OrderType::Limit,
+                status,
+                venue_order_id: Some(VenueOrderId::from("V-1")),
+                ts_last: UnixNanos::from(20),
+                seen_trades: std::collections::HashSet::new(),
+            },
+        );
+        let trader_id = nautilus_model::identifiers::TraderId::from("TRADER-001");
+        let account_id = AccountId::from("MOGWAI-001");
+        let ctx = ExecContext {
+            emitter: ExecutionEventEmitter::new(
+                get_atomic_clock_realtime(),
+                trader_id,
+                account_id,
+                nautilus_model::enums::AccountType::Margin,
+                None,
+            ),
+            state: Arc::clone(&state),
+            instruments: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(PendingQueries::default())),
+            trader_id,
+            account_id,
+            account_type: nautilus_model::enums::AccountType::Margin,
+            sim: SimClock::identity(),
+        };
+        (state, ctx)
+    }
+
+    fn mirrored_status(state: &Arc<Mutex<ExecState>>) -> (OrderStatus, UnixNanos) {
+        let state = lock_recover(state, "test state");
+        let record = state
+            .orders
+            .get(&ClientOrderId::from("O-1"))
+            .expect("order remains mirrored");
+        (record.status, record.ts_last)
+    }
+
+    /// Every nautilus `OrderStatus`, against both rejection origins.
+    ///
+    /// Written as a full enumeration rather than a couple of interesting rows
+    /// because the defect this replaced was precisely a set that read as
+    /// complete: `!status.is_closed()` admitted `PartiallyFilled`, `Emulated`
+    /// and `Released`, none of which nautilus's own FSM will transition to
+    /// `Rejected`, and a Filled-only regression passed over all three. A new
+    /// `OrderStatus` variant fails the match below until its row is written.
+    #[test]
+    fn a_submit_rejection_admits_only_the_statuses_its_origin_supports() {
+        let statuses = [
+            OrderStatus::Initialized,
+            OrderStatus::Denied,
+            OrderStatus::Emulated,
+            OrderStatus::Released,
+            OrderStatus::Submitted,
+            OrderStatus::Accepted,
+            OrderStatus::Rejected,
+            OrderStatus::Canceled,
+            OrderStatus::Expired,
+            OrderStatus::Triggered,
+            OrderStatus::PendingUpdate,
+            OrderStatus::PendingCancel,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::Filled,
+            OrderStatus::Voided,
+        ];
+        let mut venue_admitted = Vec::new();
+        let mut transport_admitted = Vec::new();
+        for status in statuses {
+            for (origin, admitted) in [
+                (RejectOrigin::Venue, &mut venue_admitted),
+                (RejectOrigin::LocalTransport, &mut transport_admitted),
+            ] {
+                let (state, ctx) = a_mirrored_order(status);
+                handle_exec_message_from(
+                    VenueMessage::OrderRejected {
+                        client_order_id: "O-1".to_owned(),
+                        reason: "late refusal".to_owned(),
+                        ts_event: 10,
+                    },
+                    &ctx,
+                    origin,
+                );
+                let (after, ts_last) = mirrored_status(&state);
+                if after == OrderStatus::Rejected && status != OrderStatus::Rejected {
+                    admitted.push(status);
+                } else {
+                    // A refused rejection leaves both fields exactly as it
+                    // found them, including the backward `ts_event`.
+                    assert_eq!(
+                        (status, after, ts_last),
+                        (status, status, UnixNanos::from(20)),
+                        "{origin:?} rejection disturbed a {status:?} record"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            venue_admitted,
+            [
+                OrderStatus::Initialized,
+                OrderStatus::Submitted,
+                OrderStatus::Accepted,
+                OrderStatus::Triggered,
+                OrderStatus::PendingUpdate,
+                OrderStatus::PendingCancel,
+            ],
+            "the venue set must be exactly nautilus's own Rejected arms"
+        );
+        assert_eq!(
+            transport_admitted,
+            [OrderStatus::Initialized, OrderStatus::Submitted],
+            "a synthesized transport reject may only close an order the venue \
+             has confirmed nothing about"
+        );
+    }
+
+    /// The ambiguous-send window, with its interleaving forced rather than
+    /// raced.
+    ///
+    /// `run_ws_connection` retains a receipt for a command it queued, and
+    /// aborting the writer reports that receipt undelivered - but the bytes may
+    /// already have reached the venue. Here they did: the venue's acceptance is
+    /// applied first, and only then does the receipt book report the submit as
+    /// never sent. Driving `report_undelivered_command`, not the arm beneath
+    /// it, is what pins the origin actually threaded through
+    /// `synthesize_transport_reject`.
+    #[test]
+    fn a_transport_reject_cannot_close_an_order_the_venue_accepted() {
+        fn a_submit() -> mogwai_protocol::SubmitOrder {
+            mogwai_protocol::SubmitOrder {
+                client_order_id: "O-1".to_owned(),
+                symbol: Symbol::from("EURUSD"),
+                position_id: None,
+                side: mogwai_protocol::Side::Buy,
+                order_type: mogwai_protocol::OrderType::Limit,
+                quantity: Decimal::ONE,
+                price: Some(Decimal::ONE),
+                trigger_price: None,
+                trail_offset: None,
+                limit_offset: None,
+                reduce_only: false,
+                post_only: false,
+                time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                expire_time: None,
+                link: None,
+            }
+        }
+
+        let (state, ctx) = a_mirrored_order(OrderStatus::Submitted);
+        handle_exec_message(
+            VenueMessage::OrderAccepted {
+                client_order_id: "O-1".to_owned(),
+                venue_order_id: "V-1".to_owned(),
+                ts_event: 30,
+            },
+            &ctx,
+        );
+        assert_eq!(mirrored_status(&state).0, OrderStatus::Accepted);
+        report_undelivered_command(&ExecWsCommand::Submit(a_submit()), &ctx);
+        assert_eq!(
+            mirrored_status(&state),
+            (OrderStatus::Accepted, UnixNanos::from(30)),
+            "the venue owns this order; the receipt book's guess must not close it"
+        );
+        // The group fan-out reaches the same arm by its own path, so it owes
+        // its own origin. A bracket whose frame was reported undelivered after
+        // the venue accepted a leg must leave that leg alone too.
+        report_undelivered_command(&ExecWsCommand::SubmitGroup(vec![a_submit()]), &ctx);
+        assert_eq!(
+            mirrored_status(&state),
+            (OrderStatus::Accepted, UnixNanos::from(30)),
+            "the group fan-out must carry the same origin as a bare submit"
+        );
+    }
 
     /// The contract a consumer matches on, pinned so it cannot drift into
     /// prose.

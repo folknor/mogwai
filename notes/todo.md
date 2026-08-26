@@ -275,6 +275,40 @@ urgent; both modes must eventually be supported.
 
 ## Adapter
 
+- **Nautilus has no instrument type for mogwai's leveraged Forex class.** On
+  this side the symptom was silent publication as `CurrencyPair`: that type is
+  spot/cash, so it discarded the marked-position settlement model, rollover,
+  swaps, pip and point conventions, and originally the contract multiplier.
+  Nautilus would need to ship a distinct leveraged-FX instrument whose notional
+  and P&L use the multiplier and whose account model can represent daily swap
+  settlement. An info-bag workaround of the kind `equity` uses for
+  `mogwai_borrowable` does not close it: nautilus computes notional itself, at
+  an implicit multiplier of 1, so a preserved multiplier in `Params` would sit
+  beside a wrong number rather than correcting it.
+
+  What was done instead: `convert::instrument_any` refuses the `forex` class
+  with a named error rather than flattening it onto `CurrencyPair`. Its one
+  production caller is `instrument_any_or_warn`, so the observable behaviour is
+  a `warn` naming the symbol and the reason, and the instrument is absent from
+  nautilus's cache - which makes a host refuse every bar for that symbol. That
+  is loud and wrong-shaped rather than quiet and wrong-valued.
+
+  What remains wrong, and is merely disclosed: a mogwai venue serving a `forex`
+  instrument is unusable from a nautilus host. The venue, the config surface and
+  the native protocol all still support the class; only this adapter cannot
+  carry it. It becomes available the day nautilus ships that instrument shape,
+  and the fix at that point is a new arm in `instrument_any`, not a change to
+  the venue.
+
+- **`perpetual`'s four funding fields are still dropped silently at
+  `convert::instrument_any`.** `funding_interval_ns`, `funding_rate`,
+  `index_symbol` and `funding_clamp` have nowhere to go on nautilus's
+  `CryptoPerpetual`. Lower impact than the forex loss and deliberately not
+  given the same refusal: no arithmetic result is wrong, and nautilus exposes
+  funding through the separate `DataEvent::FundingRate` channel, so the shape
+  to build is a publisher on that channel rather than a bail. Nothing has been
+  built for it and nothing warns, which is the part worth remembering.
+
 - **Confirmed, and now an owner call: `DuplicateNextFill` certifies nothing
   against a nautilus host.** Verified 2026-08-23 against the pinned version -
   `mogwai-adapter` pins nautilus 0.62.0 (the earlier note said 0.61) and

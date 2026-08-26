@@ -371,6 +371,45 @@ pub(crate) type RunIdentityCheck = std::sync::Arc<
     dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
+/// Owns every command receipt for the connection future, including while that
+/// future is being cancelled. Tokio abort drops the future instead of running
+/// its async tail, so the reporting callback and both receipt locations must
+/// live in a synchronous drop guard owned by the cancelled task itself.
+type ActiveReceipts<Cmd> = Arc<StdMutex<Option<Arc<StdMutex<VecDeque<(u64, Cmd)>>>>>>;
+
+struct UndeliveredGuard<Cmd, F: FnMut(Cmd)> {
+    rx: Option<UnboundedReceiver<Cmd>>,
+    active: ActiveReceipts<Cmd>,
+    report: F,
+}
+
+impl<Cmd, F: FnMut(Cmd)> UndeliveredGuard<Cmd, F> {
+    fn report(&mut self, cmd: Cmd) {
+        (self.report)(cmd);
+    }
+}
+
+impl<Cmd, F: FnMut(Cmd)> Drop for UndeliveredGuard<Cmd, F> {
+    fn drop(&mut self) {
+        if let Some(book) = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            for (_, cmd) in lock_unwritten(&book).drain(..) {
+                (self.report)(cmd);
+            }
+        }
+        if let Some(rx) = self.rx.as_mut() {
+            rx.close();
+            while let Ok(cmd) = rx.try_recv() {
+                (self.report)(cmd);
+            }
+        }
+    }
+}
+
 /// Drives one client socket for the life of the client: dial, reattach,
 /// pump, disconnect, redial.
 ///
@@ -404,7 +443,7 @@ pub(crate) async fn run_ws_connection<
     on_connect: OnConnect,
     handler: Handler,
     on_disconnect: Disconnect,
-    mut on_undelivered: OnUndelivered,
+    on_undelivered: OnUndelivered,
 ) where
     Cmd: Send + 'static,
     Serialize: Fn(&Cmd) -> Command + Send + Sync + 'static,
@@ -415,31 +454,21 @@ pub(crate) async fn run_ws_connection<
     DisconnectFut: Future<Output = ()> + Send,
     OnUndelivered: FnMut(Cmd) + Send + 'static,
 {
-    let mut cmd_rx = cmd_rx;
+    let mut undelivered = UndeliveredGuard {
+        rx: cmd_rx,
+        active: Arc::new(StdMutex::new(None)),
+        report: on_undelivered,
+    };
     run_ws_connection_inner(
         config,
-        &mut cmd_rx,
+        &mut undelivered,
         serialize,
         on_connect,
         handler,
         on_disconnect,
-        &mut on_undelivered,
     )
     .await;
-    // The loop's own exit is an undelivery too. Whatever is still sitting in the
-    // command receiver when this returns - the run completed, the attempt cap
-    // tripped, the identity check refused - is never going to be written by
-    // anybody, because the receiver dies with this frame. Commands sent after
-    // that point need no report here: the sender sees a closed channel and
-    // `dispatch_order` already synthesizes for that case. This drain covers the
-    // window between the last write and the receiver's death, which nothing
-    // else can see.
-    if let Some(rx) = cmd_rx.as_mut() {
-        rx.close();
-        while let Ok(cmd) = rx.try_recv() {
-            on_undelivered(cmd);
-        }
-    }
+    // `undelivered` drains on ordinary return and cancellation alike.
 }
 
 async fn run_ws_connection_inner<
@@ -453,12 +482,11 @@ async fn run_ws_connection_inner<
     OnUndelivered,
 >(
     config: WsConnectionConfig,
-    cmd_rx: &mut Option<UnboundedReceiver<Cmd>>,
+    undelivered: &mut UndeliveredGuard<Cmd, OnUndelivered>,
     serialize: Serialize,
     on_connect: OnConnect,
     mut handler: Handler,
     mut on_disconnect: Disconnect,
-    on_undelivered: &mut OnUndelivered,
 ) where
     Cmd: Send + 'static,
     Serialize: Fn(&Cmd) -> Command + Send + Sync + 'static,
@@ -617,6 +645,10 @@ async fn run_ws_connection_inner<
         // commands the venue never saw, and it is reported below.
         let unwritten: Arc<StdMutex<VecDeque<(u64, Cmd)>>> =
             Arc::new(StdMutex::new(VecDeque::new()));
+        *undelivered
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&unwritten));
         let mut next_seq: u64 = 0;
         let writer_unwritten = Arc::clone(&unwritten);
         let writer_handle = AbortOnDrop::new(tokio::spawn(async move {
@@ -672,7 +704,7 @@ async fn run_ws_connection_inner<
             &serialize,
             &mut next_seq,
             &unwritten,
-            on_undelivered,
+            &mut undelivered.report,
         );
 
         let mut heartbeat = (conn.heartbeat_interval_ms > 0).then(|| {
@@ -692,7 +724,7 @@ async fn run_ws_connection_inner<
         loop {
             let action = tokio::select! {
                 msg = in_rx.recv() => WsAction::Inbound(msg.flatten()),
-                cmd = recv_command(cmd_rx), if !commands_closed => WsAction::Command(cmd),
+                cmd = recv_command(&mut undelivered.rx), if !commands_closed => WsAction::Command(cmd),
                 () = heartbeat_tick(&mut heartbeat), if heartbeat.is_some() => WsAction::Heartbeat,
                 () = idle_tick(&mut idle_sleep), if idle_sleep.is_some() => WsAction::Idle,
             };
@@ -779,7 +811,7 @@ async fn run_ws_connection_inner<
                     next_seq += 1;
                     if let Some(cmd) = send_command(&out_tx, &serialize, cmd, next_seq, &unwritten)
                     {
-                        on_undelivered(cmd);
+                        undelivered.report(cmd);
                         tracing::warn!(
                             socket = label,
                             "websocket writer is gone; dropping the connection to re-dial"
@@ -836,8 +868,12 @@ async fn run_ws_connection_inner<
             );
         }
         for cmd in residue {
-            on_undelivered(cmd);
+            undelivered.report(cmd);
         }
+        *undelivered
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
         if let Some(kind) = terminal {
@@ -1841,5 +1877,92 @@ mod tests {
         );
         run.abort();
         venue.abort();
+    }
+
+    #[test]
+    fn cancellation_drop_reports_active_receipts_and_receiver_residue() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(a_cancel("receiver")).expect("receiver is live");
+        let active = Arc::new(StdMutex::new(VecDeque::from([(1, a_cancel("writer"))])));
+        let reported = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&reported);
+        let guard = UndeliveredGuard {
+            rx: Some(rx),
+            active: Arc::new(StdMutex::new(Some(active))),
+            report: move |cmd| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(cmd);
+            },
+        };
+        drop(guard);
+        let reported = reported.lock().expect("report lock");
+        assert_eq!(ids_of(&reported), ["writer", "receiver"]);
+    }
+
+    /// The wiring the test above cannot show: that an aborted connection task
+    /// reaches the guard at all.
+    ///
+    /// `stop()` and `connect()` both abort this task, and tokio's abort drops
+    /// the future rather than running any tail after its loop - which is
+    /// exactly why the old drain, written after `run_ws_connection_inner`
+    /// returned, was unreachable on the only path that mattered. So the
+    /// interleaving is forced rather than raced: a command is queued while the
+    /// task is in its dial backoff against a port nothing is listening on, and
+    /// the abort lands there. Nothing has been written, so what must come back
+    /// is the receiver residue.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "dials a loopback port; run in a socket-capable environment"]
+    async fn an_aborted_connection_task_still_reports_its_queued_commands() {
+        // Bound to learn a port, then dropped, so every dial is refused at once
+        // and the task spends its life in the backoff sleep.
+        let dead_port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind to learn a free port");
+            listener.local_addr().expect("stub addr").port()
+        };
+        let (cmd_tx, cmd_rx) = unbounded_channel::<Command>();
+        cmd_tx.send(a_cancel("queued")).expect("receiver is live");
+        let reported = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&reported);
+        let task = tokio::spawn(async move {
+            run_ws_connection(
+                WsConnectionConfig {
+                    ws_url: format!("ws://127.0.0.1:{dead_port}/ws"),
+                    conn: ConnHavoc::default(),
+                    seed: Some(1),
+                    connected: Arc::new(AtomicBool::new(false)),
+                    connected_notify: Arc::new(tokio::sync::Notify::new()),
+                    sim: SimClock::identity(),
+                    label: "test",
+                    identity: None,
+                    dial_timeout: Duration::from_secs(mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS),
+                },
+                Some(cmd_rx),
+                |cmd: &Command| cmd.clone(),
+                Vec::new,
+                |_msg: VenueMessage| async {},
+                || async {},
+                move |cmd: Command| {
+                    sink.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(cmd);
+                },
+            )
+            .await;
+        });
+        // Long enough for the first dial to be refused and the task to be
+        // parked in its backoff, short enough that no dial can have succeeded -
+        // nothing is listening on that port at all.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        drop(task.await);
+        let reported = reported.lock().expect("report lock");
+        assert_eq!(
+            ids_of(&reported),
+            ["queued"],
+            "aborting the connection task swallowed the command it was holding"
+        );
     }
 }

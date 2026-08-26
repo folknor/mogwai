@@ -253,7 +253,7 @@ pub(crate) fn instrument_any_or_warn(
             tracing::warn!(
                 symbol = %def.symbol,
                 error = %err,
-                "dropping instrument: unrepresentable (currency unknown to nautilus?); \
+                "dropping instrument: nautilus has no faithful representation for it; \
                  downstream consumers will refuse every bar for this symbol"
             );
         })
@@ -314,6 +314,7 @@ pub(crate) struct HavocFilter {
     reorder_prob: f64,
     rng: StdRng,
     held: Option<VenueMessage>,
+    held_generation: u64,
 }
 
 impl HavocFilter {
@@ -327,6 +328,7 @@ impl HavocFilter {
                 .seed
                 .map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64),
             held: None,
+            held_generation: 0,
         }
     }
 
@@ -336,6 +338,7 @@ impl HavocFilter {
             candidates.push(msg);
             candidates.push(held);
         } else if self.draw(self.reorder_prob) {
+            self.held_generation = self.held_generation.wrapping_add(1);
             self.held = Some(msg);
             return Vec::new();
         } else {
@@ -349,6 +352,18 @@ impl HavocFilter {
             return Vec::new();
         };
         self.emit_candidates(vec![held])
+    }
+
+    pub(crate) fn held_token(&self) -> Option<u64> {
+        self.held.as_ref().map(|_| self.held_generation)
+    }
+
+    fn flush_if_token(&mut self, token: u64) -> Vec<(VenueMessage, Duration)> {
+        if self.held_token() == Some(token) {
+            self.flush()
+        } else {
+            Vec::new()
+        }
     }
 
     fn emit_candidates(&mut self, candidates: Vec<VenueMessage>) -> Vec<(VenueMessage, Duration)> {
@@ -378,6 +393,24 @@ impl HavocFilter {
     pub(crate) fn draw(&mut self, probability: f64) -> bool {
         probability > 0.0 && self.rng.random::<f64>() < probability
     }
+}
+
+/// Gives a reorder hold a deadline no later than one wall second. A following message
+/// still releases it immediately; the token prevents an older timer from
+/// flushing a later hold on the same connection.
+pub(crate) fn schedule_reorder_flush(
+    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
+    token: u64,
+    sim: SimClock,
+    deliver_tx: UnboundedSender<HavocDelivery>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(sim.wall_duration(1_000_000_000).min(Duration::from_secs(1))).await;
+        let mut filter = filter.lock().await;
+        for (msg, delay) in filter.flush_if_token(token) {
+            drop(deliver_tx.send((havoc_deadline(sim, delay), msg)));
+        }
+    });
 }
 pub(crate) fn inbound_havoc(spec: &Option<HavocSpec>) -> InboundHavoc {
     spec.as_ref()
@@ -882,5 +915,108 @@ mod tests {
              and a serial drain would need ~{serial:?}"
         );
         drop(pump);
+    }
+
+    #[test]
+    fn a_reorder_hold_is_released_only_by_its_own_deadline_token() {
+        let mut filter = HavocFilter::from_inbound(&InboundHavoc {
+            reorder_prob: 1.0,
+            seed: Some(7),
+            ..InboundHavoc::default()
+        });
+        drop(filter.apply(VenueMessage::RunComplete {
+            sim_now_ns: 1,
+            elapsed_ns: 2,
+        }));
+        let token = filter.held_token().expect("the message is held");
+        assert!(
+            filter.flush_if_token(token.wrapping_add(1)).is_empty(),
+            "a timer belonging to a different hold released this one"
+        );
+        assert_eq!(
+            filter.held_token(),
+            Some(token),
+            "the wrong-token attempt must leave the hold in place"
+        );
+        let released = filter.flush_if_token(token);
+        assert!(
+            matches!(
+                released.as_slice(),
+                [(
+                    VenueMessage::RunComplete {
+                        sim_now_ns: 1,
+                        elapsed_ns: 2
+                    },
+                    _
+                )]
+            ),
+            "the hold's own token must release exactly the held message, got {released:?}"
+        );
+        assert_eq!(
+            filter.held_token(),
+            None,
+            "a released hold must not stay claimable by a second timer"
+        );
+    }
+
+    /// The deadline half of the same fix, driven through the real spawn.
+    ///
+    /// `flush_if_token` alone cannot show that a hold is ever released without
+    /// a following message - which was the whole of the finding, since the
+    /// execution socket's arrivals are order-driven and a quiet strategy
+    /// produces none. This drives `schedule_reorder_flush` and waits on the
+    /// delivery channel, so what is pinned is that the hold has a bound at all.
+    /// A generous wait, because what is under test is the existence of the
+    /// deadline and not its precision.
+    #[tokio::test]
+    async fn a_reorder_hold_is_released_by_its_deadline_with_no_following_message() {
+        let filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_inbound(
+            &InboundHavoc {
+                reorder_prob: 1.0,
+                seed: Some(7),
+                ..InboundHavoc::default()
+            },
+        )));
+        let (deliver_tx, mut deliver_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sim = SimClock::identity();
+        {
+            let mut guard = filter.lock().await;
+            enqueue_havoc(
+                &mut guard,
+                VenueMessage::RunComplete {
+                    sim_now_ns: 1,
+                    elapsed_ns: 2,
+                },
+                sim,
+                &deliver_tx,
+            );
+            let token = guard.held_token().expect("the reorder draw held it");
+            schedule_reorder_flush(Arc::clone(&filter), token, sim, deliver_tx.clone());
+        }
+        assert!(
+            deliver_rx.try_recv().is_err(),
+            "the hold must not be delivered before its deadline"
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(5), deliver_rx.recv())
+            .await
+            .expect("the hold's deadline must release it with no following message");
+        assert!(
+            matches!(
+                delivered,
+                Some((
+                    _,
+                    VenueMessage::RunComplete {
+                        sim_now_ns: 1,
+                        elapsed_ns: 2
+                    }
+                ))
+            ),
+            "the deadline released something other than the held message: {delivered:?}"
+        );
+        assert_eq!(
+            filter.lock().await.held_token(),
+            None,
+            "the deadline must clear the hold it released"
+        );
     }
 }

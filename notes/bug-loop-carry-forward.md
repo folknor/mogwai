@@ -2,12 +2,11 @@
 
 State the bug-hunt loop's agents cannot see, because each one arrives with only
 its own round. Every brief carries the relevant slice forward. Current through
-the close pass over the now-exhausted `notes/bugs-protocol-cli.md` arc, whose
-decisions are directly below. The bugs-protocol-cli, bugs-venue-serving,
-bugs-venue-mechanics and bugs-engine arcs are all closed and judged sound; the
-close-pass records are at the bottom. `notes/bugs-adapter.md` has not been
-worked at all, which is why this carry-forward stays live. The adapter arc is
-next, and the adapter is the one crate that touches nautilus.
+round 1 of `notes/bugs-adapter.md`, whose decisions are directly below. The
+bugs-protocol-cli, bugs-venue-serving, bugs-venue-mechanics and bugs-engine arcs
+are all closed and judged sound; the close-pass records are at the bottom. The
+adapter arc is live: findings 1 through 5 are closed, and findings 6 through 10
+are round 2's, untouched and verbatim in the document.
 
 What the adapter arc should carry from the protocol/CLI arc: the round-2 fix
 pass closed a finding by writing a sentence into `reference/architecture.md`,
@@ -15,6 +14,116 @@ and the sentence was false about the very path the finding named. Both halves
 of that matter - a durable claim is owed the same verification as a code
 change, and closing a "the ordering happens to be safe" finding with prose
 closes nothing.
+
+## Machinery agents may build on and must not break, from bugs-adapter round 1
+
+- **`admits_submit_rejection(status, origin)` is the only gate on the mirror's
+  `OrderRejected` arm, and it is an enumeration on purpose.** Do not simplify it
+  back to `!status.is_closed()`. The venue set is exactly nautilus's own
+  `OrderStatus::transition` arms for `OrderEventAny::Rejected` - `Initialized`,
+  `Submitted`, `Accepted`, `Triggered`, `PendingUpdate`, `PendingCancel` - and
+  the negation of `is_closed` is a different, larger set: `PartiallyFilled`,
+  `Emulated` and `Released` are all open and none of them admits a rejection.
+  `Accepted` and `Triggered` stay admitted deliberately, because
+  `mogwai_engine`'s `orders.rs` genuinely rejects a resting post-only stop-limit
+  that becomes marketable; tightening them would discard a real verdict.
+- **`RejectOrigin` distinguishes the venue's verdict from the receipt book's
+  guess, and both `synthesize_transport_reject` call sites must pass
+  `LocalTransport`.** The bare-submit site and the group fan-out reach the arm by
+  different paths and each has its own bite. A local transport rejection admits
+  only `Initialized` and `Submitted`: if the mirror has seen an accept, a
+  trigger, a partial fill or a pending amendment, the submit demonstrably landed,
+  so the ambiguous-send window is already resolved against "the frame never
+  left". `handle_exec_message` is the venue-origin wrapper; every other caller
+  keeps using it.
+- **The undelivered-command reporting is owned by a drop guard, not by code
+  after the loop.** `UndeliveredGuard` holds the command receiver and a handle to
+  the live receipt book, and `run_ws_connection` builds it as a local of the very
+  future that `stop()`/`connect()` abort. A tokio abort drops the future without
+  running any tail, which is why the old post-return drain was unreachable on the
+  only path that mattered. Do not move the reporting back out of `Drop`, and do
+  not move the guard into a task other than the one running the connection loop.
+  The `active` slot is set as the book is created and cleared after the residue
+  drain, so an ordinary return reports once and a cancellation reports once.
+- **The reorder hold has a token-guarded deadline.** `HavocFilter` mints a
+  `held_generation` per hold; `schedule_reorder_flush` spawns a timer carrying
+  that token and `flush_if_token` releases only the hold the token names, so a
+  timer outliving its own hold cannot flush a later one. The bound is
+  `sim.wall_duration(1s).min(1s)`, and the `min` is load-bearing: an unpaced
+  clock answers `u64::MAX` from `wall_duration`, which would be no deadline at
+  all.
+- **`convert::instrument_any` refuses `InstrumentClass::Forex`.** Its one
+  production caller is `instrument_any_or_warn`, so the observable behaviour is a
+  warn naming the symbol and the reason plus an instrument absent from nautilus's
+  cache. This is a refusal, not a deferral: a `Params` info bag cannot fix it,
+  because nautilus computes notional itself at an implicit multiplier of 1. The
+  cross-repository half is a standalone entry in `notes/todo.md`.
+
+## Decisions and hazards from bugs-adapter round 1
+
+- **The cold review's finding A was right about the defect and half right about
+  the fix, and the difference mattered.** The fix pass replaced an unguarded
+  mutation with `!record.status.is_closed()`, which still admitted
+  `PartiallyFilled`; the reviewer's prescription - admit only the states an
+  initial submit rejection is valid from - would additionally have dropped
+  `Accepted` and `Triggered`, where the engine really does reject. The answer was
+  neither predicate but two enumerated sets keyed on where the rejection came
+  from. Read the callee's own state table in `research/` before deciding what a
+  guard admits; both the negation and the intuition were wrong here.
+- **The fix pass's regression covered `Filled` only - the one status the defect
+  could not reach.** The replacement enumerates all fifteen `OrderStatus`
+  variants against both origins and asserts the admitted sets by equality, so a
+  new variant fails the test until its row is written. Bitten three ways:
+  reverting to `!is_closed()` fires the venue-set assertion showing exactly
+  `Emulated`, `Released` and `PartiallyFilled`; widening the transport set by one
+  fires the transport assertion; mutating `ts_last` on the refused path fires the
+  in-loop untouched-fields assertion.
+- **Two findings shipped with no regression at all and now have one each.**
+  Finding 3 (data-client teardown) had none:
+  `stopping_the_data_client_retires_its_command_sender_and_its_history_waiters`
+  bites separately on the `pending_history` clear and on the `ws_cmd` clear.
+  Finding 4's deadline had only a pure-helper token test:
+  `a_reorder_hold_is_released_by_its_deadline_with_no_following_message` drives
+  the real spawn and waits on the delivery channel, which is the only assertion
+  that shows a quiet execution socket ever releases its hold. Read the count
+  after a fix pass and ask which findings it covers, not only how many tests
+  moved - this loop has now been bitten by that three times.
+- **A test that reproduces a hang is not a test that reports one.** The
+  finding-3 regression first asserted with `oneshot::blocking_recv`, and its bite
+  hung for brokkr's whole 20 s per-test timeout instead of failing. `try_recv`
+  against `TryRecvError::Closed` says the same thing in microseconds. Any
+  regression whose defect signature is "the waiter parks" owes a non-blocking
+  assertion.
+- **The guard-scope half was checked at the code rather than taken from the
+  summary.** `UndeliveredGuard` is a local of the awaited future itself, so the
+  task doing the work owns it; the receipt book handle is installed before the
+  writer spawns and cleared after the residue drain, with no await in between
+  that could leave it stale. The helper-level drop test cannot show the guard is
+  reached at all, so a second test aborts a real `run_ws_connection` task parked
+  in its dial backoff and asserts the queued command comes back. It is
+  ignore-gated because it dials loopback.
+- One durable-prose correction, in the arc's characteristic family:
+  `docs/adapter-lifecycle.md` said every accepted-but-unwritten order command is
+  reported as a synthesized rejection, and that the report always errs toward
+  saying less arrived than did. Both became false with the origin split. The
+  section now states the exception and what a submit rejection therefore means.
+  `instrument_any_or_warn`'s warning also named "currency unknown to nautilus?"
+  as the cause, which the forex refusal made narrower than the code.
+- No `TAPE_PROTOCOL_VERSION` bump is owed, verified rather than assumed. Nothing
+  under `mogwai-data`, `analysis/` or the committed fingerprint changed, and no
+  edit reaches a generator constant, an arrival clock, a seed derivation, the
+  fill band's draw or the tape origin. The nautilus adapter is not on the tape
+  generation path at all. `TAPE_PROTOCOL_VERSION` is 24.
+- Residual, recorded rather than closed: `perpetual`'s four funding fields are
+  still dropped silently at the same seam finding 5 named, and unlike forex they
+  got no refusal - the right shape is a `DataEvent::FundingRate` publisher, which
+  nobody has built. Filed in `notes/todo.md`.
+- Least examined by this round: whether an `AdmissionRejected` the venue sends
+  for a `Submit` can arrive behind that order's own acceptance under reorder
+  havoc. It carries `RejectOrigin::Venue`, so `Accepted` still admits it - which
+  is correct for the engine's post-only stop-limit path and unexamined for the
+  admission path, where the venue by definition never accepted the order. No
+  test distinguishes the two venue-side producers.
 
 ## Machinery agents may build on and must not break, from bugs-protocol-cli round 2
 

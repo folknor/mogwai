@@ -352,7 +352,7 @@ pub(crate) fn instrument_any(
     // panicking `From<&str>` impl off this path entirely.
     let symbol = id.symbol;
     match &def.class {
-        InstrumentClass::Spot { base, quote } | InstrumentClass::Forex { base, quote, .. } => {
+        InstrumentClass::Spot { base, quote } => {
             let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
             let quote =
                 Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
@@ -385,6 +385,12 @@ pub(crate) fn instrument_any(
             .context("convert spot currency pair")?;
             Ok(InstrumentAny::CurrencyPair(pair))
         }
+        InstrumentClass::Forex { .. } => anyhow::bail!(
+            "cannot publish forex instrument {} to nautilus: its CurrencyPair is a spot/cash \
+             instrument and cannot represent mogwai's marked leveraged position, rollover and \
+             swaps",
+            def.symbol
+        ),
         InstrumentClass::Future {
             underlying,
             settlement_currency,
@@ -663,6 +669,34 @@ mod tests {
         };
         let error = instrument_any(&def, UnixNanos::from(7)).unwrap_err();
         assert!(error.to_string().contains("whole-contract sizing"));
+    }
+
+    #[test]
+    fn leveraged_forex_is_refused_instead_of_published_as_spot() {
+        let def = InstrumentDef {
+            symbol: "EURUSD".into(),
+            class: InstrumentClass::Forex {
+                base: "EUR".into(),
+                quote: "USD".into(),
+                multiplier: Decimal::new(100_000, 0),
+                pip_size: Decimal::new(1, 4),
+                point_size: Decimal::new(1, 5),
+                rollover_minute_utc: 1_320,
+                swap_long: Decimal::new(-2, 0),
+                swap_short: Decimal::ONE,
+            },
+            price_precision: 5,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 5),
+            size_increment: Decimal::ONE,
+        };
+        let error = instrument_any(&def, UnixNanos::from(7)).expect_err("forex must fail loud");
+        assert_eq!(
+            error.to_string(),
+            "cannot publish forex instrument EURUSD to nautilus: its CurrencyPair is a \
+             spot/cash instrument and cannot represent mogwai's marked leveraged position, \
+             rollover and swaps"
+        );
     }
 
     #[test]

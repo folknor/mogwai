@@ -55,8 +55,8 @@ use crate::{
         emit_seeded_instruments, enqueue_havoc, ensure_instrument, ensure_on_river,
         fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump, inbound_havoc,
         instrument_any_or_warn, instrument_def, lock_recover, now_unix_nanos, request_timeout_secs,
-        run_identity_check, seed_instruments, spawn_latency_pump, symbol_from_instrument,
-        track_task, wait_connected, warn_missing_instrument_once,
+        run_identity_check, schedule_reorder_flush, seed_instruments, spawn_latency_pump,
+        symbol_from_instrument, track_task, wait_connected, warn_missing_instrument_once,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -362,8 +362,15 @@ impl DataClient for MogwaiDataClient {
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
+        // Close the command generation before cancelling its receiver. A new
+        // request must fail synchronously instead of entering a dead queue.
+        self.ws_cmd = None;
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
+        // Dropping every sender wakes history collectors through their existing
+        // abandoned-session arm instead of making them wait out the request
+        // timeout after this transport generation is gone.
+        lock_recover(&self.pending_history, "pending history").clear();
         // Emit any completed-but-withheld bar windows before the drain tasks are
         // gone and `reset` clears the table (AD19). Done after abort so no drain
         // task races a fresh trade into the same window; the shared bar mutex
@@ -402,8 +409,10 @@ impl DataClient for MogwaiDataClient {
         // A client owns exactly one transport generation. Retire every task
         // and sender from the previous generation before doing any async setup,
         // so a second connect cannot leave two readers sharing `connected`.
+        self.ws_cmd = None;
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
+        lock_recover(&self.pending_history, "pending history").clear();
         let http_base_url = self.config.http_base_url();
         let (venue, floor_known) = fetch_clock_or_identity(&self.http, &http_base_url).await;
         let sim = venue.sim;
@@ -542,6 +551,14 @@ impl DataClient for MogwaiDataClient {
                         };
                         let mut filter = handler_filter.lock().await;
                         enqueue_havoc(&mut filter, venue_msg, sim, &handler_deliver);
+                        if let Some(token) = filter.held_token() {
+                            schedule_reorder_flush(
+                                Arc::clone(&handler_filter),
+                                token,
+                                sim,
+                                handler_deliver.clone(),
+                            );
+                        }
                     }
                 },
                 move || {
@@ -593,6 +610,8 @@ impl DataClient for MogwaiDataClient {
         {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
+            self.ws_cmd = None;
+            lock_recover(&self.pending_history, "pending history").clear();
             return Err(err);
         }
         // The post-bind reseed. Binding is what registers an unconfigured symbol
@@ -613,6 +632,8 @@ impl DataClient for MogwaiDataClient {
             // retry would race, and never leave the barrier shut on a live pump.
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
+            self.ws_cmd = None;
+            lock_recover(&self.pending_history, "pending history").clear();
             return Err(err);
         }
         emit_seeded_instruments(&reseed_sink, &self.instruments, sim);
@@ -2031,6 +2052,50 @@ mod quote_cache_tests {
             lock_recover(&client.subs, "subscriptions").is_empty(),
             "and no symbol subscription either"
         );
+    }
+
+    /// The data client's teardown, which had none of the execution client's.
+    ///
+    /// `stop()` aborts the reader, so nothing will ever answer a history page
+    /// that is in flight when it lands: the waiter used to park for the whole
+    /// havoc-scaled request timeout - 30 s by default - and then answer empty,
+    /// while `history_session()` kept handing out a sender for a dead
+    /// generation. Both halves are asserted here, and the ordering matters as
+    /// much as the clearing: `ws_cmd` is dropped before the abort, so a request
+    /// racing `stop()` cannot enqueue onto a receiver that is already going
+    /// away.
+    #[test]
+    fn stopping_the_data_client_retires_its_command_sender_and_its_history_waiters() {
+        let mut client = client_bound_to(None);
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        client.ws_cmd = Some(cmd_tx);
+        assert!(
+            client.history_session().is_ok(),
+            "connected before the stop"
+        );
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        lock_recover(&client.pending_history, "test pending").insert("R-1".to_owned(), reply_tx);
+
+        client.stop().expect("stop is infallible here");
+
+        // `try_recv`, not a blocking wait: the defect's signature is a waiter
+        // that parks, so a test that waits for it reproduces the hang instead
+        // of reporting it.
+        assert!(
+            matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "an abandoned history waiter must fail fast rather than wait out its timeout"
+        );
+        assert!(
+            lock_recover(&client.pending_history, "test pending").is_empty(),
+            "the pending table must not carry a dead generation's waiters"
+        );
+        let Err(error) = client.history_session() else {
+            panic!("a stopped client has no river to page");
+        };
+        assert!(error.to_string().contains("not connected"), "{error}");
     }
 
     #[test]

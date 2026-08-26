@@ -107,19 +107,34 @@ reported through the same synthesized rejection as any other transport failure -
 an `OrderRejected` for a submit (every leg, for a group), an
 `OrderModifyRejected` for a modify, an `OrderCancelRejected` for a cancel - with
 a reason naming the cause. An undelivered venue query fails its caller
-immediately rather than waiting out its request timeout.
+immediately rather than waiting out its request timeout, and the same holds for
+a history request in flight when the data client stops or reconnects.
+
+The report is made whether the connection ends by dropping, by the run
+finishing, or by your host calling `stop()` or `connect()` again. Those last two
+abort the socket task outright, so the reporting is owned by that task's own
+drop rather than by code after its loop; nothing queued is lost to a
+cancellation.
 
 So an order never sits in `Submitted` forever because its socket dropped. If
 your strategy wants the order retried, it retries it on the rejection.
 
-**The report errs toward saying less arrived than did.** A socket dying in the
-instant between the frame reaching the wire and the write call returning leaves
-the adapter unable to tell that it landed, so it reports the command
-undelivered though the venue may have seen it. That direction is deliberate: a
-spurious rejection is recoverable by a host that retries, while a silently
-swallowed order is not. Treat a transport rejection as "probably not accepted",
-not as "certainly not accepted", and let reconciliation settle the rest - the
-venue-truth reports on reconnect are what resolve the ambiguity.
+**The report errs toward saying less arrived than did, except where the adapter
+can see otherwise.** A socket dying in the instant between the frame reaching
+the wire and the write call returning leaves the adapter unable to tell that it
+landed, so it reports the command undelivered though the venue may have seen
+it. That direction is deliberate: a spurious rejection is recoverable by a host
+that retries, while a silently swallowed order is not.
+
+The one thing the adapter will not do is let that guess overrule evidence
+against it. If the order's own mirror row has already seen the venue accept,
+trigger, partially fill or begin amending it, the submit demonstrably did
+arrive, and the synthesized rejection is dropped with a warning instead of
+closing an order the venue still owns. A rejection you do receive for a submit
+therefore means the adapter saw no venue acknowledgement for that order at all.
+Treat it as "probably not accepted" rather than "certainly not accepted", and
+let reconciliation settle the rest - the venue-truth reports on reconnect are
+what resolve the remainder.
 
 ## The data client has the same shape, without the guard
 
