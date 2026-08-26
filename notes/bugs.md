@@ -193,56 +193,6 @@ epoch, so a passenger boarding a finished run reports the boat's whole span as
 its own elapsed. The variant doc calls this intended, but it is the same class of
 consumer confusion C10 was filed for and nothing tracks it.
 
-### C13. Named tape windows have no wire at all
-
-Provenance, folded in from `notes/todo.md` on 2026-08-26 when that file's
-shared-exchange section was reconciled away: this is the one axis of the
-optional shared-exchange mode still open, and it is open because the
-one-venue-per-run rewrite removed it and nothing has since undone that. The
-default mode - one venue owned by one run, serving several tapes to one account
-at one placement - is complete. Both modes must eventually be supported, so the
-axis is deferred rather than dropped.
-
-Owed, not optional. `reference/north-star.md`'s settled premises make a named
-window on a shared exchange one of the two ways a path is reproduced, so this is
-an end-state commitment the tree is behind on rather than a feature request.
-
-`SocketQuery` carries no start or end: every cursor is placed at the fixed
-`run_start_ns` origin and `duration_ms` is length-from-boarding. This is the half
-most strategies will use, because a named window is what makes a forward-test
-claim bindable: a run becomes a pure function of `(seed, config, symbol, start,
-end)` with no boarding instant and no wall-clock input anywhere, and replication
-pairs dealt the same window trade identical water by construction rather than
-approximately.
-
-A named window always gets its own river even against an identical request
-already running, because the first requester is by then some N of sim-time ahead
-and a window means being served from its start. Sharing therefore only happens
-for the unnamed form - a preset plus a duration - which is the request that says
-"wherever you are is fine".
-
-One constraint to design for up front: a strategy needs warmup before its
-requested start, so `[T1, T2]` asks for materialization from `T1 - warmup_ns`,
-and that floor must sit at or above `TAPE_ORIGIN_NS`. A window requested too near
-the tape origin cannot carry its own warmup. Better as a named refusal at request
-time than a short warmup nobody notices.
-
-Re-verified 2026-08-26, unstarted and accurate: `SocketQuery` is
-`deny_unknown_fields` over `symbol`, `speed`, `duration_ms`, `account`, the four
-`surge_*` keys and the presented identity, so a client cannot even smuggle a
-start in, and every cursor placement is against `state.run.started_ns`.
-
-One thing to fix while here, and a documentation defect on its own terms:
-`SocketQuery::speed`'s doc comment already asserts the named-window rule as
-though it were shipped - "A named window always gets its own river even against
-an identical request already running". No named window exists on the wire. Under
-the folder rules only `north-star.md` and `glossary.md` may state the end state
-as fact; everywhere else says so in as many words and names it as owed. Whoever
-lands C13 makes that comment true; whoever does not should make it say it is
-owed.
-
----
-
 ### C16. The venue no longer receives a terminal interrupt
 
 Filed 2026-08-24 from round 4, as the stated cost of the C8 process-group fix.
@@ -352,8 +302,8 @@ that is the decision this finding actually carries.
 
 ### D8. A composed river has no checkpoint chain, so a distant seek is O(ticks)
 
-Filed 2026-08-26 as the residue of D4, and named because C13's tape windows are
-what will meet it. `SegmentSource::seek_to` no longer caps the walk - a cap
+Filed 2026-08-26 as the residue of D4, and originally named in anticipation of
+C13's tape windows. `SegmentSource::seek_to` no longer caps the walk - a cap
 there turned distance into a latched terminal fault, which would have made a
 window on a composed river fail silently - so a far target is now reachable and
 simply costs the walk. What it costs is the whole walk: the composed level and
@@ -368,6 +318,13 @@ replay only the residual. The composer wants the same thing, and the venue's
 opening a window far from the composed origin pays for every tick between, which
 is correct but not fast, and nothing bounds how long it holds whatever lock it
 took to get there.
+
+Reconciled after C13 landed 2026-08-26: named windows currently resolve only to
+the generated serving source, whose river already owns a `CheckpointIndex` and
+whose private placements resume from that chain. No venue config or river
+factory can select `SegmentSource`; it remains an offline `segments compose`
+source. C13 therefore does not enter this linear composed seek. D8 stays open
+for the serving wiring that first makes composed rivers selectable.
 
 ### D5. The 86 MB and 57 MB build tax, and the dead protocol code
 
@@ -1118,6 +1075,47 @@ byte-budget sense that kept `reservation`, at a consumer-visible config key.
 
 Acceptance of an order onto the book, about 60 sites, is unruled and must not be
 swept as retired.
+
+### K8. Placement is now a load-bearing word with no glossary entry
+
+Raised 2026-08-26 by round 7's cold review, which asked whether C13's named tape
+windows owed the glossary a change. The verdict reached, with the reasoning so it
+is not re-derived:
+
+A named window is a placement and not a river. That is not a preference, it is
+provable. The window never enters `RiverKey`: the key a named request resolves is
+the key the unnamed form resolves, so the seed derivation, the tape origin and
+the generated value at any instant are the same either way, and materializing to
+a later origin is a forward walk of that one sequence rather than a revision of
+an earlier part of it. What the window decides is where a cursor is placed on the
+sequence, which checkpoint it resumes from, where its boat's sim clock is
+anchored and where its delivery stops. The earlier phrasing "a named window
+always gets its own river", which C13 carried, was therefore wrong about the
+water and right about the cursor, and the code is written to the latter.
+
+The consequence that needs an owner: placement is now load-bearing in the sense
+the glossary's own admission test names. It is not internal mechanism any more -
+admission refuses on it (`PLACEMENT_CONFLICT_MARKER`), the boatyard keys on it,
+`docs/config.md` and `reference/architecture.md` state rules over it, and two
+people can now agree that "the boat is an implementation cache with no semantics
+of its own" while meaning different things, because a named boat stops
+publishing at its bound and an unnamed one does not.
+
+Two facts in the Boat entry are what the word would have to be reconciled
+against, and neither may be edited to match the tree, because the glossary states
+the end state and the tree is what owes the change where they differ:
+
+- "Passengers asking for the same river and the same speed share one boat." Two
+  accounts dealt identical bounds now get two boats. They read byte-identical
+  water from the same instant, so nothing observable distinguishes them, but the
+  sentence is no longer literally the sharing rule.
+- "A boat is an implementation cache with no semantics of its own." A named
+  boat's end bound is the passenger's completion, which is a semantic the hull
+  now carries.
+
+An agent may not resolve either. What is wanted is an owner ruling on whether
+placement earns an entry, and if it does, whether the Boat entry's sharing
+sentence is restated over placement rather than over speed alone.
 
 ### K7. A sixth sense of ledger, and a misfiled oracle
 

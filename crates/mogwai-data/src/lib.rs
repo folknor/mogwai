@@ -153,7 +153,19 @@ pub use trigger::{
 /// takes the same path it always did. The bump is owed anyway, because the
 /// generation-path rule is unconditional and no tape identity has ever been
 /// depended on.
-pub const TAPE_PROTOCOL_VERSION: u32 = 25;
+/// 26 lands named tape windows on the venue's `/ws` upgrade. No byte moves and
+/// none can: a window is a placement, not water. The river key it resolves is
+/// the same key the unnamed form resolves, so seed derivation, the tape origin
+/// and the generated sequence at any instant are untouched; what the window
+/// changes is where a cursor is placed on that sequence, which checkpoint it
+/// resumes from, where its boat's sim clock is anchored, and where its delivery
+/// stops. Materializing further than an unnamed run would is a forward walk of
+/// the same deterministic sequence, so reaching a later origin cannot revise an
+/// earlier instant. This crate saw no edit but this constant. The bump is kept
+/// rather than owed - it costs one integer, no tape identity has ever been
+/// depended on, and a spent identity is cheaper than an argument about whether
+/// the next reader will agree the placement analysis was exhaustive.
+pub const TAPE_PROTOCOL_VERSION: u32 = 26;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

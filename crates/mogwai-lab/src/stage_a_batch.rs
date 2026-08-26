@@ -1164,7 +1164,7 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 25, which the manifest hashes over: the
+        // Re-blessed at tape protocol 26, which the manifest hashes over: the
         // constant is an input to the plan identity, so a bump moves this by
         // construction and the artifact and this literal move together. No cell
         // moved in that re-bless - the whole diff was the version field, the
@@ -1176,7 +1176,7 @@ mod tests {
         // could not agree with a literal transcribed from the old artifact.
         assert_eq!(
             manifest.plan_sha256,
-            "cc825935efeb65308d438375a3525c21c583d1d4368f5dc09f5d22f72a6488dc"
+            "86531a1a6790cec740020cfc6587525228750d2125359492b2c5d22253381876"
         );
         assert_eq!(
             manifest.plan_sha256,

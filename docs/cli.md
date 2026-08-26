@@ -39,6 +39,27 @@ second cursor on the same water.
 A consumer names that river from its own configuration; the readiness record does
 not supply one.
 
+The upgrade also accepts the pair `?window_start_ns=` and `?window_end_ns=` for
+an absolute `[start, end)` tape window. Both bounds are required and the pair
+cannot be combined with `duration_ms`. A named window is private to one account
+and callsign, so replication accounts dealt identical bounds get separate
+cursors over identical water from the stated start; the two legs of one adapter
+still share their placement.
+
+The span must be positive, lie within the declared run, and leave room for the
+configured warmup before its start. Refusals carry stable names such as
+`tape_window_zero_length`, `tape_window_start_before_run`,
+`tape_window_end_after_run`, and `tape_window_warmup_before_origin` in the 400
+body. At its end the socket receives `PassengerDurationComplete` declaring
+exactly `end - start` and closes normally. The end is absolute: a leg that
+joined its pair's placement partway through waits only the remainder, so it
+closes at the same instant and reports a shorter `elapsed_ns` than it declared.
+
+An account holds one placement per river. A second socket of one account on a
+river it already rides, asking for different bounds or for the run's shared
+origin, is refused with `a ledger rides one placement` for the same reason a
+second cadence is refused: one book cannot be judged on two clocks.
+
 `GET /instruments` reports the configured shapes plus every river materialized
 so far. A socket bind or history poll materializes a river and grows the list.
 A run retains at most 256 materialized rivers and never evicts them. This is an

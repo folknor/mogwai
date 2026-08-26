@@ -79,11 +79,11 @@ pub(crate) struct SocketQuery {
     /// refusal left is per ledger: an account already riding this river at
     /// another speed would be judged on two clocks.
     ///
-    /// Sharing at all only applies to the unnamed form, a preset plus a
-    /// duration, the request that says "wherever you are is fine". A named
-    /// window always gets its own river even against an identical request
-    /// already running: the first requester is by then some sim-time ahead, and
-    /// asking for a window means being served from its start.
+    /// Open-ended sharing applies only to the unnamed form, the request that
+    /// says "wherever you are is fine". A named window gets a private placement
+    /// for its account and callsign even when another account already requested
+    /// identical bounds. Both placements read the same deterministic river from
+    /// the named start; the window changes cursor ownership, not water identity.
     #[serde(default)]
     speed: Option<f64>,
     /// Absent means indefinite. Simulated milliseconds, measured on the boat's
@@ -94,6 +94,13 @@ pub(crate) struct SocketQuery {
     /// winds down when the last one leaves.
     #[serde(default)]
     duration_ms: Option<u64>,
+    /// Inclusive start of a named tape window. It is valid only with
+    /// `window_end_ns`, and the pair is mutually exclusive with `duration_ms`.
+    #[serde(default)]
+    window_start_ns: Option<u64>,
+    /// Exclusive completion boundary of a named tape window.
+    #[serde(default)]
+    window_end_ns: Option<u64>,
     /// The account to trade under. Absent means the venue's default account,
     /// which exists for the ephemeral single-consumer venue where naming one
     /// would be ceremony - it is not a venue-wide account every connection
@@ -171,6 +178,7 @@ pub(crate) struct Passenger {
     pub(crate) symbol: mogwai_protocol::Symbol,
     pub(crate) ticket: Ticket,
     pub(crate) duration_ms: Option<u64>,
+    pub(crate) window: Option<mogwai_protocol::control::TapeWindow>,
     /// The account this passenger trades under. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
     pub(crate) account_state: Arc<crate::run::Account>,
@@ -358,6 +366,24 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
         },
         None => (state.run.default_account_id(), false),
     };
+    let window = match mogwai_protocol::control::validate_tape_window(
+        query.window_start_ns,
+        query.window_end_ns,
+        query.duration_ms,
+        crate::source::TAPE_ORIGIN_NS,
+        state.run.warmup_ns,
+        state.run.started_ns,
+        state.run.deadline_ns,
+    ) {
+        Ok(window) => window,
+        Err(refusal) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("named tape window refused: {}", refusal.marker()),
+            )
+                .into_response());
+        }
+    };
     // The bind-time shape refusal: an invalid resolved shape or a
     // funding-barred one is a configuration error, named here and before any
     // trading, rather than surfacing later as a fill-time funds rejection.
@@ -450,10 +476,12 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
     // and the live consumer pays nothing. Dropping it rolls the reservation
     // back.
     //
-    // The cadence rule is decided here rather than after the placement, which
-    // is what makes it a check the incumbent cannot lose to. The seat is
-    // knowable now: the river is resolved above and the speed quantizes without
-    // a boat.
+    // The one-clock-per-ledger rule is decided here rather than after the
+    // placement, which is what makes it a check the incumbent cannot lose to.
+    // The seat is knowable now: the river is resolved above, the speed quantizes
+    // without a boat, and the window was validated before any of it. All three
+    // are what a boat's clock is made of, so admission compares exactly what the
+    // boatyard would key on minus the hull-sharing owner.
     let speed_micros = match crate::boatyard::quantize_speed(speed) {
         Ok(speed_micros) => speed_micros,
         Err(error) => return Err((StatusCode::BAD_REQUEST, error.to_string()).into_response()),
@@ -461,6 +489,7 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
     let seat = crate::registry::Seat {
         river: river.clone(),
         speed_micros,
+        bounds: window.map(|window| (window.start_ns, window.end_ns)),
     };
     let mut reservation = match state.run.reserve_admission(
         account_id.as_str(),
@@ -493,6 +522,26 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
             )
                 .into_response());
         }
+        Err(crate::registry::AdmissionRefusal::PlacementConflict(held)) => {
+            // Named only as shared or named, never with the sitting bounds:
+            // an account's placement is its own business and this body is
+            // read by whoever presents the id.
+            let held_placement = if held.bounds.is_some() {
+                "a named tape window"
+            } else {
+                "the run's shared placement"
+            };
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "account {account} is already seated on {symbol} from {held_placement}; \
+                     {marker}",
+                    account = account_id.as_str(),
+                    marker = mogwai_protocol::control::PLACEMENT_CONFLICT_MARKER,
+                ),
+            )
+                .into_response());
+        }
         Err(crate::registry::AdmissionRefusal::Busy) => {
             return Err((
                 StatusCode::CONFLICT,
@@ -504,10 +553,28 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
                 .into_response());
         }
     };
+    let window_owner: Arc<str> = match (window, query.callsign.as_deref()) {
+        (Some(_), Some(callsign)) => Arc::from(format!("{}:{callsign}", account_id.as_str())),
+        (Some(_), None) => {
+            static NEXT_UNNAMED_WINDOW: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            Arc::from(format!(
+                "{}:#{}",
+                account_id.as_str(),
+                NEXT_UNNAMED_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+        }
+        (None, _) => Arc::from("shared"),
+    };
     let ticket = match state
         .run
         .boatyard
-        .board(&BoardRequest { river, speed })
+        .board(&BoardRequest {
+            river,
+            speed,
+            window,
+            window_owner,
+        })
         .await
     {
         Ok(ticket) => ticket,
@@ -647,6 +714,7 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
             symbol,
             ticket,
             duration_ms,
+            window,
             account_state,
             presented_identity: callsign,
             resumed_from_freeze: committed.resumed_from_freeze,
@@ -870,8 +938,16 @@ fn spawn_history_page(
     // buys nothing visible, which is exactly why it was missing: on an unpaced
     // or slow-boat run the boat trails the run clock, and serving the span
     // between them would hand this passenger water it has not been delivered.
-    let present = state.run_now().min(sim_now_ns(boat.sim));
-    let run_start_ns = state.run.started_ns;
+    let mut present = state.run_now().min(sim_now_ns(boat.sim));
+    if let Some(end_ns) = boat.key().window_end_ns() {
+        present = present.min(end_ns.saturating_sub(1));
+    }
+    let run_start_ns = boat.key().origin_ns(state.run.started_ns);
+    let data_origin_ns = if boat.key().window_end_ns().is_some() {
+        run_start_ns.saturating_sub(state.run.warmup_ns)
+    } else {
+        state.run.data_origin_ns()
+    };
     let lanes = lanes.clone();
     let panic_request_id = request_id.clone();
     tokio::spawn(async move {
@@ -901,6 +977,7 @@ fn spawn_history_page(
                     continuation: continuation.as_deref(),
                     present,
                     run_start_ns,
+                    data_origin_ns,
                 },
             )
             .map(|page| {
@@ -1527,9 +1604,29 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     // the boat: a boat placed for an earlier passenger has been running since
     // before this one existed, so its epoch is somebody else's boarding.
     let boarded_ns = sim_now_ns(boat_sim);
-    let duration = passenger
-        .duration_ms
-        .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
+    let declared_duration_ns = passenger.window.map_or_else(
+        || passenger.duration_ms.map(sim_duration_from_millis),
+        |window| Some(window.end_ns.saturating_sub(window.start_ns)),
+    );
+    // What is announced and what is waited are the same span for a passenger
+    // duration and are not for a named window. A duration is length-from-
+    // boarding by definition, so its timer is its declaration. A window is an
+    // absolute `[start, end)`, and its placement is shared by every socket
+    // presenting one account and callsign - so the second leg of an adapter pair
+    // joins a cursor that is already some way in, and owes only what is left to
+    // `end_ns`. Sleeping the declared span there would hold that leg open past
+    // the window on a feed the cursor stopped publishing at, and report a
+    // `sim_now_ns` outside the window it named. That is the boarding instant
+    // back in the observable, which is the single property a named window exists
+    // to remove: a run is meant to be a pure function of seed, config, symbol,
+    // start and end. A window already at or past its end completes at once,
+    // which a saturated zero remainder gives without a special case - the wall
+    // map floors at a nanosecond, so the timer is ready on the next poll.
+    let remaining_ns = passenger.window.map_or(declared_duration_ns, |window| {
+        Some(window.end_ns.saturating_sub(boarded_ns))
+    });
+    let duration =
+        remaining_ns.map(|duration_ns| tokio::time::sleep(boat_sim.wall_duration(duration_ns)));
     tokio::pin!(duration);
     // The venue's own `(sim_now_ns, elapsed_ns)` pair is deliberately discarded
     // here and below: only the fact of completion crosses, the numbers are
@@ -1603,7 +1700,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
                             // run-completion helper - which measures from the
                             // boat epoch - would report someone else's ride.
                             elapsed_ns: now.saturating_sub(boarded_ns),
-                            declared_duration_ns: passenger.duration_ms.unwrap_or(0).saturating_mul(1_000_000),
+                            declared_duration_ns: declared_duration_ns.unwrap_or(0),
                         }, mogwai_protocol::close::DURATION_COMPLETE)
                     };
                     drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&frame).expect("a terminal announcement serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
@@ -1705,6 +1802,10 @@ mod tests {
         let accepted =
             parse("account=WYRD-820&callsign=alpha").expect("the current identity key parses");
         assert_eq!(accepted.0.callsign.as_deref(), Some("alpha"));
+        let window = parse("account=WYRD-820&window_start_ns=1000&window_end_ns=2000")
+            .expect("both named-window bounds are wire fields");
+        assert_eq!(window.0.window_start_ns, Some(1_000));
+        assert_eq!(window.0.window_end_ns, Some(2_000));
     }
 
     /// The differential is the point: a receiver subscribed after the terminal

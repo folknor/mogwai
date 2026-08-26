@@ -710,7 +710,9 @@ which `deny_unknown_fields` rejects any other key on: the optional, case-exact
 `symbol` names its one river, the optional `speed` names the pacing multiple,
 the optional `duration_ms` names a passenger-local simulated deadline, the
 optional `account` names the ledger it trades, and the optional `callsign`
-names the identity the socket presents.
+names the identity the socket presents. `window_start_ns` and `window_end_ns`
+form one absolute named window and must appear together; that form is mutually
+exclusive with `duration_ms`.
 
 That last one lets several sockets present one identity. A second identity
 claiming the account evicts the incumbent connections, while sockets presenting
@@ -823,19 +825,27 @@ A boat's per-river state is:
 
 The memo belongs here because its bucket is a function of the boat's clock and
 the walk it saves is a walk of this river only.
-A passenger owns an uncloneable ticket for one websocket connection. The first
-passenger places the boat at the river's fixed warmup origin; later passengers
-with the same speed join it mid-stream. Speed is quantized to micro-multiples
+A passenger owns an uncloneable ticket for one websocket connection. An
+unnamed passenger places or joins a boat at the run's fixed origin. A named
+window places a private boat at its stated start, except that the data and
+execution legs presenting one account and callsign share that placement. Two
+accounts dealt identical bounds therefore read separate cursors over
+byte-identical water from the same start. Speed is quantized to micro-multiples
 in the sharing key. Duration is passenger-local and is therefore not in that
 key. An unserved speed is a second cursor on the same water, not a refusal:
-speed mutates no generated value. One ledger still carries one cadence - two
-sockets on the default account may ride two rivers, but a second speed on a
-river that account is already riding is refused, because that would be two
-clocks judging one book. The account counts its passengers per boat, and the
+speed mutates no generated value. One ledger still carries one clock per river,
+and a clock is its rate and its epoch together. Two sockets on the default
+account may ride two rivers, but on a river that account is already riding, a
+second speed is refused as a cadence conflict and a second placement - a
+different named window, or the run's shared origin against a named one - is
+refused as a placement conflict, because either would be two clocks judging one
+book. Admission decides both from the seat, before any boat is placed, so the
+check compares exactly what the boatyard keys on minus the owner that decides
+hull sharing. The account counts its passengers per boat, and the
 count falls when a passenger ends rather than when the account freezes: an
-account riding two rivers never freezes on losing one socket, and a boat key is
-only (river, speed), so a ride left behind would be indistinguishable from a
-live one as soon as anybody boarded that cadence again. Dropping the last
+account riding two rivers never freezes on losing one socket, and a boat key
+carries no connection identity, so a ride left behind would be
+indistinguishable from a live one as soon as anybody boarded that cadence again. Dropping the last
 ticket of a given cadence winds that boat down: it
 cancels its worker and joins it away from the registry mutex. Other cadences
 on the same river stay. Rivers and their bounded checkpoint sets remain for
@@ -1014,7 +1024,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 25; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 26; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -1222,8 +1232,10 @@ warmup is generated on first read, and the
 run proper begins at `run_start_ns = TAPE_ORIGIN_NS + warmup_ns` on the same
 axis, so `data_origin_ns` is always `TAPE_ORIGIN_NS` and history outside
 `[data_origin_ns, sim_now]` is refused. The venue has one tape origin, one
-placement origin and one warmup span, but N rivers, each carrying at most one
-boat with its own wall anchor and speed. This is why the readiness record
+default placement origin and one warmup span, but N rivers and as many named
+placements as their passengers request. A named `[start, end)` placement has
+its own history floor at `start - warmup_ns`; admission refuses a start whose
+floor precedes `TAPE_ORIGIN_NS`. This is why the readiness record
 carries those three time facts and no symbol. A run is therefore a
 pure function of `(seed, config)` for a given build and fingerprint - with the
 limit that a new seed only draws a new path from the one fitted model behind
@@ -1237,7 +1249,16 @@ WebSockets normally, drains, and exits zero. A passenger duration is the
 socket's own `duration_ms`, simulated milliseconds measured on its boat's clock
 from its boarding instant, so passengers with different durations still share
 one boat and each closes at its own deadline while the boat winds down only
-when the last of them leaves. The venue's completion instant is the signal that
+when the last of them leaves. A named window replaces that passenger duration:
+its boat clock starts at `window_start_ns`, stops publishing at
+`window_end_ns`, and announces the same passenger-scoped completion with the
+declared span `end - start`. The deadline is absolute where a duration is
+relative. A socket joining a placement its paired leg already opened waits only
+`window_end_ns - sim_now`, so both legs end at the window's end and neither
+reports an instant outside it - which is what keeps a named run a pure function
+of seed, config, symbol, start and end, with the boarding instant nowhere in the
+observable. Its `elapsed_ns` is still the ride it actually took, so a late leg
+reports less than the span it declared. The venue's completion instant is the signal that
 crosses to a socket; the numbers on the `RunComplete` frame are always
 re-derived on that socket's boat clock, and `elapsed_ns` is how much tape that
 boat actually covered.

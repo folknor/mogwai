@@ -6,7 +6,7 @@
 //! Three nouns, and the boat is the one that carries no semantics.
 //!
 //! A river is a tape and is shared. Its identity is everything that mutates the
-//! water: symbol or preset, session or window shape, loop shape, seed, resolved
+//! water: symbol or preset, session shape, loop shape, seed, resolved
 //! bundle, market regime and generator havoc. The tape protocol version is a
 //! build identity rather than a key field: one process cannot contain rivers
 //! from two builds. Speed is not in that list, because it changes delivery
@@ -28,6 +28,7 @@
 //! get different rivers. A view change rides the passenger and leaves the river
 //! shareable.
 
+use mogwai_data::{TickEvent, TickFault, TickSource};
 use mogwai_protocol::SimClock;
 use std::{
     collections::HashMap,
@@ -50,6 +51,17 @@ use crate::{
 pub(crate) struct BoatKey {
     river: RiverKey,
     speed_micros: u64,
+    placement: Placement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Placement {
+    Shared,
+    Named {
+        start_ns: u64,
+        end_ns: u64,
+        owner: Arc<str>,
+    },
 }
 
 /// The one quantization. Boarding and looking a cadence up both go through
@@ -70,10 +82,45 @@ pub(crate) fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
 }
 
 impl BoatKey {
+    #[cfg(test)]
     pub(crate) fn new(river: RiverKey, speed: f64) -> anyhow::Result<Self> {
         Ok(Self {
             river,
             speed_micros: quantize_speed(speed)?,
+            placement: Placement::Shared,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn named(
+        river: RiverKey,
+        speed: f64,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            river,
+            speed_micros: quantize_speed(speed)?,
+            placement: Placement::Named {
+                start_ns,
+                end_ns,
+                owner: Arc::from("test"),
+            },
+        })
+    }
+
+    fn for_request(req: &BoardRequest) -> anyhow::Result<Self> {
+        Ok(Self {
+            river: req.river.clone(),
+            speed_micros: quantize_speed(req.speed)?,
+            placement: req
+                .window
+                .as_ref()
+                .map_or(Placement::Shared, |window| Placement::Named {
+                    start_ns: window.start_ns,
+                    end_ns: window.end_ns,
+                    owner: Arc::clone(&req.window_owner),
+                }),
         })
     }
 
@@ -90,6 +137,34 @@ impl BoatKey {
     /// matching one cannot disagree about what `2` means.
     pub(crate) fn speed(&self) -> f64 {
         self.speed_micros as f64 / 1_000_000.0
+    }
+
+    pub(crate) fn origin_ns(&self, shared_origin_ns: u64) -> u64 {
+        match self.placement {
+            Placement::Shared => shared_origin_ns,
+            Placement::Named { start_ns, .. } => start_ns,
+        }
+    }
+
+    pub(crate) fn window_end_ns(&self) -> Option<u64> {
+        match self.placement {
+            Placement::Shared => None,
+            Placement::Named { end_ns, .. } => Some(end_ns),
+        }
+    }
+
+    /// The placement coordinates this boat's clock is anchored on, as admission
+    /// compares them. The owner is deliberately not in here: it decides which
+    /// requests share one hull, which is a cache question with no semantics,
+    /// while the bounds decide what epoch the sim clock runs from, which is what
+    /// a ledger cannot hold two of.
+    pub(crate) fn bounds(&self) -> Option<(u64, u64)> {
+        match self.placement {
+            Placement::Shared => None,
+            Placement::Named {
+                start_ns, end_ns, ..
+            } => Some((start_ns, end_ns)),
+        }
     }
 }
 
@@ -178,6 +253,33 @@ pub(crate) struct Boatyard {
 pub(crate) struct BoardRequest {
     pub(crate) river: RiverKey,
     pub(crate) speed: f64,
+    pub(crate) window: Option<mogwai_protocol::control::TapeWindow>,
+    pub(crate) window_owner: Arc<str>,
+}
+impl BoardRequest {
+    #[cfg(test)]
+    pub(crate) fn shared(river: RiverKey, speed: f64) -> Self {
+        Self {
+            river,
+            speed,
+            window: None,
+            window_owner: Arc::from("shared"),
+        }
+    }
+
+    #[cfg(test)]
+    fn named(river: RiverKey, owner: &str, start_ns: u64, end_ns: u64) -> Self {
+        Self {
+            river,
+            speed: 1.0,
+            window: Some(mogwai_protocol::control::TapeWindow {
+                start_ns,
+                end_ns,
+                data_origin_ns: start_ns.saturating_sub(400),
+            }),
+            window_owner: Arc::from(owner),
+        }
+    }
 }
 #[derive(Debug)]
 pub(crate) enum BoardRefusal {
@@ -187,6 +289,23 @@ pub(crate) enum BoardRefusal {
 pub(crate) struct Ticket {
     yard: Arc<Boatyard>,
     boat: Arc<Boat>,
+}
+
+struct WindowCursor {
+    inner: Box<dyn TickSource + Send>,
+    end_ns: u64,
+}
+
+impl TickSource for WindowCursor {
+    fn next_tick(&mut self) -> Option<TickEvent> {
+        self.inner
+            .next_tick()
+            .filter(|event| event.ts_event() < self.end_ns)
+    }
+
+    fn fault(&self) -> Option<TickFault> {
+        self.inner.fault()
+    }
 }
 
 impl Boatyard {
@@ -208,7 +327,7 @@ impl Boatyard {
         self: &Arc<Self>,
         req: &BoardRequest,
     ) -> Result<Ticket, BoardRefusal> {
-        let key = BoatKey::new(req.river.clone(), req.speed).map_err(|err| {
+        let key = BoatKey::for_request(req).map_err(|err| {
             // A speed this quantization refuses is a bad request, not a venue
             // that failed at anything.
             BoardRefusal::Placement(Arc::new(PlacementFailure {
@@ -250,7 +369,7 @@ impl Boatyard {
         }
         let rivers = Arc::clone(&self.rivers);
         let river = req.river.clone();
-        let origin_ns = self.origin_ns;
+        let origin_ns = key.origin_ns(self.origin_ns);
         let cursor = tokio::task::spawn_blocking(move || rivers.place_cursor(&river, origin_ns))
             .await
             .map_err(|err| {
@@ -271,9 +390,16 @@ impl Boatyard {
             })
             .map_err(BoardRefusal::Placement);
         let boat = cursor.map(|cursor| {
-            let sim = crate::config::delivery_clock(self.origin_ns, now_ns(), speed);
+            let cursor: Box<dyn TickSource + Send> = match key.window_end_ns() {
+                Some(end_ns) => Box::new(WindowCursor {
+                    inner: cursor,
+                    end_ns,
+                }),
+                None => cursor,
+            };
+            let sim = crate::config::delivery_clock(origin_ns, now_ns(), speed);
             let extremes = Arc::new(crate::extremes::PriceExtremes::default());
-            let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(self.origin_ns));
+            let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(origin_ns));
             let (tape, worker) = Tape::start(
                 cursor,
                 TapeSpawn {
@@ -290,7 +416,7 @@ impl Boatyard {
                 key: key.clone(),
                 sim,
                 tape,
-                last_swept_ns: AtomicU64::new(self.origin_ns),
+                last_swept_ns: AtomicU64::new(origin_ns),
                 completed_sweep_passes: AtomicU64::new(0),
                 market_readings: crate::fills::MarketReadingCache::for_river(req.river.clone()),
                 extremes,
@@ -511,18 +637,9 @@ mod tests {
     #[tokio::test]
     async fn two_boats_do_not_evict_each_other_s_market_reading() {
         let (yard, first, second) = two_symbol_yard();
-        let first = yard
-            .board(&BoardRequest {
-                river: first,
-                speed: 1.0,
-            })
-            .await
-            .unwrap();
+        let first = yard.board(&BoardRequest::shared(first, 1.0)).await.unwrap();
         let second = yard
-            .board(&BoardRequest {
-                river: second,
-                speed: 1.0,
-            })
+            .board(&BoardRequest::shared(second, 1.0))
             .await
             .unwrap();
         // Not the yard's origin: a 300 s window walk backwards from
@@ -555,10 +672,7 @@ mod tests {
         const INTERVAL_MS: u64 = 100;
         const BUCKET_NS: u64 = INTERVAL_MS * 1_000_000;
         let (yard, river) = yard();
-        let ticket = yard
-            .board(&BoardRequest { river, speed: 1.0 })
-            .await
-            .unwrap();
+        let ticket = yard.board(&BoardRequest::shared(river, 1.0)).await.unwrap();
         let base = (crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000) / BUCKET_NS * BUCKET_NS;
         assert!(
             ticket
@@ -596,34 +710,64 @@ mod tests {
     async fn two_requests_with_one_sharing_key_share_one_boat() {
         let (yard, river) = yard();
         let one = yard
-            .board(&BoardRequest {
-                river: river.clone(),
-                speed: 1.0,
-            })
+            .board(&BoardRequest::shared(river.clone(), 1.0))
             .await
             .unwrap();
         let two = yard
-            .board(&BoardRequest {
-                river,
-                speed: 1.0000001,
-            })
+            .board(&BoardRequest::shared(river, 1.0000001))
             .await
             .unwrap();
         assert!(Arc::ptr_eq(one.boat(), two.boat()));
     }
 
     #[tokio::test]
+    async fn named_windows_share_only_inside_one_owner_and_start_at_their_bound() {
+        let (yard, river) = yard();
+        let start_ns = 2_000_000_000;
+        let end_ns = start_ns + 1_000_000_000;
+        let first = yard
+            .board(&BoardRequest::named(
+                river.clone(),
+                "account-a:callsign",
+                start_ns,
+                end_ns,
+            ))
+            .await
+            .unwrap();
+        let paired_leg = yard
+            .board(&BoardRequest::named(
+                river.clone(),
+                "account-a:callsign",
+                start_ns,
+                end_ns,
+            ))
+            .await
+            .unwrap();
+        let replication = yard
+            .board(&BoardRequest::named(
+                river,
+                "account-b:callsign",
+                start_ns,
+                end_ns,
+            ))
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(first.boat(), paired_leg.boat()));
+        assert!(!Arc::ptr_eq(first.boat(), replication.boat()));
+        assert_eq!(first.boat().sim.sim_epoch_ns, start_ns);
+        assert_eq!(replication.boat().sim.sim_epoch_ns, start_ns);
+        assert_eq!(first.boat().key().window_end_ns(), Some(end_ns));
+    }
+
+    #[tokio::test]
     async fn a_second_speed_on_a_boated_river_is_a_second_boat() {
         let (yard, river) = yard();
         let one = yard
-            .board(&BoardRequest {
-                river: river.clone(),
-                speed: 2.0,
-            })
+            .board(&BoardRequest::shared(river.clone(), 2.0))
             .await
             .unwrap();
         let two = yard
-            .board(&BoardRequest { river, speed: 3.0 })
+            .board(&BoardRequest::shared(river, 3.0))
             .await
             .expect("an unserved speed is a cache miss, not a refusal");
         assert!(
@@ -646,10 +790,7 @@ mod tests {
     #[tokio::test]
     async fn the_last_passenger_leaving_winds_the_boat_down_and_joins_its_worker() {
         let (yard, river) = yard();
-        let ticket = yard
-            .board(&BoardRequest { river, speed: 1.0 })
-            .await
-            .unwrap();
+        let ticket = yard.board(&BoardRequest::shared(river, 1.0)).await.unwrap();
         let tape = Arc::clone(&ticket.boat().tape);
         drop(ticket);
         assert!(yard.placed_symbols().is_empty());
@@ -681,10 +822,7 @@ mod tests {
         let mut failures = Vec::new();
         for _ in 0..2 {
             match yard
-                .board(&BoardRequest {
-                    river: unplaceable.clone(),
-                    speed: 1.0,
-                })
+                .board(&BoardRequest::shared(unplaceable.clone(), 1.0))
                 .await
             {
                 Err(BoardRefusal::Placement(failure)) => failures.push(failure),
@@ -709,7 +847,7 @@ mod tests {
                 let yard = Arc::clone(&yard);
                 let river = river.clone();
                 tokio::spawn(async move {
-                    yard.board(&BoardRequest { river, speed: 1.0 })
+                    yard.board(&BoardRequest::shared(river, 1.0))
                         .await
                         .expect("a first boarder is never refused")
                 })
@@ -737,17 +875,14 @@ mod tests {
         for _ in 0..16 {
             let (yard, river) = yard();
             let sitting = yard
-                .board(&BoardRequest {
-                    river: river.clone(),
-                    speed: 1.0,
-                })
+                .board(&BoardRequest::shared(river.clone(), 1.0))
                 .await
                 .unwrap();
             let joining = {
                 let yard = Arc::clone(&yard);
                 tokio::spawn(async move {
                     let ticket = yard
-                        .board(&BoardRequest { river, speed: 1.0 })
+                        .board(&BoardRequest::shared(river, 1.0))
                         .await
                         .expect("a same-speed join is never refused");
                     assert!(

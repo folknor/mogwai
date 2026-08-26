@@ -102,8 +102,12 @@ number for one host on one day would change no decision. What would give a
 measurement a decision to serve is a specific forward result somebody doubts,
 where the question becomes whether that run was valid.
 
-`warmup_ns` is the uniform servable simulated interval before `run_start_ns`.
-Every river is materialized on first read; none is warmed before readiness. `run_start_ns` is every boat's placement origin, so per-boat clocks vary
+`warmup_ns` is the required servable simulated interval before a placement.
+Every river is materialized on first read; none is warmed before readiness.
+`run_start_ns` is every unnamed boat's placement origin. A named window instead
+places its private boat at `window_start_ns` and exposes history no earlier than
+`window_start_ns - warmup_ns`; admission refuses a floor below
+`TAPE_ORIGIN_NS`. Per-boat clocks vary
 in wall anchor and speed but never in sim epoch. The consequence for a declared
 duration is worth stating, because it reads as a venue defect otherwise: the
 run deadline is judged on the venue clock, while a socket's `RunComplete` is

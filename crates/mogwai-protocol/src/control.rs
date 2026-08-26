@@ -93,6 +93,19 @@ pub const MAX_DELIVERY_SPEED: f64 = 1_000_000.0;
 /// silently stop the consumer recognizing it.
 pub const CADENCE_CONFLICT_MARKER: &str = "a ledger carries one cadence";
 
+/// The machine-readable tail of the venue's second-placement upgrade refusal.
+///
+/// The sibling of `CADENCE_CONFLICT_MARKER`, and filed beside it because the
+/// two guard one property between them. A ledger is judged on simulated time,
+/// so every socket writing to it must agree on the clock: the cadence marker
+/// covers two sockets of one river disagreeing about the rate that clock runs
+/// at, and this one covers them disagreeing about where it starts. A named
+/// window moves a boat's sim epoch to its own start, so an account holding one
+/// shared placement and one named placement of a single river - or two named
+/// placements with different bounds - would have its balances, daily resets and
+/// peak-equity ratchet driven from two epochs at once.
+pub const PLACEMENT_CONFLICT_MARKER: &str = "a ledger rides one placement";
+
 /// Judge a delivery speed by the one rule both ends hold, returning the refusal
 /// text on rejection so the two ends also cannot word it differently.
 ///
@@ -115,6 +128,91 @@ pub fn validate_delivery_speed(speed: f64) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A named tape window after validation against one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TapeWindow {
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub data_origin_ns: u64,
+}
+
+/// Stable refusal names for named tape windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapeWindowRefusal {
+    MissingBound,
+    ConflictsWithDuration,
+    EndBeforeStart,
+    ZeroLength,
+    WarmupBeforeTapeOrigin,
+    StartBeforeRun,
+    EndAfterRun,
+}
+
+impl TapeWindowRefusal {
+    #[must_use]
+    pub const fn marker(self) -> &'static str {
+        match self {
+            Self::MissingBound => "tape_window_missing_bound",
+            Self::ConflictsWithDuration => "tape_window_conflicts_with_duration",
+            Self::EndBeforeStart => "tape_window_end_before_start",
+            Self::ZeroLength => "tape_window_zero_length",
+            Self::WarmupBeforeTapeOrigin => "tape_window_warmup_before_origin",
+            Self::StartBeforeRun => "tape_window_start_before_run",
+            Self::EndAfterRun => "tape_window_end_after_run",
+        }
+    }
+}
+
+impl std::fmt::Display for TapeWindowRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.marker())
+    }
+}
+
+/// Validate the optional pair carried by a websocket upgrade.
+///
+/// The bounds and wording live here so an adapter and venue cannot disagree
+/// about which request is actionable. `run_end_ns = None` is an unbounded run.
+pub fn validate_tape_window(
+    start_ns: Option<u64>,
+    end_ns: Option<u64>,
+    duration_ms: Option<u64>,
+    tape_origin_ns: u64,
+    warmup_ns: u64,
+    run_start_ns: u64,
+    run_end_ns: Option<u64>,
+) -> Result<Option<TapeWindow>, TapeWindowRefusal> {
+    let (start_ns, end_ns) = match (start_ns, end_ns) {
+        (None, None) => return Ok(None),
+        (Some(start), Some(end)) => (start, end),
+        _ => return Err(TapeWindowRefusal::MissingBound),
+    };
+    if duration_ms.is_some() {
+        return Err(TapeWindowRefusal::ConflictsWithDuration);
+    }
+    if end_ns < start_ns {
+        return Err(TapeWindowRefusal::EndBeforeStart);
+    }
+    if end_ns == start_ns {
+        return Err(TapeWindowRefusal::ZeroLength);
+    }
+    let data_origin_ns = start_ns
+        .checked_sub(warmup_ns)
+        .filter(|origin| *origin >= tape_origin_ns)
+        .ok_or(TapeWindowRefusal::WarmupBeforeTapeOrigin)?;
+    if start_ns < run_start_ns {
+        return Err(TapeWindowRefusal::StartBeforeRun);
+    }
+    if run_end_ns.is_some_and(|run_end| end_ns > run_end) {
+        return Err(TapeWindowRefusal::EndAfterRun);
+    }
+    Ok(Some(TapeWindow {
+        start_ns,
+        end_ns,
+        data_origin_ns,
+    }))
 }
 
 /// A generator arm in the form river identity is keyed on.
@@ -399,3 +497,47 @@ divergence_kinds!(
     CancelOpenOrderSilently,
     FaultTape,
 );
+
+#[cfg(test)]
+mod window_tests {
+    use super::{TapeWindowRefusal, validate_tape_window};
+
+    #[test]
+    fn named_window_refusals_are_distinct_and_the_valid_floor_is_derived() {
+        let validate = |start, end, duration, run_end| {
+            validate_tape_window(start, end, duration, 0, 400, 1_000, run_end)
+        };
+        assert_eq!(
+            validate(Some(1_000), None, None, None),
+            Err(TapeWindowRefusal::MissingBound)
+        );
+        assert_eq!(
+            validate(Some(1_000), Some(2_000), Some(1), None),
+            Err(TapeWindowRefusal::ConflictsWithDuration)
+        );
+        assert_eq!(
+            validate(Some(2_000), Some(1_000), None, None),
+            Err(TapeWindowRefusal::EndBeforeStart)
+        );
+        assert_eq!(
+            validate(Some(1_000), Some(1_000), None, None),
+            Err(TapeWindowRefusal::ZeroLength)
+        );
+        assert_eq!(
+            validate(Some(300), Some(500), None, None),
+            Err(TapeWindowRefusal::WarmupBeforeTapeOrigin)
+        );
+        assert_eq!(
+            validate(Some(900), Some(1_100), None, None),
+            Err(TapeWindowRefusal::StartBeforeRun)
+        );
+        assert_eq!(
+            validate(Some(1_100), Some(2_100), None, Some(2_000)),
+            Err(TapeWindowRefusal::EndAfterRun)
+        );
+        let window = validate(Some(1_400), Some(2_000), None, Some(2_000))
+            .expect("the bounded window is valid")
+            .expect("both bounds name a window");
+        assert_eq!(window.data_origin_ns, 1_000);
+    }
+}

@@ -136,6 +136,7 @@ pub(crate) struct PageRequest<'a> {
     /// by that ride.
     pub(crate) present: u64,
     pub(crate) run_start_ns: u64,
+    pub(crate) data_origin_ns: u64,
 }
 
 /// Synthesize one page of this passenger's own river.
@@ -152,6 +153,7 @@ pub(crate) fn serve_page(rivers: &Rivers, request: &PageRequest<'_>) -> Result<P
         continuation,
         present,
         run_start_ns,
+        data_origin_ns,
     } = *request;
     let resumed = match continuation {
         Some(token) => Some(Continuation::decode(token).ok_or_else(|| Refusal {
@@ -184,7 +186,18 @@ pub(crate) fn serve_page(rivers: &Rivers, request: &PageRequest<'_>) -> Result<P
     let cutoff = resumed
         .map_or(end.unwrap_or(present), |resumed| resumed.cutoff)
         .min(present);
-    let from = resumed.map_or(start, |resumed| Some(resumed.next_ts));
+    let from = resumed.map_or(Some(start.unwrap_or(data_origin_ns)), |resumed| {
+        Some(resumed.next_ts)
+    });
+
+    if from.is_some_and(|from| from < data_origin_ns) {
+        return Err(Refusal {
+            reason: format!(
+                "history starts before this passenger's warmup floor of {data_origin_ns}"
+            ),
+            retryable: false,
+        });
+    }
 
     if let Some(from) = from
         && from > cutoff
@@ -296,6 +309,56 @@ mod tests {
                 "the token the venue emits must fit the bound it enforces"
             );
         }
+    }
+
+    #[test]
+    fn a_named_passenger_cannot_read_before_its_own_warmup_floor() {
+        let rivers = crate::fills::test_rivers();
+        let key = rivers.test_key("BTCUSDT");
+        let refusal = match serve_page(
+            &rivers,
+            &PageRequest {
+                key: &key,
+                kind: HistoryKind::Trades,
+                start: Some(599),
+                end: Some(1_500),
+                continuation: None,
+                present: 1_500,
+                run_start_ns: 1_000,
+                data_origin_ns: 600,
+            },
+        ) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("history before this window's floor must be refused"),
+        };
+        assert_eq!(
+            refusal.reason,
+            "history starts before this passenger's warmup floor of 600"
+        );
+        assert!(!refusal.retryable);
+
+        let page = serve_page(
+            &rivers,
+            &PageRequest {
+                key: &key,
+                kind: HistoryKind::Trades,
+                start: None,
+                end: Some(60_000_000_000),
+                continuation: None,
+                present: 60_000_000_000,
+                run_start_ns: 40_000_000_000,
+                data_origin_ns: 30_000_000_000,
+            },
+        )
+        .unwrap_or_else(|refusal| panic!("the defaulted floor is servable: {}", refusal.reason));
+        assert!(
+            !page.rows.is_empty(),
+            "the defaulted window must be exercised"
+        );
+        assert!(
+            page.rows.iter().all(|row| row.ts_event() >= 30_000_000_000),
+            "an omitted start escaped the named passenger's warmup floor"
+        );
     }
 
     /// The premise the continuation rests on, re-asserted where it is relied

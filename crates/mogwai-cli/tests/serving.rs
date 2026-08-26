@@ -4625,3 +4625,153 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     }
     staying_reader.abort();
 }
+
+/// The property a named window exists for: a run is a pure function of seed,
+/// config, symbol, start and end, with the boarding instant nowhere in it.
+///
+/// The two legs of one adapter present one account and one callsign, so they
+/// share a placement, and the second boards a cursor already some way into the
+/// window. Its deadline is therefore the remainder to `window_end_ns` and never
+/// a fresh full span: a fresh span would hold the leg open past the window on a
+/// feed the cursor stopped publishing at, and announce a `sim_now_ns` outside
+/// the window that leg named - which is the boarding instant readable straight
+/// off the wire.
+///
+/// `fast.toml` is `speed = 0.0`, where the sim axis advances at wall rate, so a
+/// three simulated second window is three wall seconds and the mid-window join
+/// is a wall sleep.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_leg_joining_a_named_window_late_completes_at_the_window_end() {
+    const WINDOW_NS: u64 = 3_000_000_000;
+    let venue = spawn(&["--config", &fast_config()]);
+    let start_ns = venue.record.run_start_ns;
+    let end_ns = start_ns + WINDOW_NS;
+    let url = format!(
+        "{}&callsign=pair&account=WINDOW-PAIR&window_start_ns={start_ns}&window_end_ns={end_ns}",
+        venue.ws_url_for(&venue.symbol),
+    );
+    // One account, one callsign, two sockets - the shipped adapter leg pair,
+    // which is the only shape that shares a named placement.
+    let (mut first, _) = tokio_tungstenite::connect_async(url.clone())
+        .await
+        .expect("the first leg boards the named window");
+    // Drain the leading leg so the mid-window sleep is not a stalled socket.
+    let drain = tokio::spawn(async move { while first.next().await.is_some() {} });
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+    let (mut late, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("the second leg joins the same placement");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    let mut announced = None;
+    loop {
+        let message = tokio::time::timeout_at(deadline, late.next())
+            .await
+            .expect("the late leg closes before the harness budget");
+        match message {
+            Some(Ok(Message::Text(text))) => {
+                if let Ok(VenueMessage::PassengerDurationComplete {
+                    sim_now_ns,
+                    elapsed_ns,
+                    declared_duration_ns,
+                }) = serde_json::from_str::<VenueMessage>(&text)
+                {
+                    announced = Some((sim_now_ns, elapsed_ns, declared_duration_ns));
+                    break;
+                }
+            }
+            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    drain.abort();
+    let (sim_now_ns, elapsed_ns, declared_duration_ns) =
+        announced.expect("the late leg announced its window completion");
+    // The assertion that carries the fix. Measured from boarding, the late leg
+    // would run a full WINDOW_NS from roughly `start_ns + 1.2 s` and land about
+    // 1.2 simulated seconds past `end_ns`. The 200 ms of slack is the wall cost
+    // of the announcement itself, not room for the defect, which is six times
+    // larger than the slack.
+    assert!(
+        sim_now_ns <= end_ns + 200_000_000,
+        "the late leg reported a completion instant outside the window it named: {sim_now_ns} \
+         against an end of {end_ns}"
+    );
+    // And the second half: the declaration is still the window it asked for,
+    // while the ride it actually got is shorter because it boarded late.
+    assert_eq!(
+        declared_duration_ns, WINDOW_NS,
+        "a named window declares its own span whoever boards it"
+    );
+    assert!(
+        elapsed_ns < WINDOW_NS,
+        "a leg that boarded mid-window rode the whole span: {elapsed_ns}"
+    );
+}
+
+/// One ledger, one clock per river, over the wire. The epoch half: an account
+/// already riding a named window cannot open a second socket on the same river
+/// from a different placement, because its one book would then be swept and
+/// commanded from two simulated nows.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_second_placement_of_one_river_is_refused_over_the_wire() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let start_ns = venue.record.run_start_ns;
+    let seated = format!(
+        "{}&callsign=one&account=WINDOW-SEAT&window_start_ns={start_ns}&window_end_ns={}",
+        venue.ws_url_for(&venue.symbol),
+        start_ns + 30_000_000_000_u64,
+    );
+    let (_incumbent, _) = tokio_tungstenite::connect_async(seated)
+        .await
+        .expect("the named window boards");
+
+    // The body, not merely a 400: this route refuses for five other reasons, and
+    // a venue that had stopped comparing placements entirely could go green on
+    // any of them.
+    let refusal_body = |error| {
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("the refusal is an HTTP status before the upgrade, got {error}");
+        };
+        assert_eq!(
+            response.status(),
+            400,
+            "refused before the 101: {response:?}"
+        );
+        String::from_utf8_lossy(response.body().as_deref().unwrap_or_default()).into_owned()
+    };
+
+    // Same account, same river, same speed, a different window. The cadence
+    // check cannot see this one, because the cadences agree.
+    let elsewhere = format!(
+        "{}&callsign=one&account=WINDOW-SEAT&window_start_ns={}&window_end_ns={}",
+        venue.ws_url_for(&venue.symbol),
+        start_ns + 1_000_000_000_u64,
+        start_ns + 31_000_000_000_u64,
+    );
+    let Err(error) = tokio_tungstenite::connect_async(elsewhere).await else {
+        panic!("a second placement of one river must not upgrade");
+    };
+    let body = refusal_body(error);
+    assert!(
+        body.contains(mogwai_protocol::control::PLACEMENT_CONFLICT_MARKER),
+        "the refusal is the placement check rather than some other 400: {body}"
+    );
+
+    // The run's shared origin is a placement like any other, so an unnamed ride
+    // of the same river is the same refusal rather than a silent second epoch.
+    let shared = format!(
+        "{}&callsign=one&account=WINDOW-SEAT",
+        venue.ws_url_for(&venue.symbol),
+    );
+    let Err(error) = tokio_tungstenite::connect_async(shared).await else {
+        panic!("an unnamed ride of a named river must not upgrade");
+    };
+    let body = refusal_body(error);
+    assert!(
+        body.contains(mogwai_protocol::control::PLACEMENT_CONFLICT_MARKER),
+        "the shared placement is compared too: {body}"
+    );
+}

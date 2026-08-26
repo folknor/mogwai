@@ -302,13 +302,15 @@ class Venue:
 
 
 class WsClient:
-    def __init__(self, addr: str, symbol: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self, addr: str, symbol: str, timeout: float = 30.0, extra_query: str = ""
+    ) -> None:
         host, port = addr.rsplit(":", 1)
         self.sock = socket.create_connection((host, int(port)), timeout=timeout)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         handshake = (
-            f"GET /ws?symbol={symbol} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n"
+            f"GET /ws?symbol={symbol}{extra_query} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
             "Sec-WebSocket-Version: 13\r\n\r\n"
         )
@@ -462,6 +464,30 @@ def check_common(venue: Venue) -> None:
         )
     finally:
         unconfigured_ws.close()
+
+    # Its own account id, deliberately. One ledger rides one placement of one
+    # river, so a named window sharing the default account with the sockets the
+    # modes below open would be refused the instant a release lagged a connect.
+    window_start = venue.record["run_start_ns"]
+    window_end = window_start + 60_000_000_000
+    named = WsClient(
+        venue.addr,
+        venue.symbol,
+        extra_query=(
+            f"&account=SMOKE-WINDOW&window_start_ns={window_start}"
+            f"&window_end_ns={window_end}"
+        ),
+    )
+    try:
+        first = named.until(lambda candidate: candidate.get("type") in ("Trade", "Quote"))
+        assert first and window_start <= first["ts_event"] < window_end, first
+        completed = named.until(
+            lambda candidate: candidate.get("type") == "PassengerDurationComplete"
+        )
+        if completed is not None:
+            assert completed["declared_duration_ns"] == window_end - window_start, completed
+    finally:
+        named.close()
 
     # And the two boundaries are refused by name rather than served short.
     for start, label in (

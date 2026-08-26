@@ -91,6 +91,10 @@ pub struct MogwaiDataClientConfig {
     /// indefinite and is independent of the venue's run-wide duration.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub window_start_ns: Option<u64>,
+    #[serde(default)]
+    pub window_end_ns: Option<u64>,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
@@ -129,6 +133,8 @@ impl Default for MogwaiDataClientConfig {
             symbol: None,
             speed: None,
             duration_ms: None,
+            window_start_ns: None,
+            window_end_ns: None,
             havoc: None,
             callsign: default_callsign(),
             expected_run_seed: None,
@@ -211,6 +217,15 @@ impl MogwaiDataClientConfig {
         self
     }
 
+    /// Bind this client to one absolute tape window.
+    #[must_use]
+    pub fn with_window(mut self, start_ns: u64, end_ns: u64) -> Self {
+        self.duration_ms = None;
+        self.window_start_ns = Some(start_ns);
+        self.window_end_ns = Some(end_ns);
+        self
+    }
+
     /// Arm havoc on this config, for the builder-ish call sites that want one
     /// expression.
     #[must_use]
@@ -243,6 +258,7 @@ impl MogwaiDataClientConfig {
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
         validate_speed(self.speed)?;
+        validate_window_shape(self.window_start_ns, self.window_end_ns, self.duration_ms)?;
         validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
@@ -265,6 +281,7 @@ impl MogwaiDataClientConfig {
             self.symbol.as_deref(),
             self.speed,
             self.duration_ms,
+            (self.window_start_ns, self.window_end_ns),
             &self.account_id,
             self.callsign.as_deref(),
         )
@@ -308,6 +325,10 @@ pub struct MogwaiExecClientConfig {
     /// This passenger's simulated lifetime in milliseconds. `None` is indefinite.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub window_start_ns: Option<u64>,
+    #[serde(default)]
+    pub window_end_ns: Option<u64>,
     /// Account type reported to nautilus.
     pub account_type: AccountType,
     /// Order-management-system type the venue presents to nautilus. Defaults to
@@ -357,6 +378,8 @@ impl Default for MogwaiExecClientConfig {
             symbol: None,
             speed: None,
             duration_ms: None,
+            window_start_ns: None,
+            window_end_ns: None,
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
@@ -413,6 +436,15 @@ impl MogwaiExecClientConfig {
         self
     }
 
+    /// Bind this client to one absolute tape window.
+    #[must_use]
+    pub fn with_window(mut self, start_ns: u64, end_ns: u64) -> Self {
+        self.duration_ms = None;
+        self.window_start_ns = Some(start_ns);
+        self.window_end_ns = Some(end_ns);
+        self
+    }
+
     /// Arm havoc on this config.
     #[must_use]
     pub fn with_havoc(mut self, havoc: Option<HavocSpec>) -> Self {
@@ -465,6 +497,7 @@ impl MogwaiExecClientConfig {
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
         validate_speed(self.speed)?;
+        validate_window_shape(self.window_start_ns, self.window_end_ns, self.duration_ms)?;
         validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
@@ -480,6 +513,7 @@ impl MogwaiExecClientConfig {
             self.symbol.as_deref(),
             self.speed,
             self.duration_ms,
+            (self.window_start_ns, self.window_end_ns),
             &self.account_id,
             self.callsign.as_deref(),
         )
@@ -514,6 +548,7 @@ fn ws_url(
     symbol: Option<&str>,
     speed: Option<f64>,
     duration_ms: Option<u64>,
+    window: (Option<u64>, Option<u64>),
     account_id: &AccountId,
     callsign: Option<&str>,
 ) -> String {
@@ -531,6 +566,12 @@ fn ws_url(
     }
     if let Some(duration_ms) = duration_ms {
         url.push_str(&format!("&duration_ms={duration_ms}"));
+    }
+    if let Some(start_ns) = window.0 {
+        url.push_str(&format!("&window_start_ns={start_ns}"));
+    }
+    if let Some(end_ns) = window.1 {
+        url.push_str(&format!("&window_end_ns={end_ns}"));
     }
     if let Some(callsign) = callsign {
         url.push_str(&format!("&callsign={callsign}"));
@@ -550,6 +591,29 @@ fn validate_speed(speed: Option<f64>) -> anyhow::Result<()> {
         anyhow::bail!(refusal);
     }
     Ok(())
+}
+
+/// Refuse a window shape the venue would refuse, by the venue's own function, so
+/// the two ends cannot word or bound it differently.
+///
+/// Only the config-knowable half is decided here, and the run-relative bounds
+/// are passed as zeros deliberately rather than guessed. A config has no warmup
+/// span, no run start and no run deadline - those are the venue's, published on
+/// the readiness record a host reads after this config was written - so the
+/// warmup floor, the start-before-run and the end-after-run refusals can only be
+/// taken at the upgrade. What this catches is the half that is wrong on its face
+/// whatever venue receives it: one bound without the other, a window paired with
+/// a passenger duration, and an empty or inverted span. Unlike the speed bound,
+/// which is a constant both ends hold, this is not a mirror of the venue's
+/// judgement and does not claim to be one.
+fn validate_window_shape(
+    start_ns: Option<u64>,
+    end_ns: Option<u64>,
+    duration_ms: Option<u64>,
+) -> anyhow::Result<()> {
+    mogwai_protocol::control::validate_tape_window(start_ns, end_ns, duration_ms, 0, 0, 0, None)
+        .map(|_| ())
+        .map_err(|refusal| anyhow::anyhow!(refusal.marker()))
 }
 
 /// Refuse a callsign id the `/ws` URL cannot carry, by the rule the venue
@@ -789,6 +853,27 @@ mod tests {
             config.ws_url(),
             "ws://127.0.0.1:1/ws?account=MOGWAI-001&symbol=MNQ"
         );
+    }
+
+    #[test]
+    fn both_configs_carry_the_same_named_window() {
+        let data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            callsign: None,
+            ..MogwaiDataClientConfig::default()
+        }
+        .with_window(1_400, 2_000);
+        let exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            callsign: None,
+            ..MogwaiExecClientConfig::default()
+        }
+        .with_window(1_400, 2_000);
+        let suffix = "&window_start_ns=1400&window_end_ns=2000";
+        assert!(data.ws_url().ends_with(suffix), "{}", data.ws_url());
+        assert!(exec.ws_url().ends_with(suffix), "{}", exec.ws_url());
+        data.validate().expect("the data window shape is valid");
+        exec.validate().expect("the exec window shape is valid");
     }
 
     #[test]

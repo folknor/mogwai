@@ -131,10 +131,24 @@ use crate::source::RiverKey;
 /// all, and is stated on `Engine::last_marks` where it actually bites.
 /// Comparing cadence across rivers here would refuse a working topology to
 /// paper over neither of those.
+///
+/// The seat carries the placement bounds for the same reason it carries the
+/// speed, and the two are one rule rather than two. What a ledger cannot hold
+/// two of is a clock, and a clock on one river is its epoch and its rate
+/// together: the speed is the rate, and a named window's `[start, end)` is the
+/// epoch, because a named placement anchors its boat's sim clock at the
+/// window's start instead of the run's origin. Admitting a second speed and
+/// admitting a second epoch both end with one book swept and commanded from two
+/// simulated nows. `None` is the run's shared placement, and is one value like
+/// any other - a shared and a named ride of one river disagree just as surely as
+/// two named ones with different bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Seat {
     pub(crate) river: RiverKey,
     pub(crate) speed_micros: u64,
+    /// `None` for the run's shared placement; `Some((start, end))` for a named
+    /// tape window.
+    pub(crate) bounds: Option<(u64, u64)>,
 }
 
 impl Seat {
@@ -254,6 +268,10 @@ pub(crate) enum AdmissionRefusal {
     /// seat it is sitting in, so the refusal can name the cadence that is
     /// actually there rather than the one that was asked for.
     CadenceConflict(Seat),
+    /// This account already rides that river from a different placement origin.
+    /// The epoch half of the same one-clock-per-ledger rule; carries the sitting
+    /// seat for the same reason.
+    PlacementConflict(Seat),
     /// Another upgrade holds this account. One admission at a time per account
     /// is what makes the commit a linearization point; a consumer that loses
     /// may retry.
@@ -416,17 +434,30 @@ impl ConnectionRegistry {
         if entry.incarnation != observed_incarnation {
             return Err(AdmissionRefusal::LedgerMoved);
         }
+        // One ledger, one clock per river, decided over both halves of that
+        // clock. The rate is compared first only so a plain second-cadence dial
+        // keeps naming itself the way the adapter already recognizes; a ride
+        // that agrees on the rate and disagrees on the epoch is refused by the
+        // sibling arm rather than admitted.
         if !resetting
             && let Some(sitting) = entry.connections.iter().find_map(|conn| {
                 conn.ride.as_ref().filter(|ride| {
-                    *ride.river() == seat.river && ride.speed_micros() != seat.speed_micros
+                    *ride.river() == seat.river
+                        && (ride.speed_micros() != seat.speed_micros
+                            || ride.bounds() != seat.bounds)
                 })
             })
         {
-            return Err(AdmissionRefusal::CadenceConflict(Seat {
+            let held = Seat {
                 river: sitting.river().clone(),
                 speed_micros: sitting.speed_micros(),
-            }));
+                bounds: sitting.bounds(),
+            };
+            return Err(if held.speed_micros == seat.speed_micros {
+                AdmissionRefusal::PlacementConflict(held)
+            } else {
+                AdmissionRefusal::CadenceConflict(held)
+            });
         }
         let id = self.next_reservation.fetch_add(1, Ordering::Relaxed);
         let incarnation = entry.incarnation;
@@ -790,6 +821,7 @@ mod tests {
         Seat {
             river: RiverKey::synthetic(1),
             speed_micros: 1_000_000,
+            bounds: None,
         }
     }
 
@@ -797,6 +829,15 @@ mod tests {
         Seat {
             river: RiverKey::synthetic(1),
             speed_micros,
+            bounds: None,
+        }
+    }
+
+    fn seat_in(bounds: (u64, u64)) -> Seat {
+        Seat {
+            river: RiverKey::synthetic(1),
+            speed_micros: 1_000_000,
+            bounds: Some(bounds),
         }
     }
 
@@ -878,8 +919,75 @@ mod tests {
         let elsewhere = Seat {
             river: RiverKey::synthetic(2),
             speed_micros: 2_000_000,
+            bounds: None,
         };
         assert!(registry.reserve("A", elsewhere, false, 1).is_ok());
+    }
+
+    fn named_ride(start_ns: u64, end_ns: u64) -> BoatKey {
+        BoatKey::named(RiverKey::synthetic(1), 1.0, start_ns, end_ns).expect("a legal speed")
+    }
+
+    /// The epoch half of the one-clock-per-ledger rule, and the property this
+    /// test carries: a second placement of one river under one account is
+    /// refused even though both sides agree on the cadence. Without it the seat
+    /// compares only river and speed, both reservations pass, and one ledger is
+    /// swept and commanded from two boats whose sim clocks start at different
+    /// instants.
+    #[test]
+    fn a_second_placement_on_one_river_is_refused_at_one_cadence() {
+        let registry = ConnectionRegistry::new();
+        let mut first = registry
+            .reserve("A", seat_in((1_000, 2_000)), false, 1)
+            .unwrap();
+        drop(registry.commit(&mut first, None, Some(named_ride(1_000, 2_000)), true));
+        // A different named window, same river, same speed.
+        assert!(
+            matches!(
+                registry.reserve("A", seat_in((1_500, 2_500)), false, 1),
+                Err(AdmissionRefusal::PlacementConflict(held))
+                    if held == seat_in((1_000, 2_000))
+            ),
+            "a second named window on one ledger's river must be refused"
+        );
+        // And the shared placement is a placement like any other, so mixing a
+        // named and an unnamed ride of one river is the same refusal.
+        assert!(
+            matches!(
+                registry.reserve("A", seat(), false, 1),
+                Err(AdmissionRefusal::PlacementConflict(held))
+                    if held == seat_in((1_000, 2_000))
+            ),
+            "an unnamed ride of a named river must be refused"
+        );
+        // Identical bounds are one clock, which is the paired-leg shape and must
+        // still be admitted.
+        assert!(
+            registry
+                .reserve("A", seat_in((1_000, 2_000)), false, 1)
+                .is_ok()
+        );
+    }
+
+    /// A placement disagreement that is also a cadence disagreement keeps naming
+    /// itself a cadence conflict, because that is the refusal `mogwai-adapter`
+    /// already retries on.
+    #[test]
+    fn a_differing_speed_still_reads_as_a_cadence_conflict() {
+        let registry = ConnectionRegistry::new();
+        let mut first = registry
+            .reserve("A", seat_in((1_000, 2_000)), false, 1)
+            .unwrap();
+        drop(registry.commit(&mut first, None, Some(named_ride(1_000, 2_000)), true));
+        let faster = Seat {
+            river: RiverKey::synthetic(1),
+            speed_micros: 2_000_000,
+            bounds: None,
+        };
+        assert!(matches!(
+            registry.reserve("A", faster, false, 1),
+            Err(AdmissionRefusal::CadenceConflict(_))
+        ));
     }
 
     /// A ride ends with its connection, so the cadence it held stops

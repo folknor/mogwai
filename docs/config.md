@@ -575,7 +575,8 @@ The fingerprint retains `mean_trade_notional` under its honest name for corpus
 comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.
 
-Websocket requests accept `?symbol=`, `?speed=` and `?duration_ms=`. An absent
+Websocket requests accept `?symbol=`, `?speed=`, `?duration_ms=`, and the paired
+`?window_start_ns=` / `?window_end_ns=` named-window bounds. An absent
 symbol binds the default river, which is what a consumer written before symbols
 moved to the request does. An absent
 speed uses the configured default. Speed is finite and non-negative, capped at
@@ -590,8 +591,29 @@ account has to disconnect for it. Duration is simulated milliseconds from
 boarding and belongs to the passenger, not the boat, so passengers with
 different durations share.
 
+A named window is `[window_start_ns, window_end_ns)`. Both fields are required,
+the span must be positive and inside the declared run, and `duration_ms` must be
+absent. Its own warmup floor is `window_start_ns - warmup_ns`; a floor before
+`TAPE_ORIGIN_NS` is refused at upgrade. Named placements never join another
+account's cursor, even for identical bounds, while one account's data and
+execution legs share because they present one callsign.
+
+The window end is absolute, not a length from boarding: a leg joining a
+placement its pair already opened waits only what is left to `window_end_ns`, so
+both legs close at the window's end. The completion frame declares the full
+`end - start` either way and reports `elapsed_ns` as the ride actually taken, so
+a late leg reports less than it declared.
+
+One ledger rides one placement of one river, the same rule as one cadence and
+for the same reason. An account already on a river under one window cannot open
+a second socket on that river under different bounds, or under the run's shared
+origin, and is refused with `a ledger rides one placement` in the 400 body.
+Different rivers are unaffected, and the paired legs of one adapter agree on
+their bounds by construction.
+
 `MogwaiDataClientConfig` and `MogwaiExecClientConfig` expose the same choices as
-`speed: Option<f64>` and `duration_ms: Option<u64>`. Configure both legs alike;
+`speed: Option<f64>`, `duration_ms: Option<u64>`, `window_start_ns`, and
+`window_end_ns`; `with_window(start, end)` sets the paired form. Configure both legs alike;
 the adapter appends present values to each websocket URL, and absent values keep
 the venue defaults above.
 
