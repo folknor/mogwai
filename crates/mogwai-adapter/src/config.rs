@@ -6,6 +6,7 @@ use std::any::Any;
 use anyhow::ensure;
 use mogwai_protocol::{
     HavocSpec, control, validate_conn_havoc, validate_divergence, validate_inbound_havoc,
+    validate_market_regime,
 };
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
@@ -659,6 +660,14 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
         validate_inbound_havoc(&havoc.inbound).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
+        if let Some(regime) = &havoc.data {
+            validate_market_regime(regime).map_err(anyhow::Error::msg)?;
+            anyhow::bail!(
+                "havoc.data cannot be carried by mogwai-adapter: generator havoc must be part \
+                 of river identity before the venue starts. Use it with the offline gen command \
+                 or configure the venue's river instead."
+            );
+        }
         for divergence in &havoc.venue {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
             // `havoc.venue` has exactly one carrier: `ship_venue_havoc` posts
@@ -976,6 +985,45 @@ mod tests {
         assert_eq!(exec.symbol.as_deref(), Some("MNQ"));
         assert!(data.ws_url().contains("&symbol=MNQ"));
         assert!(exec.ws_url().contains("&symbol=MNQ"));
+    }
+
+    #[test]
+    fn adapter_refuses_generator_havoc_after_validating_its_shape() {
+        let invalid = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiDataClientConfig::default()
+        }
+        .with_havoc(Some(HavocSpec {
+            data: Some(mogwai_protocol::MarketRegime::VolStorm { vol_mult: 0.0 }),
+            ..HavocSpec::default()
+        }));
+        assert_eq!(
+            invalid
+                .validate()
+                .expect_err(
+                    "an out-of-range regime is refused for its shape, before the carrier \
+                             refusal, so a typo is diagnosed as a typo"
+                )
+                .to_string(),
+            "vol_mult must be in (0.0, 100.0]"
+        );
+
+        let valid = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiDataClientConfig::default()
+        }
+        .with_havoc(Some(HavocSpec {
+            data: Some(mogwai_protocol::MarketRegime::VolStorm { vol_mult: 2.0 }),
+            ..HavocSpec::default()
+        }));
+        let error = valid
+            .validate()
+            .expect_err("a well-formed generator regime has no adapter carrier and is refused")
+            .to_string();
+        assert!(
+            error.starts_with("havoc.data cannot be carried by mogwai-adapter"),
+            "unexpected refusal: {error}"
+        );
     }
 
     #[test]

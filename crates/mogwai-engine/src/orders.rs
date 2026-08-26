@@ -2164,12 +2164,11 @@ impl Engine {
             // which would otherwise panic on a repeated trade id.
             //
             // So against nautilus the arm is inert, and green venue-side tests
-            // certify nothing about the consumer. Whether that is correct is an
-            // open product call, recorded in `notes/todo.md`: keeping the id
-            // makes this a test of the consumer's deduplication (which nautilus
-            // passes silently), while minting a fresh id per emitted fill makes
-            // it a phantom execution the consumer books twice. The two inject
-            // different lies; only the second one bites a correct consumer.
+            // certify nothing about the consumer. Keeping the id models a
+            // retransmitting venue and tests consumer deduplication, which
+            // nautilus passes silently. Minting a fresh id would instead model
+            // a phantom execution that a correct consumer books twice, and
+            // would shift every later venue trade id. Those are different lies.
             out.push(VenueMessage::OrderFilled(fill.clone()));
         }
         out.push(VenueMessage::OrderFilled(fill));

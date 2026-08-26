@@ -37,11 +37,12 @@ use crate::source;
 pub(crate) struct DivergenceRequest {
     #[serde(default)]
     symbol: Option<String>,
-    /// Which account a transport divergence corrupts the view of. Absent means
+    /// Which account an account-side divergence applies to. Absent means
     /// every account, which is what an operator on a single-account venue wants
     /// and what every existing scenario file already writes.
     ///
-    /// Only the transport arms honour it. `GoDark` and `StallData` change what
+    /// Transport arms, engine arms, `FeeSurcharge`, and
+    /// `CancelOpenOrderSilently` honour it. `GoDark` and `StallData` change what
     /// one connection receives, so they blur the eyesight of every passenger
     /// under that account;
     /// generator arms change the water itself, which is a property of the river and
@@ -1161,9 +1162,16 @@ impl AppState {
     }
 }
 
-/// Control plane: arm a divergence to fire on its next trigger. It is armed
-/// against the run, so it reaches every open connection: there is no account to
-/// divert it onto.
+/// Control plane: arm a divergence to fire on its next trigger.
+///
+/// Scope is the request's `account` for every arm the venue routes by ledger or
+/// by view - the four transport windows, the engine one-shots and
+/// `FeeSurcharge` - and `Run::arm` retains a named arm whose ledger has not been
+/// minted yet, so the account opens carrying it. Naming no account records the
+/// arm on the run, which reaches every ledger this run ever mints.
+/// `CancelOpenOrderSilently` is not armed at all: it searches the named
+/// account's book and acts immediately. `FaultTape` refuses an account outright,
+/// since it takes the whole venue down and there is nothing left to scope.
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
     Json(request): Json<DivergenceRequest>,
@@ -1254,16 +1262,11 @@ pub(crate) async fn arm_divergence(
                 .await;
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
-            // Venue-wide whatever the request named, which is why this passes
-            // `None` rather than `target`: a surcharge is a statement about the
-            // venue's fees, not about one trader's connection, and the wire has
-            // never let a consumer be charged differently. An account opened
-            // later gets it too - that is what `Run::arm`'s record is for. This
-            // used to walk `run.accounts()` while a comment here claimed the
-            // arm was "stored on the template", which it was not, so an account
-            // minted after the request paid the unmodified fee.
+            // A surcharge belongs to the named ledger, or to every ledger when
+            // no account is named. `Run::arm` records a named arm for a ledger
+            // that has not been minted yet.
             run.arm(
-                None,
+                target,
                 VenueArm::FeeSurcharge {
                     mult,
                     armed_ns: now_ns(),
@@ -1424,15 +1427,9 @@ pub(crate) async fn arm_divergence(
             // stays `202` because the requested arm was accepted; the body is
             // where the collateral damage is named.
             //
-            // Venue-wide whatever the request named, hence the `None` rather
-            // than `target`: an engine divergence is a statement about the
-            // venue's matching, and the wire has never routed one to a single
-            // account. It reaches every ledger and the run, so a ledger minted
-            // later opens holding it. Walking only the ledgers that already
-            // exist - which is what this did - meant an operator could arm a
-            // `PartialFillNext`,
-            // start a subagent, and get a run that believed it was perturbed and
-            // was not.
+            // Engine divergences belong to the named ledger, or to every ledger
+            // when no account is named. `Run::arm` retains a named arm for a
+            // ledger minted after this request.
             //
             // The eviction report is whichever ledger shed one. That reads as
             // representative because every ledger holds the same arms and hits
@@ -1440,7 +1437,7 @@ pub(crate) async fn arm_divergence(
             // than assumes: the run's own record sheds from the oldest end on
             // the same cap, so a ledger opened mid-run replays the queue an
             // older one is holding.
-            let evicted = run.arm(None, VenueArm::Engine(engine_div.clone())).await;
+            let evicted = run.arm(target, VenueArm::Engine(engine_div.clone())).await;
             if let Some(shed) = evicted {
                 let detail = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \

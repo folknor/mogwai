@@ -3115,55 +3115,11 @@ pub(crate) mod tests {
             "the minted ledger must open holding the venue's armed queue, at the cap with the \
              ledgers that already existed"
         );
-        run.ensure_instrument(&late, "BTCUSDT")
-            .await
-            .expect("the late ledger can trade the boot symbol");
-        {
-            let mut engine = late.engine.lock().await;
-            engine.set_fee_schedule(
-                "BTCUSDT".into(),
-                mogwai_engine::FeeSchedule {
-                    maker: mogwai_engine::FeeRate::PerContract {
-                        amount: Decimal::ONE,
-                    },
-                    taker: mogwai_engine::FeeRate::PerContract {
-                        amount: Decimal::ONE,
-                    },
-                },
-            );
-            let clock = SimClock {
-                sim_epoch_ns: 10_000,
-                wall_anchor_ns: 2_000,
-                speed: 1.0,
-            };
-            let events = engine.process_with_market_on_clock(
-                mogwai_protocol::Command::SubmitOrder(mogwai_protocol::SubmitOrder {
-                    client_order_id: "LATE-FEE".into(),
-                    symbol: "BTCUSDT".into(),
-                    position_id: None,
-                    side: mogwai_protocol::Side::Buy,
-                    order_type: mogwai_protocol::OrderType::Market,
-                    quantity: Decimal::ONE,
-                    price: Some(Decimal::from(100)),
-                    trigger_price: None,
-                    trail_offset: None,
-                    limit_offset: None,
-                    reduce_only: false,
-                    post_only: false,
-                    time_in_force: mogwai_protocol::TimeInForce::Gtc,
-                    expire_time: None,
-                    link: None,
-                }),
-                clock.sim_epoch_ns,
-                None,
-                clock,
-            );
-            let commission = events.iter().find_map(|event| match event {
-                mogwai_protocol::VenueMessage::OrderFilled(fill) => Some(fill.commission),
-                _ => None,
-            });
-            assert_eq!(commission, Some(Decimal::from(3)), "{events:?}");
-        }
+        assert_eq!(
+            commission_on_one_fill(&run, &late, "LATE-FEE").await,
+            Decimal::from(3),
+            "a surcharge armed venue-wide must price a fill on a ledger minted afterwards"
+        );
     }
 
     /// The second mint site owes the same replay. `POST /accounts` builds its own
@@ -3410,6 +3366,141 @@ pub(crate) mod tests {
                 .await;
             assert!(shed.is_none(), "the record fills before it sheds");
         }
+    }
+
+    /// Book one taker fill on `account` and report the commission it paid.
+    ///
+    /// The fee schedule is one currency unit per contract, so the commission
+    /// reads back as the armed surcharge multiplier itself. Pricing a real fill
+    /// is the only observation of an armed fee window that does not reach into
+    /// the engine's private state, which is why every surcharge-routing test
+    /// here goes through this rather than inspecting a field.
+    async fn commission_on_one_fill(run: &Run, account: &Account, tag: &str) -> Decimal {
+        run.ensure_instrument(account, "BTCUSDT")
+            .await
+            .expect("the ledger can trade the boot symbol");
+        let mut engine = account.engine.lock().await;
+        engine.set_fee_schedule(
+            "BTCUSDT".into(),
+            mogwai_engine::FeeSchedule {
+                maker: mogwai_engine::FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: mogwai_engine::FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        let clock = SimClock {
+            sim_epoch_ns: 10_000,
+            wall_anchor_ns: 2_000,
+            speed: 1.0,
+        };
+        let events = engine.process_with_market_on_clock(
+            mogwai_protocol::Command::SubmitOrder(mogwai_protocol::SubmitOrder {
+                client_order_id: tag.into(),
+                symbol: "BTCUSDT".into(),
+                position_id: None,
+                side: mogwai_protocol::Side::Buy,
+                order_type: mogwai_protocol::OrderType::Market,
+                quantity: Decimal::ONE,
+                price: Some(Decimal::from(100)),
+                trigger_price: None,
+                trail_offset: None,
+                limit_offset: None,
+                reduce_only: false,
+                post_only: false,
+                time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                expire_time: None,
+                link: None,
+            }),
+            clock.sim_epoch_ns,
+            None,
+            clock,
+        );
+        events
+            .iter()
+            .find_map(|event| match event {
+                mogwai_protocol::VenueMessage::OrderFilled(fill) => Some(fill.commission),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the probe order must fill: {events:?}"))
+    }
+
+    /// The account-side half of named routing: an engine one-shot and a fee
+    /// surcharge posted against one name reach that ledger and no other.
+    ///
+    /// `arm_divergence` passed `None` for both whatever the request named, so an
+    /// operator perturbing one subagent perturbed the whole batch and the wire
+    /// gave no way to say otherwise. The transport half is covered by
+    /// `a_named_arm_reaches_the_account_that_connects_later_and_no_other`, and it
+    /// cannot stand in for this one: transport arms are applied synchronously by
+    /// `apply_transport_arm` while these two are applied by the engine-side match
+    /// below it, so either line can be dropped alone.
+    ///
+    /// Both ledgers are minted after the arms, which puts the pending record on
+    /// the path too - the named one must open holding what was posted for it and
+    /// the stranger must open clean.
+    ///
+    /// The engine queue is read through the cap, the only reader
+    /// `mogwai-engine` exposes: fill the named record to
+    /// `MAX_ARMED_DIVERGENCES` with no ledger open, mint both, and arm once more
+    /// against each. The named ledger replayed the record and sheds; the
+    /// stranger's has room and sheds nothing.
+    #[tokio::test]
+    async fn a_named_account_side_arm_reaches_that_ledger_and_no_other() {
+        let run = run(1_000, 400, None);
+        run.arm(
+            Some("SCOPED-01"),
+            VenueArm::FeeSurcharge {
+                mult: Decimal::from(3),
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+        for _ in 0..mogwai_engine::MAX_ARMED_DIVERGENCES {
+            let shed = run
+                .arm(
+                    Some("SCOPED-01"),
+                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                )
+                .await;
+            assert!(shed.is_none(), "a pending record fills before it sheds");
+        }
+
+        let scoped = run.account(&mogwai_protocol::AccountId::parse("SCOPED-01").unwrap());
+        let stranger = run.account(&mogwai_protocol::AccountId::parse("STRANGER-01").unwrap());
+
+        assert!(
+            run.arm(
+                Some("SCOPED-01"),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+            )
+            .await
+            .is_some(),
+            "the named ledger must open holding the queue armed against its name"
+        );
+        assert!(
+            run.arm(
+                Some("STRANGER-01"),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+            )
+            .await
+            .is_none(),
+            "an engine arm naming one account must leave another account's queue empty"
+        );
+
+        assert_eq!(
+            commission_on_one_fill(&run, &scoped, "SCOPED-FEE").await,
+            Decimal::from(3),
+            "a surcharge naming an account must be standing on the ledger it named"
+        );
+        assert_eq!(
+            commission_on_one_fill(&run, &stranger, "STRANGER-FEE").await,
+            Decimal::ONE,
+            "and must not reach a ledger the request did not name"
+        );
     }
 
     /// An absent callsign keeps the pre-callsign contract exactly: silence is not

@@ -104,7 +104,9 @@ async fn subscribe_and_request_drive_data_events() {
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
 
     // The subscribe is satisfied entirely locally: no frame reaches the venue, which
     // pushes its one run's tape whether or not anybody asked. What the call
@@ -191,8 +193,12 @@ async fn connecting_twice_replaces_the_data_socket() {
     replace_data_event_sender(sink_tx);
     let mut client = data_client(base_url);
     client.start().unwrap();
-    client.connect().await.unwrap();
-    client.connect().await.unwrap();
+    common::connect_with_deadline(client.connect())
+        .await
+        .unwrap();
+    common::connect_with_deadline(client.connect())
+        .await
+        .unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while state.active_ws.load(std::sync::atomic::Ordering::Relaxed) != 1 {
@@ -217,7 +223,9 @@ async fn a_host_subscribing_quotes_after_connect_receives_the_book_immediately()
     replace_data_event_sender(sink_tx);
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
 
     // The quote must be on the wire before the subscribe, which is the whole
     // property: a host that subscribes late still gets the book, because the
@@ -311,8 +319,7 @@ async fn an_unrepresentable_quote_is_dropped_not_panicked() {
     // is opened here only because the leg has frames to push and would
     // otherwise wait for a release that never comes.
     state.push_gate.open();
-    client
-        .connect()
+    common::connect_with_deadline(client.connect())
         .await
         .expect("connect survives invalid quote");
     match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
@@ -338,7 +345,9 @@ async fn request_quotes_uses_the_live_history_route() {
     replace_data_event_sender(sink_tx);
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
     client
         .request_quotes(RequestQuotes::new(
             instrument_id(),
@@ -395,7 +404,9 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     replace_data_event_sender(sink_tx);
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
     client
         .request_trades(RequestTrades::new(
             instrument_id(),
@@ -527,8 +538,7 @@ async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
     // The connect completes despite the unreadable clock: the fallback is the
     // point, and a client that refused here would be unable to attach to any
     // venue whose clock route blipped.
-    client
-        .connect()
+    common::connect_with_deadline(client.connect())
         .await
         .expect("an unreadable clock is a fallback, not a refusal");
 
@@ -622,8 +632,7 @@ async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() 
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client
-        .connect()
+    common::connect_with_deadline(client.connect())
         .await
         .expect("connect seeds the instrument");
 
@@ -694,8 +703,7 @@ async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client
-        .connect()
+    common::connect_with_deadline(client.connect())
         .await
         .expect("connect binds and reseeds behind the barrier");
 
@@ -752,7 +760,9 @@ async fn failed_history_fetch_still_answers_the_request() {
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
 
     let timeout = Duration::from_secs(5);
 
@@ -852,7 +862,9 @@ async fn off_river_window_still_answers_the_request() {
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
 
     // One nanosecond below the floor: as off-river as it gets.
     let off_river =

@@ -233,12 +233,8 @@ impl GeneratorArm {
 ///
 /// Scope is per variant, not per family, and the control plane is where it is
 /// decided: `arm_divergence` passes the request's `account` through for the four
-/// transport arms - `DelayAcks`, `CommandLatency`, `GoDark`, `StallData` - which
-/// blur one account's view of the venue and must not black out a whole batch on
-/// a shared exchange. The engine arms and `FeeSurcharge` are recorded against
-/// the run whatever the request named, because they are statements about the
-/// venue's matching and its fees rather than about one trader's connection, and
-/// recording them on the run is what makes a ledger opened later carry them too.
+/// transport arms, the engine arms, and `FeeSurcharge`. These are account-side
+/// effects and must not perturb a whole batch when one account is named.
 /// `CancelOpenOrderSilently` is scoped by the account holding the order, since
 /// client order ids are unique within a book and not across the venue's.
 /// `FaultTape` refuses an account scope outright.

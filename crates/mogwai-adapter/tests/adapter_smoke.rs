@@ -135,7 +135,9 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     )
     .expect("data client builds");
     data.start().expect("start grabs the data-event sink");
-    data.connect().await.expect("the data leg connects");
+    common::connect_with_deadline(data.connect())
+        .await
+        .expect("the data leg connects");
 
     // Polled, not read on the next line: `ws_requests` is written by the stub's
     // per-connection handler tasks, so an empty or short list means "not
@@ -232,8 +234,7 @@ async fn one_account_rides_two_rivers_as_two_data_clients() {
         client
             .start()
             .unwrap_or_else(|err| panic!("{client_id} grabs the data-event sink: {err}"));
-        client
-            .connect()
+        common::connect_with_deadline(client.connect())
             .await
             .unwrap_or_else(|err| panic!("{client_id} connects: {err}"));
         clients.push(client);
@@ -1128,8 +1129,7 @@ async fn connect_refuses_a_client_with_no_execution_event_sink() {
     // start() cannot find a sender on this thread and says so; it is connect()
     // that must refuse rather than proceed deaf.
     client.start().expect("start is not the gate");
-    let error = client
-        .connect()
+    let error = common::connect_with_deadline(client.connect())
         .await
         .expect_err("a deaf connection must be refused, not reported connected");
     assert!(

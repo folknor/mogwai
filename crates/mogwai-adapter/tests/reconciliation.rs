@@ -198,7 +198,9 @@ async fn mass_status_pairs_an_open_orders_fill_outside_the_lookback() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn connecting_twice_replaces_the_execution_socket() {
     let mut fixture = fixture().await;
-    fixture.client.connect().await.unwrap();
+    common::connect_with_deadline(fixture.client.connect())
+        .await
+        .unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while fixture.state.active_ws.load(Ordering::Relaxed) != 1 {
@@ -216,7 +218,9 @@ async fn connecting_twice_replaces_the_execution_socket() {
 async fn reconnect_after_stop_can_be_stopped_again() {
     let mut fixture = fixture().await;
     fixture.client.stop().unwrap();
-    fixture.client.connect().await.unwrap();
+    common::connect_with_deadline(fixture.client.connect())
+        .await
+        .unwrap();
     fixture.client.stop().unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);

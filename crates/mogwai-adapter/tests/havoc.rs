@@ -73,7 +73,9 @@ async fn subscribed_data_client(
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs sink");
-    client.connect().await.expect("connect opens transports");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens transports");
     subscribe(&mut client);
     // The subscription is now recorded, so the tape may flow. Released here rather
     // than waited out by the stub, because the subscription never crosses the
@@ -136,7 +138,9 @@ async fn connect_data_client(
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs sink");
-    client.connect().await.expect("connect opens transports");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens transports");
     subscribe(&mut client);
     // See `subscribed_data_client`: the local subscription is now recorded, so
     // the stub's tape push is released.
@@ -272,7 +276,9 @@ async fn submit_exec_client(
     );
     let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
     client.start().expect("start grabs sink");
-    client.connect().await.expect("connect opens transports");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens transports");
     client
         .submit_order(SubmitOrder::new(
             TraderId::from("MOGWAI-001"),
@@ -325,7 +331,9 @@ async fn submit_stop_exec_client(
     );
     let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
     client.start().expect("start grabs sink");
-    client.connect().await.expect("connect opens transports");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens transports");
     client
         .submit_order(submit_command(&order, order.init_event().clone()))
         .expect("a stop-market is no longer refused at conversion");
@@ -390,11 +398,9 @@ fn the_control_stub_refuses_what_the_venue_refuses() {
 async fn ships_venue_havoc() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
-    // Two engine one-shots and one transport window, chosen so the per-arm
-    // account scoping below has both sides to compare. `GoDark` is routed to
-    // the request's account by `arm_divergence`; the two engine arms are
-    // recorded on the run whatever the request names, so the adapter sends them
-    // no account at all rather than a field their reader discards.
+    // Two engine one-shots and one transport window, chosen so the account
+    // scoping below covers both engine and transport arms. All three belong to
+    // this ledger, so the adapter names it on each request.
     //
     // What is deliberately absent is `CancelOpenOrderSilently`, and it is worth
     // a sentence because a round of the bug loop put it here. It is an immediate
@@ -445,8 +451,7 @@ async fn ships_venue_havoc() {
     );
     let mut exec_client = MogwaiExecutionClient::new(core, exec_config).expect("client builds");
     exec_client.start().expect("start exec client");
-    exec_client
-        .connect()
+    common::connect_with_deadline(exec_client.connect())
         .await
         .expect("exec connect ships havoc");
 
@@ -456,12 +461,8 @@ async fn ships_venue_havoc() {
     // wrong duration would pass a substring-only check.
     {
         let bodies = state.control_bodies.lock().expect("control bodies mutex");
-        // The account scope, asserted per kind rather than over all three. A
-        // blanket "every body names the ledger" reads stronger and is weaker:
-        // the venue routes only the transport arms to the named account and
-        // passes `None` for the engine ones, so asserting the field everywhere
-        // would pin the adapter to sending a scope its reader discards - and
-        // would go green whether or not the arm that genuinely needs one has it.
+        // The account scope is asserted per kind so the test names both the
+        // transport and engine routing contracts.
         let scoped: Vec<(String, Option<String>)> = bodies
             .iter()
             .map(|body| {
@@ -496,11 +497,13 @@ async fn ships_venue_havoc() {
         );
         assert_eq!(
             account_of("RejectNextSubmit"),
-            None,
-            "an engine arm is recorded on the run whatever the request names, so sending \
-             an account states a scope the venue discards"
+            Some("MOGWAI-001".to_owned()),
+            "an engine arm belongs to this client's ledger"
         );
-        assert_eq!(account_of("DropNextAccountUpdate"), None);
+        assert_eq!(
+            account_of("DropNextAccountUpdate"),
+            Some("MOGWAI-001".to_owned())
+        );
         let reject: Vec<Divergence> = bodies
             .iter()
             .filter_map(|body| {
@@ -540,8 +543,7 @@ async fn ships_venue_havoc() {
     let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
     data_client.start().expect("start data client");
-    data_client
-        .connect()
+    common::connect_with_deadline(data_client.connect())
         .await
         .expect("data connect does not ship");
 
@@ -963,7 +965,9 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs the data-event sink");
-    client.connect().await.expect("connect is spawned");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect is spawned");
 
     // The upgrade record is written by the stub's handler task, so it is polled
     // for rather than read on the next line: silence from a background recorder
@@ -1053,7 +1057,7 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
     // wrongly refuses this venue fails on the property below instead of on a
     // generic "connect timed out" from the helper - the refusal path never
     // reports connected, and its message would name the socket, not the check.
-    drop(client.connect().await);
+    drop(common::connect_with_deadline(client.connect()).await);
 
     // The probe was asked before anything is concluded from the client not
     // having refused: a client that skipped the check entirely would satisfy

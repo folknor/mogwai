@@ -194,15 +194,13 @@ fn note_account_label(state: &mogwai_protocol::AccountState, configured: Account
 /// Posts every arm in `spec.venue` to the venue's control plane, once, at
 /// connect.
 ///
-/// The account scope is per arm rather than blanket, because the venue routes
-/// per arm and a scope it does not route is accepted and ignored - the failure
-/// mode this workspace's carriers exist to prevent. `arm_divergence` passes the
-/// request's account through to `Run::arm` for exactly the four transport arms:
+/// The account scope is per arm rather than blanket, because water-side and
+/// terminal arms do not belong to a ledger. `arm_divergence` passes the
+/// request's account through to `Run::arm` for every account-side arm.
 /// `DelayAcks`, `CommandLatency`, `GoDark` and `StallData` blur one account's
 /// view, so on a shared venue an unscoped one blacks out the whole batch rather
-/// than this strategy. The engine arms and `FeeSurcharge` pass `None` whatever
-/// the request named - they are statements about the venue's matching and its
-/// fees, and the wire has never routed one to a single ledger - and `FaultTape`
+/// than this strategy. Engine arms and `FeeSurcharge` act on that account's
+/// ledger, and `FaultTape`
 /// refuses an account outright with a `400`, since there is no venue left to
 /// scope. `CancelOpenOrderSilently` is the one scoped arm this carrier cannot
 /// deliver at all; `validate_havoc` refuses it at config time, so nothing here
@@ -229,8 +227,8 @@ async fn ship_venue_havoc(
             "args": encoded,
         });
         // Named rather than defaulted, and the set is the one this function's
-        // doc derives from `arm_divergence`: only these four are routed to the
-        // named account, so only these four carry one. A `_` arm here would
+        // doc derives from `arm_divergence`: every account-side arm carries the
+        // named account. A `_` arm here would
         // silently start scoping the next variant somebody adds, which is how a
         // field gets sent to a reader that ignores it.
         if matches!(
@@ -239,6 +237,12 @@ async fn ship_venue_havoc(
                 | mogwai_protocol::control::Divergence::CommandLatency { .. }
                 | mogwai_protocol::control::Divergence::GoDark { .. }
                 | mogwai_protocol::control::Divergence::StallData { .. }
+                | mogwai_protocol::control::Divergence::PartialFillNext { .. }
+                | mogwai_protocol::control::Divergence::RejectNextSubmit { .. }
+                | mogwai_protocol::control::Divergence::RejectNextCancel { .. }
+                | mogwai_protocol::control::Divergence::DuplicateNextFill
+                | mogwai_protocol::control::Divergence::DropNextAccountUpdate
+                | mogwai_protocol::control::Divergence::FeeSurcharge { .. }
         ) {
             request["account"] = serde_json::Value::String(account_id.to_string());
         }

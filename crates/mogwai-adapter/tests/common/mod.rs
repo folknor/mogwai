@@ -91,6 +91,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Bound a socket test's connect future so a broken connection path reports
+/// the named setup failure instead of consuming the suite watchdog.
+pub async fn connect_with_deadline<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .expect("adapter connect did not finish within 5 seconds")
+}
+
 use mogwai_adapter::{
     DEFAULT_TRADER_ID, MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient,
 };
