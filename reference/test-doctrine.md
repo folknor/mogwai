@@ -1,9 +1,11 @@
 # Test doctrine
 
 The distilled lessons of the 2026-08 bug-hunt arcs, kept durable because they
-recur. Two arcs, both closed with zero open findings: a seven-document loop,
+recur. Three arcs, all closed with zero open findings: a seven-document loop,
 then an eleven-document arc over five test-suite reports and six
-production-code ones, closed 2026-08-20. Each arc's round-by-round
+production-code ones, closed 2026-08-20, then a five-document production
+bug-hunt arc - protocol and CLI, venue serving, venue mechanics, engine,
+adapter - closed 2026-08-26. Each arc's round-by-round
 carry-forward was deleted once this distillation landed; a live arc keeps a
 live carry-forward (`notes/bug-loop-carry-forward.md` existing is the normal
 state during an arc), and it is deleted when that arc closes and whatever
@@ -103,6 +105,21 @@ A dozen non-biting tests among what the arcs paid for.
     say so in the record. An honest "this cannot bite, and here is what does
     gate it" is worth a great deal; a perturbation that proves nothing looks
     exactly like a test that cannot fail.
+- A regression whose defect signature is "the waiter parks" owes a
+  non-blocking assertion. A test that waits on the channel it expects to be
+  dead reproduces the hang instead of reporting it: the adapter's
+  data-teardown bite spent brokkr's whole per-test timeout in
+  `oneshot::blocking_recv` where `try_recv` against `TryRecvError::Closed`
+  says the same thing in microseconds. A test that reproduces a hang is not a
+  test that reports one.
+- A golden can be byte-identical across two mechanisms that differ below its
+  observation interval, which makes it a gate over a dead code path without
+  ever failing: forcing every fill-band draw to zero left every field of the
+  committed schema-2 fill golden unchanged, so the golden would have passed
+  with the band deleted. Where the downstream observable quantizes the
+  distinction away, record the mechanism's direct output in the artifact, and
+  prove the recording bites by perturbing the draw in its callee and reading
+  which assertion fires.
 - A test that names which branch ran needs an observable, not a sleep. A wait
   of some fraction of a poll interval does not select an arm, it bets on the
   scheduler, and the losing bet is usually the silent one: the other arm does
@@ -226,6 +243,24 @@ From findings that were argued wrong before they were measured right.
 - Check the callee's `unreachable!`s before reusing it from a new call site.
   A panic path genuinely unreachable from one caller is a live hazard from
   the next, and the compiler says nothing.
+- A validator reached at two points in a message's life, with a different
+  truth at each point, must take the point as a required argument with no
+  default. The worked example is `mogwai_protocol::SubmitPhase`: pre-stamp a
+  market order must carry no price and post-stamp it must carry the one the
+  venue stamped, so a phase-blind validator was correct at the wire and
+  silently rejected every market-entry bracket at the engine. Guessing either
+  way is a defect, which is why neither a `Default` nor an inferred phase is
+  allowed to exist.
+- Before deciding what a guard admits, read the callee's own transition table
+  in its source, and write the guard as an enumeration of that table rather
+  than as a negation of a nearby predicate. `!status.is_closed()` and "only
+  the states an initial submit is rejected from" were both wrong about
+  nautilus's `Rejected` arms - the negation admitted three statuses the FSM
+  refuses, the intuition dropped two the engine really rejects from. And key
+  the guard on the origin of its evidence where the origins carry different
+  weight: a verdict the far end sent and a guess synthesized from a local
+  receipt book must not be allowed to close the same states, because the
+  guess may not overrule state evidence against it.
 - Resolve a version-history sentence against `git show <ref>:<path>`, never
   against memory - one such sentence shipped false, and the prose gate is
   blind to historical phrasings by design. Grep the number, not the file: a
@@ -273,6 +308,21 @@ These govern how much a green anything is worth.
   filed, and the tree moves whether or not anyone edits the ledger - so verify
   every entry at its site before fixing it, and reconcile the ledger in the
   same commit that closes the work rather than in a later sweep.
+- A finding is closed by code or by a verified claim, never by a sentence
+  alone. Twice in one arc a fix pass closed a finding by writing prose whose
+  central factual claim was false on arrival - once into
+  `reference/architecture.md` about the very ordering the finding named, once
+  into a doc comment asserting a malformed event was unreachable when every
+  field on its path is public. A durable claim closing a finding is owed the
+  same verification as a code change, and where the claim is "this cannot
+  happen", the cheap fix is almost always to make the code refuse it so the
+  sentence stops carrying the load.
+- Read the test count after every fix pass and ask which findings it covers,
+  not only how many tests moved. Twice in one arc a fix pass claimed coverage
+  the workspace count showed had not appeared, and a green gate detected
+  neither; twice more the count was right and the summary's "added" was not.
+  A flat count is a finding; so is a count that moved by less than the
+  findings claimed.
 - The carry-forward is the artifact most likely to be skipped, because the
   agent that lands the code and the report is the last hand on both and no
   agent in the loop reads the carry-forward back. A round whose lesson is

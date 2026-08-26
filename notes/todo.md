@@ -300,6 +300,26 @@ urgent; both modes must eventually be supported.
   and the fix at that point is a new arm in `instrument_any`, not a change to
   the venue.
 
+- **Nautilus's own `MarketToLimit` constructor cannot express the mogwai
+  wire's market-to-limit.** The two models disagree about who names the limit:
+  nautilus's `MarketToLimitOrder::new_checked` builds its `OrderInitialized`
+  with `price: None` and a comment saying the price is determined on fill,
+  while `mogwai_protocol::validate_submit_order` requires a `MarketToLimit`
+  submit to carry a price, because on this venue the limit the remainder rests
+  at is the consumer's to state. So a factory-built market-to-limit is refused
+  at `SubmitPhase::PreStamp` - since the bugs-adapter arc that refusal lands
+  locally as an `OrderDenied` before any event is emitted; before it, the venue
+  refused the identical frame at its decode boundary, so no verdict changed.
+  The workaround is host-side: set `price` on the `OrderInitialized` by hand
+  before `SubmitOrder::new`, which for this one type is the contract rather
+  than a defect (documented in `docs/adapter-lifecycle.md`). Closing it
+  properly is a cross-repository question: either nautilus grows a stated-limit
+  form of the type, or the adapter would need a limit it cannot invent - it has
+  no reading to price one from, and guessing would name the number the venue
+  exists to own. No adapter test submits a `MarketToLimit` today, which is how
+  the gap stayed invisible; a test pinning the refusal's reason would at least
+  make it loud.
+
 - **`perpetual`'s four funding fields are still dropped silently at
   `convert::instrument_any`.** `funding_interval_ns`, `funding_rate`,
   `index_symbol` and `funding_clamp` have nowhere to go on nautilus's

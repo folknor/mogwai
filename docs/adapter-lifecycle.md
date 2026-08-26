@@ -151,12 +151,23 @@ verdict is the venue's either way, but it arrives without a round trip and
 without depending on a live socket. Nothing legal is refused by it, because the
 adapter and the venue are running one rule table rather than two.
 
-What reaches it in practice is an `OrderInitialized` assembled by hand. A
-`MarketOrder` built through nautilus's own constructors cannot carry a price,
+What mostly reaches it in practice is an `OrderInitialized` assembled by hand.
+A `MarketOrder` built through nautilus's own constructors cannot carry a price,
 but `SubmitOrder::new` takes any `OrderInitialized`, every field of which is
 public, so `order_type = Market` beside a price is reachable through nautilus's
 public API. Such an event is a host defect; the adapter neither drops the price
 nor forwards it, it names it.
+
+One factory-built shape reaches it too, and it is not a host defect but a
+model mismatch: a `MarketToLimit` built through nautilus's own constructor
+carries no price - nautilus determines the limit at fill - while this venue's
+wire requires the consumer to state the limit the remainder rests at. The two
+models disagree about who names that number, so a factory-built market-to-limit
+is denied with `MarketToLimit order must carry a price`. Stating one means
+setting `price` on the `OrderInitialized` yourself before `SubmitOrder::new`,
+which for this one type is the contract rather than the defect the previous
+paragraph describes. The venue refused the same frame at its boundary before
+this local check existed; the denial only moved closer.
 
 Configuration is refused the same way and at the same distance from the venue:
 `validate()` on either client config rejects `dial_timeout_secs = 0`, which

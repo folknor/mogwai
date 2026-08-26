@@ -830,10 +830,16 @@ async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
 }
 
 /// The order-init shapes the venue cannot honor, each refused before any
-/// `OrderSubmitted`. Table-driven because the four are one rule - the venue
+/// `OrderSubmitted`. Table-driven because the rows are one rule - the venue
 /// refuses what it cannot serve rather than serving something else quietly -
-/// and because each is built by mutating a legal init, which is the only way
-/// to produce shapes nautilus' own factory will not assemble.
+/// and because each but the last is built by mutating a legal init, which is
+/// the only way to produce shapes nautilus' own factory will not assemble.
+/// The last row is the exception: nautilus' own `MarketToLimit` constructor
+/// builds its init with `price: None` (the limit determined at fill), while
+/// this venue's wire has the consumer state the limit the remainder rests at,
+/// so the factory-built shape itself is what the rule table refuses. The row
+/// pins that model mismatch loudly; `docs/adapter-lifecycle.md` states the
+/// host-side workaround.
 ///
 /// The priced-market row is the shape whose refusal used to be the venue's
 /// alone: the adapter forwarded the price and let the decode boundary answer,
@@ -895,6 +901,18 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
         init
     };
 
+    // A market-to-limit exactly as nautilus' factory builds it: no price, no
+    // trigger. The wire requires the consumer-stated limit, so this legal
+    // nautilus shape is refused by the same rule table as the rows above.
+    let factory_market_to_limit = {
+        let mut init = legal.clone();
+        init.order_type = OrderType::MarketToLimit;
+        init.trigger_price = None;
+        init.trigger_type = None;
+        init.price = None;
+        init
+    };
+
     for (label, init, needles) in [
         (
             "a priced market order",
@@ -918,6 +936,14 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
             "an unkeyed linkage",
             unkeyed_linkage,
             ["must name its order list", "order_list_id"],
+        ),
+        (
+            "a factory-built market-to-limit",
+            factory_market_to_limit,
+            [
+                "malformed for MOGWAI",
+                "MarketToLimit order must carry a price",
+            ],
         ),
     ] {
         let err = client
