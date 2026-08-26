@@ -545,6 +545,13 @@ pub fn fast_config() -> String {
     format!("{}/tests/configs/fast.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// A venue with a configured maker/taker fee table, so a fill's commission is
+/// a nonzero wire observable - the only reading of an armed `FeeSurcharge`
+/// that does not reach into the engine.
+pub fn fees_config() -> String {
+    format!("{}/tests/configs/fees.toml", env!("CARGO_MANIFEST_DIR"))
+}
+
 /// A venue whose unattended accounts are TTL-collected within a few hundred
 /// milliseconds, so the freeze has an observable consequence a socket test can
 /// read.

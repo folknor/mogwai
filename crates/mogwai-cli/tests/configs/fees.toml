@@ -1,5 +1,9 @@
 speed = 60.0
 venue_heartbeat_ms = 0
+
+# Five simulated minutes of history rather than the default day, so boot is
+# cheap; the fee gates read commissions, not history depth.
+warmup_ns = 300000000000
 symbol = "MNQ"
 
 [balances]

@@ -14,6 +14,15 @@ comment in the code, or (b) added to an existing or new `../reference/` document
 Or both. There are no exceptions - a ruling recorded only here is a ruling the
 next bug hunter re-derives from scratch.
 
+**Where an entry here also appears in `notes/bugs.md`, bugs.md is the source of
+truth.** The 2026-08-24 extraction copied entries rather than moving them, the
+two copies drifted, and the reconciliation ruling (2026-08-26) is that every
+correction lands in bugs.md and only there: a copy surviving here is
+unmaintained, and a section verified as fully duplicated is deleted here rather
+than kept in parallel. The former "Tests and tooling" section was the first
+such deletion - its thirteen entries all live in bugs.md's G section, with
+corrections this file's copies never received.
+
 ## The gate that blocks other work
 
 - **Segment-sampler gate: failed 2026-08-18, still failing.** The owner viewed
@@ -386,191 +395,6 @@ urgent; both modes must eventually be supported.
   venue truth and pins each granular generator, `query_order` and their
   mass-status composition over both query carriers. Known limitation: it proves
   the adapter would answer when asked, not that the node asks.
-
-## Tests and tooling
-
-- Triage every test for parallel safety, and kill every fixed duration and wait.
-  `[test.profiles.gate]` sits at `test_threads = 8`, which is a measured
-  compromise rather than a resolution: at 16 the run goes red as a wrong answer
-  rather than a watchdog timeout, so the ceiling is set by our least robust test
-  rather than by the machine, and every fixed wall-clock wait in the suite is a
-  piece of that ceiling.
-
-  What the measurement found. Serial, the gate spent 164s executing 1,608 tests,
-  and the top 20 of them were 54 percent of it while the other 1,451 came to 3.8s
-  combined. Almost none of that concentration is computation: the lifecycle gates
-  spend a declared `--duration` in wall time and the reconnect ladders spend
-  their attempts the same way. The genuinely CPU-bound tests are the tape walks,
-  and they are the minority.
-
-  The work is triage before repair. For every test ask two things: can it run
-  beside its siblings, and does it wait on a duration rather than on a condition.
-  A test that waits for a state to be reached, with a generous deadline as the
-  failure path, is both parallel-safe and fast; a test that sleeps a fixed span is
-  neither, and it silently prices the whole gate. The lifecycle family is the
-  obvious start - `completion.rs`, `serving.rs`, `lifecycle.rs` and the adapter's
-  four socket binaries - but the sweep is every test, because the point is a
-  property of the suite. Check the fixed-path unit tests while triaging too:
-  nothing collides today, since every one writes a distinct `target/...` name and
-  ports are kernel-assigned, but that is convention rather than structure and one
-  duplicated literal breaks it only under load.
-
-  What it unlocks: `test_threads` can go to 0 (num_cpus) with the cliff gone
-  rather than merely avoided. What is not the answer, already measured and
-  rejected in `brokkr.toml`: a serial lane for the socket-backed tests floors at
-  74s against the flat setting's 53s, because those tests are the best parallel
-  citizens in the suite precisely by being idle.
-
-  Anything called settled here needs repeated runs. `test_threads = 8` went red
-  after three green runs at 8, having already gone red at 16; three passes are
-  not evidence about an intermittent race, a failure rate is. The parked list is
-  empty as of 2026-08-19.
-
-- The venue counts sweep passes for nobody, which is the missing observable
-  behind the last fixed sleeps. Wanted: a monotonic count of completed sweep
-  passes per river, readable from a route that already exists - a field on
-  `/clock` or `/health` would do - so a test can read it, wait for it to advance
-  by N, and say exactly what it waited for. Nothing on the wire carries it today;
-  the sweeper is internal to `mogwai-venue`'s fill path and emits no frame,
-  counter or log a test can consume. Blocked on it:
-  `serving::the_tape_is_identical_with_and_without_a_resting_stop` polls
-  sim-clock advance as a proxy, sound only because that config's clock is
-  wall-affine, and `serving::a_perpetual_position_pays_funding_across_an_interval`
-  still bets on a wall sleep, the same poll having been found vacuous at
-  `speed = 0.0`.
-
-- Nothing on the wire says whether a submit took a market reading, which forces
-  `serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
-  to key on the venue's log. When `read_market` refuses - a cold volatility
-  estimator, a truncated walk - the engine falls back to the order's stated price
-  and logs a warn, and on a price-less market order the venue stamps the last
-  print either way, so the fill lands on the tape whether a reading was taken or
-  not. That is exactly the path the venue used to get wrong.
-
-  What the venue would have to ship: the reading's own instant, or a bare
-  "reading taken" flag, on `OrderFilled`. Two things follow. The gate stops
-  reading logs, and the adverse-slippage invariant - a market buy fills at or
-  above the print the venue read - becomes an exact per-fill statement instead of
-  the bracket it is now. The bracket exists only because the reading instant is
-  unidentifiable from outside: it is neither the acceptance instant nor the fill
-  instant, and `MarketReadingCache` buckets it further.
-
-- History-splice clamp has no test for the case that motivated it. The cutoff is
-  the tighter of the run clock and the asking passenger's own boat clock, so a
-  slow boat is no longer served its own future, but every socket test runs at the
-  venue's default speed where the two clocks agree, so nothing exercises the
-  branch where they differ. Wants a passenger on a deliberately slow boat reading
-  history past the point its own tape has reached, with the boat's frontier as an
-  observable rather than a sleep. Filed 2026-08-23: the code is right, the
-  coverage is a hole, and this is the shape that passes for the wrong reason
-  later.
-
-- The abandoned-upgrade path has no socket-level test, and no client behaviour
-  found so far reaches it. The mechanism is no longer `Passenger::attachments`,
-  which the 2026-08-24 one-derived-registry rewrite retired: it is now `Attach`
-  in `crates/mogwai-venue/src/run.rs`, an RAII guard whose `Drop` calls
-  `ConnectionRegistry::release`, and its doc names this very case - an upgrade
-  abandoned after the 101 never reaches `handle_socket`, so a connection left
-  registered forever leaves its account never frozen, never TTL-collected and
-  swept while riding no boat. Still pinned only by `run.rs` unit tests that drop
-  an `Attach` directly.
-  Sixteen connections writing a well-formed upgrade request and then resetting
-  with `SO_LINGER` at zero all landed on the handled path instead: on loopback
-  the venue has read the request, written the 101 and started the handler before
-  the reset arrives. The race is inside hyper's upgrade handoff, so
-  parameterizing an interval has nothing to take hold of. Closing it needs a seam
-  the venue does not have, most plausibly a test-only delay or counter between
-  the response and the handoff.
-
-- `run_b1`'s build-identity guard (`crates/mogwai-cli/src/arrival_control.rs`)
-  has no test, and the `bugs-cli` round-3 fix pass refused the binary split
-  partly on the strength of that guard. It bails unless `current_exe()` ends with
-  `target/release/mogwai`, so B1's byte comparison is generated by the binary
-  under test - the property the refusal record names as the reason `gen` and
-  `arrival-control` must stay in one executable. Nothing asserts it: a test
-  binary's `current_exe` is never `target/release/mogwai`, so only the refusal
-  arm is reachable. Wants a seam that lets the accepted path be supplied. Low
-  priority, since the guard is three lines and its consequence is a refusal
-  rather than a wrong answer.
-
-- `mogwai gen --type trace` has no end-to-end CLI coverage. The one test sits at
-  the `write_trace` seam in `gen.rs`; nothing drives the argv through the shipped
-  binary the way `presets_cli.rs` does for `presets` - `--trace-from` and
-  `--trace-until` parsing, the four-part window validation, the `--interval` and
-  `--burn-in` rejections. The window validation admits `until == end`, which is
-  the case the truncated-`child_count` defect lived in, and no test states that
-  it is legal.
-
-- Watch the first live `mogwai measure` run against the tightened
-  `session_dates_are_23_sorted_unique` gate in `crates/mogwai-cli/src/measure.rs`.
-  It has only ever executed under its unit test, because the gate sits mid-way
-  through a multi-minute walk driver behind a Brick G cache that no test sweep in
-  this workspace populates.
-
-- The roll conformance fixture's Python half is manual: `python3
-  analysis/roll_estimator.py conformance` is run by no lane, so its
-  fixture-version guard fires only for a human who thinks to invoke it. The dwell
-  pair has automated tests on both sides; this pair does not, because a Rust test
-  may not spawn Python.
-
-- Neither shared conformance fixture detects a quietly widened `tolerance`. The
-  fixture version is a schema version, and a tolerance edit weakens both
-  implementations at once, so the second implementation - whose whole purpose is
-  to catch a one-sided drift - is structurally blind to it. Unlike the arrival
-  vectors there is no re-derivation to compare against; a fix needs an
-  independently derived bound on the tolerance itself.
-
-- Nothing routes a new wall-clock budget into the `timing` sweep. `brokkr.toml`
-  states the policy - a latency assertion is `#[ignore]`d at the source, listed
-  in the gate's `skip`, and named in the `timing` sweep's `only` - and the tool
-  enforces it in one direction only: an `only` entry the gate does not skip is an
-  orphaned pair, and a filter matching nothing is dead. The converse, that every
-  budget-carrying test appears in some `only` filter, is not a syntactic property
-  and is therefore not checkable, so a plain `#[test]` asserting 50 ms in the
-  parallel dev lane is admitted silently. Where the quantity is a parameter,
-  inflating the interval under test is the better answer; where it is not, there
-  is no answer. An owner-level question if anyone wants it mechanised - a source
-  scan for `Duration::from_` inside an `assert!` is the crude form, and would
-  have to justify its false-positive rate against a repository full of legitimate
-  loose bounds.
-
-- The no-shouting textlint is blind to several classes, so shouted words survive
-  in three places at once. Check the lint's coverage before sweeping by hand,
-  because a hand sweep will miss whatever the lint misses next time.
-  - Rust comments it does not reach. The `run.rs` and `http.rs` survivors were
-    swept 2026-08-23; `mogwai-venue`'s `config.rs` still carries `RESOLVED`,
-    `ASK`, `CASH`, `PER BOAT` and `NOT`, and `account.rs` was never checked.
-    All are single words that rewrite cleanly.
-  - Test fixture headers, which are `.toml` rather than Rust and were never in
-    scope: `crates/mogwai-cli/tests/configs/` wants a sweep, one file having been
-    de-shouted in passing.
-  - Assertion and panic message strings, which read to a human exactly like prose
-    (`the venue CLOSED the perpetual socket`, `never fully WATCHED a run` in
-    `serving.rs` and `completion.rs`). Whether the rule covers them is worth
-    deciding once rather than per site.
-
-- Open lead, not reproduced and not closed:
-  `sigterm_stops_the_venue_within_the_shutdown_grace` in
-  `crates/mogwai-cli/tests/lifecycle.rs` failed one full `brokkr check --gate`
-  run on 2026-08-19 and passed the identical tree's second, with the tree's
-  changes nowhere near the serving or shutdown path. Hunted twice on the harness
-  that did fire the completion-path race: 20 rounds at 16 threads and 30 at 32,
-  both under 64 busy processes, zero failures.
-
-  Read the new output before theorising. The original failure message folded two
-  opposite verdicts into one sentence, because `Venue::wait_for_exit` clamps its
-  bound to the test's remaining wall budget, so the wait may have been far
-  shorter than the 10 s it reported; the helper now reports how long it waited
-  and which bound produced that. Host contention is the boring reading to rule
-  out first. If the clamp is not it, the two candidates are `spawn_blocking` work
-  in flight at signal time - the sweeper's tape walk and the boatyard's
-  `worker.join()` both run there, and a dropped tokio runtime waits for blocking
-  tasks that have started - and the boat worker's responsiveness to its cancel
-  flag. The completion-path session wait does not touch this: a signal
-  deliberately does not wait for sessions. When it fires it aborts the
-  instrumented sweep and the gate then reports every `mogwai-data` test as
-  orphaned; the tell is the orphan count equalling the missing sweep's pass
-  count.
 
 ## Measurement and method still owed
 

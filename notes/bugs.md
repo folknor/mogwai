@@ -910,24 +910,22 @@ Against the tightened `session_dates_are_23_sorted_unique` gate in
 test, because the gate sits mid-way through a multi-minute walk driver behind a
 Brick G cache that no test sweep in this workspace populates.
 
-### G12b. This document's extraction from `notes/todo.md` copied rather than moved
+### G12b. `notes/todo.md` still carries unverified copies of entries this file owns
 
-Filed 2026-08-26 from round 2, as a lateral finding while closing G12a. This
-file's own preamble says it was "extracted from `notes/todo.md` on 2026-08-24",
-but the source entries were left in place, so at least G2 and G3 exist as two
-independent copies in two files. They have already drifted: the todo.md copy of
-G3 still cited the test name that was renamed out from under it, corrected here
-only because G3 sent someone looking. That is the same failure that produced
-G12a one paragraph up - a reader landing on the wrong page - except worse,
-because both pages look current.
+Decided 2026-08-26 by the close pass: this document is the source of truth for
+every entry both files carry, todo.md's preamble now says so, and any correction
+lands here and only here. Executed for the worst offender - todo.md's "Tests
+and tooling" section, verified entry by entry as a full duplicate of section G
+minus this file's corrections, is deleted there.
 
-Not urgent and neither file is durable, so nothing cites either. What it needs
-is a decision rather than a fix: either todo.md's copies go and it keeps only
-what was never extracted, or this document names todo.md as the source of truth
-for the overlap and stops carrying its own copy. Doing neither means every
-future correction has to be made twice, and the next one will be made once.
-Scoped as a whole-file reconciliation of the two, not a per-entry chase, since
-which items moved on 2026-08-24 is not recoverable entry by entry.
+The residual is the sweep of todo.md's remaining sections. Its "Venue and
+protocol" section is known to still carry drifted copies - a C10 copy
+describing the pre-`PassengerDurationComplete` behaviour, a C11 copy with the
+pre-narrowing text, a C7 copy predating the round-2 close - and the other
+sections have not been compared at all. The banner means none of those copies
+can mislead a reader who saw it, so the sweep is cleanliness rather than
+urgency: verify a section is fully duplicated here, then delete it there, and
+keep in todo.md only what was never extracted.
 
 ---
 
@@ -943,25 +941,6 @@ non-marketable, and a full gate could not see it.
 Wants a passenger submitting into a scheduled close over a real socket and
 reading the refusal frame, including the group case with a marketable member
 behind a non-marketable one.
-
-### G19. Named account-side arm routing is proven at two layers, not through the wire
-
-Filed 2026-08-26 from round 1, as the residue of F13. What the round changed is
-one identifier in `arm_divergence`: the engine one-shots and `FeeSurcharge` now
-pass the request's `account` to `Run::arm` where they passed `None`. Two tests
-stand on either side of that line and neither crosses it.
-`a_named_account_side_arm_reaches_that_ledger_and_no_other` proves `Run::arm`
-routes both kinds by name, and bites when the named branch is widened;
-`ships_venue_havoc` proves the adapter puts the account on the body, and bites
-when the engine variants leave its match. Nothing asserts that a body naming an
-account reaches only that ledger's engine over a real socket, so re-passing
-`None` at the route would take the whole gate green.
-
-`crates/mogwai-cli/tests/serving.rs` already owns the harness - `post_divergence_body`
-and the venue fixture - so what is missing is the scenario rather than the
-machinery: two accounts on sockets, a `PartialFillNext` naming one, a submit on
-each, one partial fill and one full. The same shape covers `FeeSurcharge` by
-reading the two commissions.
 
 ## H. Measurement and method owed
 

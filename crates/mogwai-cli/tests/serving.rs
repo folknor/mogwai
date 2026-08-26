@@ -38,8 +38,9 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    account_ttl_config, band_config, fast_config, http_get, http_post_json, mnq_preset_config,
-    paced_config, perpetual_config, spawn, tiny_fanout_config, two_symbols_config,
+    account_ttl_config, band_config, fast_config, fees_config, http_get, http_post_json,
+    mnq_preset_config, paced_config, perpetual_config, spawn, tiny_fanout_config,
+    two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, TradeTick, VenueMessage};
@@ -1498,6 +1499,130 @@ async fn observe(
         }
     }
     Observed::Serving
+}
+
+/// The engine one-shots and `FeeSurcharge` are routed by the request's
+/// `account` all the way through the wire: an arm naming one account perturbs
+/// that ledger and no other. The venue-side routing is pinned by `run.rs`'s
+/// `a_named_account_side_arm_reaches_that_ledger_and_no_other` and the
+/// adapter's body by `havoc.rs::ships_venue_havoc`, but neither crosses
+/// `arm_divergence`, the exact line where the original defect lived - it
+/// passed `None` to `Run::arm` whatever the request named - so re-passing
+/// `None` there would leave both green while every batch shared one
+/// scenario's faults. This test is the gate on that line.
+///
+/// Both arms are posted before either account has connected, which puts the
+/// pending record on the wire path too: the named ledger is minted at the
+/// upgrade and must open holding what was posted for its name, while the
+/// stranger's must open clean.
+///
+/// Two observables, one per changed call site in `arm_divergence`. The
+/// engine-queue site is read through `RejectNextSubmit`'s echoed reason - an
+/// organic refusal cannot produce the armed string - and the `FeeSurcharge`
+/// site through the fill's commission, against `fees.toml`'s 0.25 per-contract
+/// taker charge.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_named_engine_arm_perturbs_that_account_and_no_other_over_the_wire() {
+    let venue = spawn(&["--config", &fees_config()]);
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"kind":"RejectNextSubmit","args":{"reason":"armed against WYRD-510"},"account":"WYRD-510"}"#,
+    );
+    assert_eq!(status, 202, "the named one-shot arms: {body}");
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"kind":"FeeSurcharge","args":{"mult":"3","window_ms":3600000},"account":"WYRD-510"}"#,
+    );
+    assert_eq!(status, 202, "the named surcharge arms: {body}");
+
+    let (mut scoped, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-510", venue.ws_url()))
+            .await
+            .expect("open the account the arms named");
+    let (mut stranger, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-511", venue.ws_url()))
+            .await
+            .expect("open the account the arms did not name");
+
+    // The stranger is judged first, while its socket is fresh: its very first
+    // submit is the one an unrouted arm would reject, and its commission is
+    // the one an unrouted surcharge would triple.
+    let commission = submit_market_order(&mut stranger, &venue.symbol, "STRANGER-1")
+        .await
+        .expect("an arm naming another account must not reject this one's submit");
+    assert_eq!(
+        commission,
+        "0.25".parse::<rust_decimal::Decimal>().unwrap(),
+        "a surcharge naming another account must not reach this ledger's fees"
+    );
+
+    // The named account's first submit meets the one-shot. The echoed reason
+    // is the discriminator: an organic refusal cannot carry the armed string.
+    let reason = submit_market_order(&mut scoped, &venue.symbol, "SCOPED-1")
+        .await
+        .expect_err("the armed one-shot rejects the named account's first submit");
+    assert_eq!(
+        reason, "armed against WYRD-510",
+        "the rejection is the armed one-shot, not an organic refusal"
+    );
+
+    // The one-shot is spent, so the second submit fills - and pays the armed
+    // surcharge over the configured taker charge.
+    let commission = submit_market_order(&mut scoped, &venue.symbol, "SCOPED-2")
+        .await
+        .expect("the one-shot is spent, so the named account's second submit fills");
+    assert_eq!(
+        commission,
+        "0.75".parse::<rust_decimal::Decimal>().unwrap(),
+        "the named account's fill pays the armed surcharge over the configured charge"
+    );
+}
+
+/// Submit one market order on `socket` and read it to its terminal frame:
+/// the fill's commission, or the rejection's reason.
+///
+/// Drains market-data frames while waiting, which keeps the socket inside the
+/// bounded fanout ring on this paced tape.
+async fn submit_market_order(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    symbol: &str,
+    client_order_id: &str,
+) -> Result<rust_decimal::Decimal, String> {
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"{client_order_id}","symbol":"{symbol}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit the market order");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("{client_order_id} reached no terminal frame in time"))
+            .unwrap_or_else(|| panic!("the venue closed the socket before {client_order_id} ended"))
+            .expect("a well-formed frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderFilled(fill)) if fill.client_order_id == client_order_id => {
+                return Ok(fill.commission);
+            }
+            Ok(VenueMessage::OrderRejected {
+                client_order_id: rejected,
+                reason,
+                ..
+            }) if rejected == client_order_id => {
+                return Err(reason);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Two accounts asking for the same river at different speeds both stay
