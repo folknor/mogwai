@@ -98,6 +98,9 @@ pub(crate) struct Boat {
     pub(crate) sim: SimClock,
     pub(crate) tape: Arc<Tape>,
     pub(crate) last_swept_ns: AtomicU64,
+    /// Completed fill-sweeper passes on this boat. This is an observation
+    /// seam, not a scheduling input.
+    pub(crate) completed_sweep_passes: AtomicU64,
     /// This river's acceptance-time market reading, memoized per sweep-interval
     /// bucket on THIS boat's clock. Per boat because the bucket is a function
     /// of the boat's clock and the walk it saves is a walk of this river only:
@@ -288,6 +291,7 @@ impl Boatyard {
                 sim,
                 tape,
                 last_swept_ns: AtomicU64::new(self.origin_ns),
+                completed_sweep_passes: AtomicU64::new(0),
                 market_readings: crate::fills::MarketReadingCache::for_river(req.river.clone()),
                 extremes,
                 vol_window,

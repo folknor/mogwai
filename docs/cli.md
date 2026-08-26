@@ -290,6 +290,19 @@ closes with no line - so no special handling is needed for them.
 ## Which run is at an address
 
 `GET /health` reports `run_seed`, identifying the run rather than the process.
+It says nothing about which rivers the run is carrying or at what cadence, and
+it is the only route that answers without an identity, so it must not: a caller
+that names no account is told whether the run is alive and faulted, and nothing
+about anybody's boats.
+
+The fill sweeper's progress is reported per account instead. The `GET /account`
+body carries `sweep_passes`, one row per boat the named account is seated on,
+sorted by `symbol` and carrying a monotonic `completed` count. The
+count advances only after the whole pass over that boat finishes, so an operator
+or a test can wait for engine work - a fill walk, a settlement, a funding charge
+- rather than infer it from elapsed wall or simulated time. There is no cadence
+field because one ledger carries one cadence per river, so the symbol already
+names the seat. An account seated nowhere reports an empty list.
 
 A port identifies nothing over time. It is ephemeral, and this venue frees it
 before it exits: a declared completion stops the accept loop first, then drains

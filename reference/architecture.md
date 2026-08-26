@@ -993,6 +993,15 @@ re-armed on its own clock and floored in wall time so an accelerated run cannot
 turn the pass into a hot loop. The consequence to know: a river with no placed
 boat is not swept, because a sweep needs a clock to sample, so resting orders
 on a wound-down river stay unscanned until someone boards again.
+Each boat also carries a monotonic completed-pass count, advanced after the
+whole pass including every seated account's engine and delivery work. It is
+observation only: neither scheduling nor engine behavior reads it. It is
+published on `GET /account`, one row per boat the named account is seated on,
+and deliberately not on `/health`: `/health` answers without an identity, so a
+per-boat list there is an anonymous boat-discovery surface enumerating every
+other account's symbols and cadences, which is what `/clock` was cut back to
+remove. The account-scoped row carries no speed, because one ledger carries one
+cadence per river and the symbol therefore names the seat on its own.
 
 An instrument is a bundle of knobs, not one fixed shape. Five classes are
 selectable, split by settlement shape and set out in full above: spot, equity,

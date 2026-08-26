@@ -476,9 +476,13 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         sweep
                             .run
                             .complete(to_ns, to_ns.saturating_sub(sweep.run.started_ns));
+                        boat.completed_sweep_passes
+                            .fetch_add(1, std::sync::atomic::Ordering::Release);
                         break 'passes;
                     }
                 }
+                boat.completed_sweep_passes
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
             }
         }
     })

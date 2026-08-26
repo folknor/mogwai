@@ -1681,6 +1681,84 @@ async fn two_accounts_at_different_speeds_both_stay_open() {
     }
 }
 
+/// Passengers of different accounts are owed invisibility, and the sweep
+/// counters honour it: an account's snapshot names the boats that account is
+/// seated on and no others.
+///
+/// The counter exists so a test can wait on engine work by name rather than on a
+/// sleep, and the first version of it published one row per placed boat on
+/// `/health` - a route that answers without an identity, so any caller could
+/// enumerate every other account's symbols and cadences. That is the anonymous
+/// boat-discovery surface `/clock` was cut back to remove, and this test is what
+/// stops it growing back: widen the filter to every boat in the run and the
+/// stranger's symbol appears here.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_accounts_sweep_counters_name_only_its_own_seats() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let mine = "WYRD-940";
+    let theirs = "WYRD-941";
+    let their_symbol = "SOMEONE-ELSES-RIVER";
+    let (_mine, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account={mine}",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("board my own river");
+    let (_theirs, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account={theirs}",
+        venue.ws_url_for(their_symbol)
+    ))
+    .await
+    .expect("a stranger boards a river of its own");
+
+    // Both seats have to be established before the absence below means
+    // anything: an empty list proves nothing while the stranger is still
+    // upgrading.
+    let base = venue.http_base();
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    //
+    // Containment here, equality below: waiting on equality would turn a leak
+    // into a timeout, which says nothing about what leaked.
+    loop {
+        let seated = sweep_symbols(&base, &format!("?account={mine}")).contains(&venue.symbol)
+            && sweep_symbols(&base, &format!("?account={theirs}"))
+                .iter()
+                .any(|symbol| symbol == their_symbol);
+        if seated {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the two accounts never both reported their own seat: mine {:?}, theirs {:?}",
+            sweep_symbols(&base, &format!("?account={mine}")),
+            sweep_symbols(&base, &format!("?account={theirs}")),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Both boats are placed, so a leak would be visible now rather than merely
+    // not yet arrived.
+    assert_eq!(
+        sweep_symbols(&base, &format!("?account={mine}")),
+        vec![venue.symbol.clone()],
+        "my snapshot named a river I never boarded"
+    );
+    assert_eq!(
+        sweep_symbols(&base, &format!("?account={theirs}")),
+        vec![their_symbol.to_owned()],
+        "the stranger's snapshot named a river it never boarded"
+    );
+
+    // And the anonymous route says nothing about either.
+    let (status, health) = http_get(&base, "/health");
+    assert_eq!(status, 200, "health: {health}");
+    assert!(
+        !health.contains(their_symbol) && !health.contains(venue.symbol.as_str()),
+        "the identity-free route named a boated river: {health}"
+    );
+}
+
 /// One ledger still carries one cadence. A second socket on the same account
 /// asking for a different speed of a river it is already riding is refused,
 /// because that would be two clocks judging one book.
@@ -2117,27 +2195,8 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     let (_, before) = http_get(&venue.http_base(), "/account");
     let before = balance_of(&before);
 
-    // Several sweep passes, each crossing at least one one-second funding
-    // instant on this venue's clock.
-    //
-    // This one stays a wall sleep, and the reason is worth writing down because
-    // the obvious replacement was tried and is vacuous here. The binding
-    // resource is the sweeper, which runs on a wall cadence; funding is charged
-    // by a sweep pass, not by the clock reaching an instant. And this config is
-    // `speed = 0.0`, where the two axes come apart in a way that defeats the
-    // obvious poll: the boat's clock is still built wall-rated (a zero speed is
-    // replaced by 1.0 when the `SimClock` is constructed), while delivery is
-    // unpaced, so the tape's `ts_event` runs far ahead of `venue_now_ns`.
-    // Anchoring a clock target on a tape stamp therefore satisfies it at once
-    // and the test fails on an unmoved balance, which is what was measured.
-    // The sim-clock poll the resting-stop test uses is exactly that vacuous
-    // replacement: it is sound only where the sim clock tracks wall time, and
-    // `reference/clock.md` carries why a `speed = 0.0` config is not that case.
-    // Nothing the venue serves
-    // counts sweep passes, so there is no condition to wait on: a monotonic
-    // per-river count of completed passes on `/clock` or `/health` is what would
-    // turn this sleep into a condition, and nothing on the wire carries it.
-    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    // Funding is booked by completed sweeps, so wait on that resource directly.
+    wait_for_sweep_passes(&venue.http_base(), &venue.symbol, 30).await;
     let (_, after) = http_get(&venue.http_base(), "/account");
     let after = balance_of(&after);
     drain.stop("the perpetual socket").await;
@@ -2749,39 +2808,17 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     let (submitted, drained) = tokio::join!(submitting, draining);
     submitted.unwrap_or_else(|why| panic!("{why}"));
     drained.unwrap_or_else(|why| panic!("{why}"));
-    // Let several sweep passes run with the hundred touch scans in the book.
-    // Draining to the last acceptance only proves the submit path is pure; the
-    // walk is what this test is actually about, and it runs on its own cadence
-    // (`fill_sweep_interval_ms = 10`).
-    //
-    // This waits on the venue's own clock rather than on a wall sleep. Nothing
-    // the venue serves counts sweep passes, so no observable here can prove one
-    // ran; what a clock poll does establish is that the boat is alive and its
-    // sim axis has moved far past the last acceptance, which a fixed sleep does
-    // not - a stalled venue would have satisfied the sleep and been read as a
-    // clean pass. At speed 100 the fifty sim-seconds below are about half a wall
-    // second, so fifty sweep opportunities at the 10 ms cadence, and the poll
-    // waits longer if the venue is slow instead of proceeding early.
+    // Draining to the last acceptance proves only the submit path. Wait for the
+    // sweep itself to walk the hundred resting conditionals.
     //
     // `reader` keeps being drained across that wait. It is the only socket on
     // this venue and it is attached to the live tape at speed 100, so parking it
     // for the half wall second below reopens the very window the split was
     // introduced to close - and the eviction would not even surface as a tape
-    // failure: the clock poll would keep polling, and if the boat went with the
-    // connection `venue_sim_now` would panic about a river carrying no boat.
+    // failure without the drain's explicit check.
     let drain = BackgroundDrain::spawn(reader);
-    let sim_at_acceptance = venue_sim_now(&venue.http_base(), "/clock");
-    let target = sim_at_acceptance + 50_000_000_000;
-    let deadline = common::deadline(common::TEST_WALL_BUDGET);
-    while venue_sim_now(&venue.http_base(), "/clock") < target {
-        drain.assert_still_serving("the order socket");
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the run clock did not advance 50 sim-seconds in 60 s of wall time, so no sweep \
-             pass can be claimed to have run over the resting conditionals"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_for_sweep_passes(&venue.http_base(), &venue.symbol, 10).await;
+    drain.assert_still_serving("the order socket");
     drain.stop("the order socket").await;
 
     let (status, after) = http_get(&venue.http_base(), &path);
@@ -3189,6 +3226,63 @@ fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
     let clock: mogwai_protocol::VenueClock =
         serde_json::from_str(&body).expect("the clock answer parses");
     clock.venue_now_ns
+}
+
+/// The `sweep_passes` rows one account's snapshot carries, `query` being the
+/// `?account=` suffix or the empty string for the venue's default account.
+fn sweep_rows(base: &str, query: &str) -> Vec<serde_json::Value> {
+    let (status, body) = http_get(base, &format!("/account{query}"));
+    assert_eq!(status, 200, "account while reading sweep passes: {body}");
+    let value: serde_json::Value =
+        serde_json::from_str(&body).expect("the account snapshot is json");
+    value["sweep_passes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the account snapshot carries a sweep_passes array: {value}"))
+        .clone()
+}
+
+/// The symbols one account's snapshot admits to being seated on.
+fn sweep_symbols(base: &str, query: &str) -> Vec<String> {
+    sweep_rows(base, query)
+        .iter()
+        .map(|row| row["symbol"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// The calling account's completed fill-sweeper passes on its seat in `symbol`,
+/// or `None` while it holds no such seat - a passenger that has not finished
+/// boarding yet, or one that has left.
+fn completed_sweep_passes(base: &str, symbol: &str) -> Option<u64> {
+    sweep_rows(base, "")
+        .iter()
+        .find(|row| row["symbol"] == symbol)
+        .and_then(|row| row["completed"].as_u64())
+}
+
+/// Wait until the sweeper has finished `additional` further passes over this
+/// account's seat in `symbol`.
+///
+/// The counter is read from `/account`, not from `/health`: it names the boats
+/// one account is seated on, so a caller learns nothing about anyone else's
+/// symbols or cadences. The baseline is taken from the first poll that finds a
+/// seat, so a caller may start polling before its own upgrade has committed.
+async fn wait_for_sweep_passes(base: &str, symbol: &str, additional: u64) {
+    let deadline = common::deadline(Duration::from_secs(8));
+    let mut target = None;
+    loop {
+        if let Some(completed) = completed_sweep_passes(base, symbol) {
+            let target = *target.get_or_insert(completed.saturating_add(additional));
+            if completed >= target {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sweep counter for this account's seat in {symbol} did not advance by \
+             {additional}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// One blocking `POST /control/divergence`, returning the status code.
@@ -3641,6 +3735,58 @@ async fn a_passenger_pages_its_own_history_over_its_own_socket() {
         seen > 0,
         "the warmup span must hold trades, or this test asserts nothing about paging"
     );
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_slow_passengers_history_is_clamped_to_its_own_boat_clock() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let speed = 0.01;
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("{}?speed={speed}", venue.ws_url()))
+            .await
+            .expect("board a deliberately slow boat");
+    wait_for_sweep_passes(&venue.http_base(), &venue.symbol, 1).await;
+    let run_now = venue_sim_now(&venue.http_base(), "/clock");
+    socket
+        .send(Message::Text(
+            format!(
+                r#"{{"type":"QueryHistory","request_id":"SLOW-HISTORY","kind":"Trades","start":{},"end":{run_now}}}"#,
+                venue.record.data_origin_ns
+            )
+            .into(),
+        ))
+        .await
+        .expect("ask past the slow boat's present");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("slow history answer")
+            .expect("socket open")
+            .expect("frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        if let Ok(VenueMessage::HistoryPage {
+            request_id,
+            cutoff,
+            rows,
+            ..
+        }) = serde_json::from_str(&text)
+            && request_id == "SLOW-HISTORY"
+        {
+            assert!(
+                cutoff < run_now,
+                "the slow boat cutoff {cutoff} must trail run time {run_now}"
+            );
+            assert!(
+                rows.iter().all(|row| row.ts_event() <= cutoff),
+                "history crossed its slow-boat cutoff"
+            );
+            break;
+        }
+    }
 }
 
 /// A continuation the venue did not issue is refused, correlated, rather than

@@ -1479,6 +1479,36 @@ pub(crate) struct AccountSnapshot {
     /// frame's payload and risk state is an evaluator's concern rather than
     /// something every fill should carry.
     risk: mogwai_protocol::risk::RiskState,
+    /// The fill sweeper's completed-pass count on each boat this account is
+    /// seated on, sorted by symbol.
+    ///
+    /// Account-scoped, and that placement is the whole of it. The count is the
+    /// only observable that says the engine work behind a fill, a settlement or
+    /// a funding charge has actually run, so something had to carry it - and it
+    /// first landed on `/health`, which enumerated every boat in the run to any
+    /// caller. That is the anonymous boat-discovery surface `/clock` was cut
+    /// back to remove: symbols and cadences are what other accounts asked for,
+    /// and passengers of different accounts are owed invisibility. Here the
+    /// caller must name an account to be told anything, on the same footing as
+    /// the balances and risk state already in this body, and it is told only
+    /// about seats its own passengers boarded. An account seated nowhere -
+    /// unopened, or frozen with its last passenger gone - gets an empty list,
+    /// which is the truth rather than a redaction: an unseated account's rivers
+    /// are not swept.
+    ///
+    /// Keyed by symbol alone, with no cadence field, because one ledger carries
+    /// one cadence per river - a second is refused at admission - so the symbol
+    /// already names the seat unambiguously and publishing the speed would add
+    /// an observable for nothing.
+    sweep_passes: Vec<AccountSweepPasses>,
+}
+
+/// One seat's completed-pass count. Monotonic within a boat's life and
+/// observation only: nothing in scheduling, pacing or the engine reads it.
+#[derive(Serialize)]
+struct AccountSweepPasses {
+    symbol: String,
+    completed: u64,
 }
 
 /// Which axis a timestamp lives on. The sibling of `VenueClock::boat_clock`,
@@ -1534,8 +1564,20 @@ pub(crate) async fn account(
         None => state.run.default_account_id(),
     };
     let ts = sim_now_ns(state.venue_sim());
+    let mut sweep_passes = Vec::new();
     let (account, risk) = match state.run.peek_account(&account_id) {
         Some(account_state) => {
+            for boat in state.run.boatyard.boats() {
+                if account_state.is_seated_on(&boat.key()) {
+                    sweep_passes.push(AccountSweepPasses {
+                        symbol: boat.symbol().to_owned(),
+                        completed: boat
+                            .completed_sweep_passes
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    });
+                }
+            }
+            sweep_passes.sort_by(|left, right| left.symbol.cmp(&right.symbol));
             let mut engine = account_state.engine.lock().await;
             let account = engine.account_snapshot(ts);
             // Published for the evaluator, not for the strategy. A real trader
@@ -1562,6 +1604,7 @@ pub(crate) async fn account(
         clock: ClockAxis::Venue,
         account,
         risk,
+        sweep_passes,
     })
     .into_response()
 }

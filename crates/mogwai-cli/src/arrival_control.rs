@@ -300,9 +300,7 @@ fn is_non_shipping(path: &str) -> bool {
 fn run_b1(baseline: &Path, after: &Path, baseline_commit: &str) -> anyhow::Result<(Value, f64)> {
     let started = Instant::now();
     let exe = std::env::current_exe()?;
-    if !exe.ends_with("target/release/mogwai") {
-        bail!("B1 refused: current executable is not target/release/mogwai");
-    }
+    require_release_mogwai_executable(&exe)?;
     std::fs::create_dir_all(after)?;
     let mut rows = Vec::new();
     let mut passed = true;
@@ -341,6 +339,13 @@ fn run_b1(baseline: &Path, after: &Path, baseline_commit: &str) -> anyhow::Resul
         json!({"passed":passed,"evidence":{"tapes":rows,"supporting":supporting},"refusals":[]}),
         started.elapsed().as_secs_f64(),
     ))
+}
+
+fn require_release_mogwai_executable(exe: &Path) -> anyhow::Result<()> {
+    if !exe.ends_with("target/release/mogwai") {
+        bail!("B1 refused: current executable is not target/release/mogwai");
+    }
+    Ok(())
 }
 
 /// Refuses a dirty tree before reading any input, exactly as
@@ -545,6 +550,18 @@ mod tests {
     use std::rc::Rc;
 
     use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
+
+    #[test]
+    fn b1_accepts_only_the_supplied_release_mogwai_path() {
+        require_release_mogwai_executable(Path::new("/work/target/release/mogwai"))
+            .expect("the shipped release binary path is accepted");
+        let refusal = require_release_mogwai_executable(Path::new("/work/target/debug/mogwai"))
+            .expect_err("a different build identity is refused");
+        assert_eq!(
+            refusal.to_string(),
+            "B1 refused: current executable is not target/release/mogwai"
+        );
+    }
 
     fn missing_inputs(out: &str) -> ArrivalControlArgs {
         ArrivalControlArgs {
