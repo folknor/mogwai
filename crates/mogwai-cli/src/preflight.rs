@@ -22,7 +22,7 @@ pub(crate) struct PreflightArgs {
     /// The Databento jobs manifest. Read-only: this never writes it.
     #[arg(long, value_name = "PATH")]
     jobs_manifest: Option<PathBuf>,
-    /// Where to write the preflight artifact. An artifact (storage policy):
+    /// Where to write the preflight artifact. It is the user's own file:
     /// never cached, never auto-deleted.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,

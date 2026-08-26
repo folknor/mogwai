@@ -37,10 +37,10 @@ const BOOTSTRAP_REPLICATES: usize = 2_000;
 #[derive(Args)]
 #[command(group(ArgGroup::new("mode").required(true).args(["stage0", "full", "ordered_counts", "slow_geometry"])))]
 pub struct CountCurveArgs {
-    /// Run the generated-only signed Stage 0 backcheck.
+    /// Run the generated-only backcheck against the preregistered curve.
     #[arg(long)]
     stage0: bool,
-    /// Run the licensed Stage 1 observed backcheck and Stage 2 measurement.
+    /// Run the licensed observed backcheck and the count-curve measurement.
     #[arg(long)]
     full: bool,
     /// Run the signed ordered-count extraction and both frozen panels.

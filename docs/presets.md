@@ -10,6 +10,13 @@ outside the executable itself.
 A preset is a named bundle of instrument knobs, not an admission record. Presets
 make a symbol's river better; they never decide whether it can be served.
 
+Resolution has three steps. An explicit preset named by an applicable overlay wins;
+otherwise a preset whose name matches the requested label supplies the bundle;
+otherwise the default bundle is served under that requested label. The third
+step is total for every wire-legal label. The label remains part of river
+identity in all three cases, so two labels resolving to identical knobs still
+name different generated paths.
+
 ## Listing and inspecting presets
 
 ```sh

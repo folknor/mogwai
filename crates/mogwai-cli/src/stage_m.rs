@@ -37,21 +37,21 @@ pub enum StageMCommand {
     Preflight(PreflightArgs),
     /// Run one new-design month. July is reserved for `backcheck`.
     Month(MonthArgs),
-    /// Recompute July Tier 1a under every original seed path.
+    /// Recompute July's per-month geometry under every original seed path.
     Backcheck(BackcheckArgs),
-    /// Run the signed Amendment 2 slow-geometry re-verification ladder.
+    /// Re-verify the frozen slow-geometry reference over every original seed.
     ReverifyAmendment2(BackcheckArgs),
-    /// Run Amendment 4's September-October mechanical schedule gate.
+    /// Check September and October against the mechanical session schedule.
     ScheduleEquivalence(BackcheckArgs),
-    /// Promote the already-passed Amendment 3 July re-bless.
+    /// Promote the already-passed July reference replacement.
     PromoteJuly(BackcheckArgs),
-    /// Run Tier 1b from completed per-month slow-geometry artifacts.
+    /// Test across-month exchangeability from completed per-month artifacts.
     Exchangeability(ExchangeabilityArgs),
-    /// Run the preregistered Tier 1b calendar-only power analysis.
+    /// Run the preregistered calendar-only power analysis for that test.
     Power(PowerArgs),
     /// Summarize numeric per-month statistics with and without July.
     Summarize(SummarizeArgs),
-    /// Stage M Tier 2 incumbent controls and projection ledger.
+    /// Maintain the append-only candidate ledger and run its hurdle checks.
     Tier2(crate::stage_m_tier2::Tier2Args),
 }
 

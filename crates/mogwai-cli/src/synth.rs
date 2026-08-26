@@ -145,8 +145,8 @@ pub(crate) struct CadenceFeasibleArgs {
     #[arg(long, default_value_t = DEFAULT_MARKOV_EVENTS)]
     events: usize,
     /// Stop after the structural verdict, skipping the density re-simulation.
-    /// The simulation is the slow half, so a caller who only wants the L0
-    /// verdict need not pay for it. Leaving it OFF runs the full gate, which
+    /// The simulation is the slow half, so a caller who only wants the
+    /// structural verdict need not pay for it. Leaving it OFF runs the full gate, which
     /// is the default and the behaviour the density bands are written for.
     #[arg(long)]
     skip_density: bool,

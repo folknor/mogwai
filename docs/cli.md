@@ -509,9 +509,9 @@ There is no `stop` subcommand.
 The remaining subcommands are the 2026-08 Python-to-Rust rewrite's absorbed
 half of `analysis/`: the corpus-to-fingerprint method library
 (`mogwai_lab`), reached the same way `gen`/`tick-composition` are - offline,
-no socket bound. Each writes an artifact (the storage policy's term: the
-user's own file, written to `--out` or a working-directory default, never
-cached, never auto-deleted) and every default path is chosen so a bare
+no socket bound. Each writes an artifact: the user's own file, written to
+`--out` or a working-directory default, never cached and never auto-deleted.
+Every default path is chosen so a bare
 invocation can never overwrite a committed `analysis/` file by accident.
 
 `characterize` is the intake station: it streams a trade corpus into
@@ -672,7 +672,8 @@ generated 820-case sweep against CPython. Not yet ported: the `--fit` and
 `--fit-markov` grid searches, which are candidate-search tools rather than
 gates.
 
-`cache` is the manual-case cover for the storage policy's cache class:
+`cache` manages recomputable keyed data, kept separately from user-owned
+artifacts and per-run scratch directories:
 `mogwai cache stats` reports entry/file/byte counts under the cache root
 (`$XDG_CACHE_HOME/mogwai/`, `~/.cache/mogwai/`, `MOGWAI_CACHE_DIR` or
 `--cache-dir`), and `mogwai cache clean` removes every provenance directory.
@@ -757,8 +758,15 @@ discrete self-exciting) that advances every admissible family-region pair
 and selects none. It reads `analysis/mnq-measure-12a.json` (`--measure`)
 for the observed parent-count marginal and the exposure binding, and
 writes the hash-bound result to `analysis/mnq-arrival-screen.json`
-(`--out`). `--cache` points at the walk cache root, defaulting to the
-standing storage policy. `--jobs N` bounds concurrent `(cell, seed)`
+(`--out`). `--cache` points at the walk cache root, defaulting to the same
+root `mogwai cache` reports on. Only the walk results are stored: they go to
+a provenance-keyed entry directory under that root, keyed by crate version,
+`TAPE_PROTOCOL_VERSION`, the fingerprint hash, the arrival kernel version,
+the exposure binding and the measurement's hash, so a moved kernel or a moved
+binding never reads a stale walk. The command creates no scratch directory - every other
+intermediate stays in memory for the length of the run - and its artifact is
+a user-owned file like every other offline command's.
+`--jobs N` bounds concurrent `(cell, seed)`
 projection workers and defaults to the machine's reported parallelism,
 capped at 16 workers to avoid the measured SMT-contention regression.
 Verdict reduction and budget enforcement stay on the coordinator, and

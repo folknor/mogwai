@@ -1075,6 +1075,18 @@ is the boatyard landing: placement, pacing and the per-boat clock moved off the
 one venue-wide replay, so what a socket receives is a function of its boat
 rather than of the run.
 
+Versions 19 through 26 continue the same process record. Version 19 added the
+configurable equity, forex, perpetual and inverse classes. Version 20 added the
+session-segment composer, and 21 railed its price and its clock, so an endless
+integration cannot walk to zero or overflow its nanosecond axis.
+Version 22 corrected the interaction between a flow surge and the arrival
+kernel. Version 23 removed the control-plane clear operation. Version 24 moved
+generator arms into river identity, so an arm forks water instead of mutating
+water already being read. Version 25 made composer termination a typed source
+fault while centralizing the route and divergence-kind registries. Version 26
+added named tape-window placement without putting the window coordinates into
+river identity.
+
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are
 unconditional will assume the opposite. `analysis/protocol9-tape-hashes.json`

@@ -148,6 +148,23 @@ An O(1) incrementalization has to reproduce that, plus the exclusive-group
 max-leg fold and the max-resting-price rule. All three `rebuild_order_holds_excluding(None)`
 sites named above are unchanged.
 
+Round 8 refused to land a cache, and what it proved is recorded here so the next
+reader does not derive it again. Exact constant-time mutation is not available
+in general: both the max-resting-price rule and the exclusive-group max-leg fold
+are maxima over a live multiset, and deleting a current maximum needs the next
+one, which a scalar running max cannot supply. An exact logarithmic index is
+feasible - an ordered multiset per group plus one over resting sell prices,
+mutated on rest, take, amend, fill and cancel - and it is not cheap in the way
+that matters: it adds release-critical state that every one of those five
+transitions has to maintain, and that state has to be reconstructible from
+`OpenBook` alone, because that is the only thing a fold can be checked against.
+The asymmetry that decides it is that `reconcile_order_holds` panics only under
+`cfg(debug_assertions)`: a cache that drifts fails loudly in a test run and
+silently corrupts margin in release, where drift means holds that do not match
+the book and therefore risk decisions taken on a wrong number. A slow correct
+fold beats a fast unproven one, so the fold stays until an index arrives with a
+release-checkable reconstruction rather than a debug-only one.
+
 ---
 
 ## C. Venue and protocol
@@ -325,6 +342,18 @@ whose private placements resume from that chain. No venue config or river
 factory can select `SegmentSource`; it remains an offline `segments compose`
 source. C13 therefore does not enter this linear composed seek. D8 stays open
 for the serving wiring that first makes composed rivers selectable.
+
+Guarded 2026-08-26, because the paragraph above closes nothing: it is a fact
+about which code paths exist today, and that is exactly the kind of fact that
+changes silently. `crates/mogwai-venue/tests/composed_source_guard.rs` fails the
+build if any source under `mogwai-venue/src` names `SegmentSource` or the
+`mogwai_data::segment` module, and its message states what is owed before the
+wiring may land - a checkpoint chain for the composer, or a bounded placement -
+and says to delete the guard in the same change. The type-level barrier is real
+but is not the rule: `CheckpointIndex` holds a `GeneratedSource` concretely, so
+generalizing it to a boxed `TickSource` would remove the guarantee without
+removing anything that reads as one. The entry stays open: the guard buys a
+named failure instead of a hang, and does not build the chain.
 
 ### D5. The 86 MB and 57 MB build tax, and the dead protocol code
 
@@ -995,39 +1024,31 @@ the frozen sentence is a section 17 amendment through review, not an edit.
 
 Each of these is a durable-prose gap, not a note. All ride with a code commit.
 
-### J1. Durable prose for the account, river and passenger design
+### J2. Protocol jargon still in the CLI's invocation names
 
-These notes carry no truth guarantee and nothing durable may cite them, so any
-part of the design whose reasoning lives only here is invisible to a user.
+Restored 2026-08-26 as a remainder, narrower than the entry that was deleted.
+Round 8 closed the help prose but reported the whole entry closed while the
+defect survived; round 8's own review pass then finished the prose across every
+rendered surface - `mogwai --help` and every subcommand's, the `arrival-control`
+gate flags, the `measure`, `preflight` and `fit` output flags, and the two
+`--help` lines that still cited "the storage policy" after J3 supposedly retired
+that phrase.
 
-Owed: the symbol as a label rather than an identity; the three-step resolution
-and its total third step; river identity and what forks a river; one clock per
-river; the exogeneity that gives passengers non-interference and the
-no-queue-competition contract that follows; and the boot-versus-runtime split on
-funding.
-
-Durable prose states river and passenger and never the boat, which is a cache
-with no semantics, and states the two properties a passenger is owed separately.
-`docs/presets.md` and `docs/config.md` are where a user looks;
-`reference/architecture.md` is where the why belongs.
-
-### J2. Half of `mogwai --help` is protocol jargon resolving to retired notes
-
-"Brick B4", "Stage M", "Amendment 2" reach an operator who has no way to look them
-up.
-
-### J3. `docs/cli.md` cites "the storage policy" three times
-
-A named authority no document defines.
+What is left is the invocation names themselves, which prose cannot reach: the
+`stage-m`, `reverify-amendment2` and `tier2` subcommands, the `--stage0`,
+`--b1-baseline`, `--b1-after`, `--b1-baseline-commit` and `--b5-log` flags, and
+the `stage-m tier2` variants that name C1, C2, C3 and the `excess` baseline W in
+their help because those are the records they append. Renaming any of them is a
+behaviour change to a documented interface with committed invocations behind it,
+not a prose fix, so it is filed rather than done. The help text around each now
+says what the thing is, which is what an operator with no way to look the name
+up actually needed.
 
 ### J4. Structural proposals recorded and unadopted
 
 `reference/architecture.md` is about 1,300 lines doing four jobs, and its
 contradictions have all sat where one job's old text survived another's landing;
 `docs/havoc.md` was patched rather than rewritten.
-
-Adjacent and real: that document's version narrative walks 5 through 18 and then
-asserts the current identity, six unnarrated bumps.
 
 ### J5. Glossary and vocabulary standing rules
 

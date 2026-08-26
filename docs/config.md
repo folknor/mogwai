@@ -38,7 +38,10 @@ different rivers even when they resolve to the same shape. Nothing else in a run
 is random. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the
 run proper begins one `warmup_ns` later on the same axis, so a run is a pure
 function of `(seed, config)` for a given build and fingerprint, and one served
-symbol's river is a pure function of `(seed, config, label)`. There is no
+symbol's river is a pure function of `(seed, config, label)` plus whatever
+generator havoc the boarding passenger asked for, which is the one part of a
+river's identity that arrives on the upgrade rather than from the config file.
+There is no
 wall-clock input to a run's identity left: every boat is placed at that same
 fixed origin whenever it is placed, so a river's path does not depend on when, or
 whether, anyone connects to it. The only clock key is `speed`,

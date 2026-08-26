@@ -65,7 +65,7 @@ pub struct FitArgs {
     /// wrong for replaying someone else's cache - hence the flag.
     #[arg(long, value_name = "SHA")]
     cache_commit: Option<String>,
-    /// Where to write the fit artifact. An artifact (storage policy): never
+    /// Where to write the fit artifact. It is the user's own file: never
     /// cached, never auto-deleted. Defaults to `analysis/out/mnq-fit.json`,
     /// a distinct path in this repository's gitignored output directory, so a
     /// bare invocation can never clobber the committed `analysis/mnq-fit.json`.

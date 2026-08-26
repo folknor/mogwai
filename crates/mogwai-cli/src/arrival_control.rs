@@ -46,29 +46,29 @@ const B1_SYMBOLS: [&str; 3] = ["BTCUSDT", "MES", "MNQ"];
 
 #[derive(Args)]
 pub struct ArrivalControlArgs {
-    /// The committed protocol-12a artifact: the observed side, the exposure
-    /// binding and the input hash.
+    /// The committed corpus measurement artifact: the observed side, the
+    /// exposure binding and the input hash.
     #[arg(long, value_name = "PATH")]
     pub measure: Option<PathBuf>,
-    /// Brick B4's committed minute-range bound.
+    /// Committed minute-range bound used by the arrival controls.
     #[arg(long, value_name = "PATH")]
     pub envelope: Option<PathBuf>,
-    /// The directory holding the per-symbol pre-landing legacy tapes gate B1
-    /// compares against, produced by the shipped binary at the parent commit.
+    /// The directory holding the per-symbol pre-landing tapes the byte
+    /// identity gate compares against, produced by the shipped binary at the
+    /// parent commit.
     #[arg(long, value_name = "DIR")]
     pub b1_baseline: Option<PathBuf>,
-    /// Where to write the per-symbol tapes B1 generates after the run, before
-    /// comparing them
-    /// byte for byte against the baseline.
+    /// Where to write the per-symbol tapes generated after the run, before
+    /// comparing them byte for byte against the baseline.
     #[arg(long, value_name = "DIR")]
     pub b1_after: Option<PathBuf>,
-    /// The commit the baseline tapes were generated from, which bounds B1's
-    /// supporting frozen-path diff. Defaults to `HEAD~1`.
+    /// The commit the baseline tapes were generated from, which bounds the
+    /// byte identity gate's supporting frozen-path diff. Defaults to `HEAD~1`.
     #[arg(long, value_name = "COMMIT")]
     pub b1_baseline_commit: Option<String>,
     /// The captured output of an externally-run standing build gate, which is
-    /// gate B5's evidence. This binary never runs that gate itself: see
-    /// [`read_b5_log`].
+    /// that gate's only evidence here. This binary never runs the build gate
+    /// itself: see [`read_b5_log`].
     #[arg(long, value_name = "PATH")]
     pub b5_log: Option<PathBuf>,
     /// Where to write the artifact.

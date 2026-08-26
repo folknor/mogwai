@@ -55,15 +55,15 @@ pub struct MeasureArgs {
     /// The committed preflight artifact this run's file hashes must match.
     #[arg(long, value_name = "PATH")]
     preflight: Option<PathBuf>,
-    /// The cache root carrying the Brick G walk cache
+    /// The cache root carrying the generated-side walk cache
     /// (`<dir>/measure12a-cache/`) and the observed cross-check cache
     /// (`<dir>/mnq-measure12a-observed.json`). Defaults to the historical
-    /// `analysis/out` layout when run in-repo, else the phase-1 storage
-    /// cache root.
+    /// `analysis/out` layout when run in-repo, else the standard cache root
+    /// `mogwai cache` reports on.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
-    /// Where to write the section-10 artifact. An artifact (storage
-    /// policy): never cached, never auto-deleted.
+    /// Where to write the measurement artifact. It is the user's own file:
+    /// never cached, never auto-deleted.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
 }

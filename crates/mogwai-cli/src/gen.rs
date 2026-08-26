@@ -52,9 +52,9 @@ pub(crate) enum GenType {
     /// forensic instrument of the generator successor spec - observation
     /// only, byte-identical tape, pinned by test.
     Trace,
-    /// One JSON object with the protocol-12a generated-side per-seed
-    /// record (spec Brick G): per-session Blocks 1-4 in the observed
-    /// serialized shape plus the Block-5 forensic records. Consumer-only:
+    /// One JSON object with the generated-side per-seed measurement
+    /// record: per-session blocks 1 to 4 in the observed serialized
+    /// shape plus the block 5 forensic records. Consumer-only:
     /// reads events and `VolTrace`, perturbs no draws.
     Measure12a,
 }

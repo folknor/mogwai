@@ -56,27 +56,27 @@ enum Command {
     /// Fail-closed TBBO corpus contract check; persists a hash-bound
     /// preflight artifact.
     Preflight(preflight::PreflightArgs),
-    /// The protocol-12a section-10 measurement gate: the live observed pass
-    /// plus the eight in-process attestation walks, assembled and
-    /// validated into the committed artifact shape.
+    /// The corpus measurement gate: the live observed pass plus the eight
+    /// in-process attestation walks, assembled and validated into the
+    /// committed artifact shape.
     Measure(measure::MeasureArgs),
-    /// The signed count-curve preregistration's generated-only Stage 0 backcheck.
+    /// Backcheck the preregistered count curve against generated tapes only.
     CountCurve(count_curve::CountCurveArgs),
-    /// Stage M Tier 1 per-month measurement, July backcheck and pooled test.
+    /// Measure calendar-bound monthly arrival geometry and run its pooled test.
     StageM(stage_m::StageMArgs),
-    /// The protocol-11 session calibration fit: the observed corpus pass,
+    /// The session calibration fit: the observed corpus pass,
     /// the closed-form session refits, the CRN vol_scalar solve and the
     /// family probes, written as the hash-bound fit artifact.
     Fit(fit::FitArgs),
-    /// Build Brick B4's bound minute-range-envelope artifact.
+    /// Build the bound minute-range-envelope artifact used by arrival gates.
     MinuteRangeEnvelope(minute_range_envelope::MinuteRangeEnvelopeArgs),
-    /// Protocol 12b brick N: the deterministic hourly re-centring negative control.
+    /// Run the deterministic hourly re-centring negative control.
     ArrivalControl(arrival_control::ArrivalControlArgs),
-    /// Protocol 12b Stage A necessary-condition screen.
+    /// Run the arrival model's necessary-condition screen.
     ArrivalScreen(arrival_screen::ArrivalScreenArgs),
-    /// Evaluate skipped coarse A2 envelopes without changing the official screen.
+    /// Evaluate skipped coarse envelopes without changing the official screen.
     ArrivalEnvelopeDiagnostic(arrival_envelope_diagnostic::ArrivalEnvelopeDiagnosticArgs),
-    /// The cache-storage-class manual controls (stats / clean / clean
+    /// Manual controls over the on-disk cache (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
     /// Stream a trade corpus into `char_<PAIR>.json` stylized-fact reports,
@@ -99,7 +99,7 @@ enum Command {
         #[command(subcommand)]
         command: synth::SynthCommand,
     },
-    /// The L0 structural-proceed verdict over a cadence measurement, plus the
+    /// The structural-proceed verdict over a cadence measurement, plus the
     /// Markov density feasibility gate.
     CadenceFeasible(synth::CadenceFeasibleArgs),
     /// The session-segment sampler: cut real session slices out of a delivered
