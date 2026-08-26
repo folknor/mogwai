@@ -19,7 +19,7 @@
 //! process launch, bind, 300 s of warmup materialized, one HTTP round trip -
 //! costs about 10 ms in the profile these tests build under, and the binary's
 //! whole wall at `--test-threads=8` is 9.77 s against a single test,
-//! `a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`, at
+//! `a_market_submit_takes_a_reading_on_the_priceless_wire_path`, at
 //! 9.63 s. The floor is that one test's deliberate flake margin - eight scored
 //! attempts with a 500 ms gap, which section B of the report ruled may not be
 //! trimmed for wall time - and no amount of venue sharing moves it.

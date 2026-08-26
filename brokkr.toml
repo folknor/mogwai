@@ -278,7 +278,7 @@ include_ignored = true
 #
 # 16 is past the cliff. The one test that could not take parallelism at all is
 # now `#[ignore]`d and skipped below; the rest of that story, and the work that
-# would let this go higher, is the parallel item in `notes/todo.md`.
+# would let this go higher, is G1 in `notes/bugs.md`.
 test_threads = 8
 skip = [
     # The declared-deadline family is gone from this list, and the note stays

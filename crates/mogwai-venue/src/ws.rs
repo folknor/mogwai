@@ -89,8 +89,9 @@ pub(crate) struct SocketQuery {
     /// Absent means indefinite. Simulated milliseconds, measured on the boat's
     /// clock from this passenger's boarding instant and not from boot. A
     /// duration is a property of the passenger, so passengers with different
-    /// durations still share one boat; each announces `RunComplete` and closes
-    /// at its own deadline, and the boat winds down when the last one leaves.
+    /// durations still share one boat; each announces
+    /// `PassengerDurationComplete` and closes at its own deadline, and the boat
+    /// winds down when the last one leaves.
     #[serde(default)]
     duration_ms: Option<u64>,
     /// The account to trade under. Absent means the venue's default account,

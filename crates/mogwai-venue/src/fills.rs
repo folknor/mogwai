@@ -70,7 +70,7 @@ const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 /// band is adverse - but that is now a statement about a reading no observer can
 /// name: the reading instant is whenever the submit reached the handler, and
 /// nothing on the wire carries it. The end-to-end gates
-/// (`serving::a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`
+/// (`serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
 /// and `scripts/smoke.py`) consequently assert the bracketed form - a buy fills
 /// at or above the lowest print in a window that must contain the reading - and
 /// the exact per-fill statement is recoverable only by putting the reading

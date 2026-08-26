@@ -440,7 +440,7 @@ urgent; both modes must eventually be supported.
   `speed = 0.0`.
 
 - Nothing on the wire says whether a submit took a market reading, which forces
-  `serving::a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`
+  `serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
   to key on the venue's log. When `read_market` refuses - a cold volatility
   estimator, a truncated walk - the engine falls back to the order's stated price
   and logs a warn, and on a price-less market order the venue stamps the last

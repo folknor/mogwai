@@ -2252,11 +2252,23 @@ mod tests {
         // stating a number the venue no longer enforces. This is the front
         // door - order entry routes through this function - so the refusal is
         // what a consumer reads when its symbol is rejected.
+        // Held as an equality and not as a `contains` of the cap. Containment
+        // covers a moved constant and nothing else: the units word is the other
+        // half of this refusal's claim, and "bytes" is not "characters" for any
+        // symbol outside the ASCII the alphabet rail admits. A silent reword to
+        // "characters" is the reachable regression here, and containment of the
+        // number reads green through it. Bite-checked 2026-08-26 by exactly that
+        // perturbation. The shrink direction needs no help from this assertion -
+        // the legal names asserted above are the rail, and BTCUSDT alone forbids
+        // any cap small enough for its digits to alias 32. So the whole string is
+        // the golden, and a deliberate reword re-blesses it here in the same
+        // change.
         let over = "X".repeat(MAX_SYMBOL_LEN + 1);
         let refusal = validate_wire_symbol(&over).unwrap_err();
-        assert!(
-            refusal.contains(&MAX_SYMBOL_LEN.to_string()),
-            "the refusal {refusal:?} must state the cap {MAX_SYMBOL_LEN} it enforces"
+        assert_eq!(
+            refusal,
+            format!("symbols are 1 to {MAX_SYMBOL_LEN} bytes"),
+            "the refusal must state both the cap {MAX_SYMBOL_LEN} and the units it enforces"
         );
     }
 
@@ -2410,14 +2422,19 @@ mod tests {
         }
         // The message and the constant are checked against each other, not the
         // constant against a literal. The refusal text is a hardcoded
-        // "callsigns are 1 to 64 characters" and nothing else would notice the cap
+        // "callsigns are 1 to 64 bytes" and nothing else would notice the cap
         // moving out from under it - the durable-prose-asserting-a-live-fact
-        // shape, in a string literal.
+        // shape, in a string literal. Held as an equality for the same reason as
+        // the symbol cap above: containment of the number leaves the units word
+        // unpinned, and this comment itself asserted the wrong literal
+        // ("characters") until 2026-08-26 without anything noticing - which is
+        // the shape in miniature.
         let over = "s".repeat(MAX_CALLSIGN_LEN + 1);
         let refusal = validate_callsign(&over).unwrap_err();
-        assert!(
-            refusal.contains(&MAX_CALLSIGN_LEN.to_string()),
-            "the refusal {refusal:?} must state the cap {MAX_CALLSIGN_LEN} it enforces"
+        assert_eq!(
+            refusal,
+            format!("callsigns are 1 to {MAX_CALLSIGN_LEN} bytes"),
+            "the refusal must state both the cap {MAX_CALLSIGN_LEN} and the units it enforces"
         );
     }
 

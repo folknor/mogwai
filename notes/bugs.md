@@ -152,36 +152,6 @@ sites named above are unchanged.
 
 ## C. Venue and protocol
 
-### C7. Refusal texts spell their bounds out instead of naming the constant
-
-Re-verified against the code 2026-08-24 and the entry as filed was half stale.
-`messages::validate_wire_symbol` refuses with "symbols are 1 to 32 bytes" and
-carries a comment saying exactly why bytes and not characters, so the
-units half of the finding is closed. A test in the same module already pins the
-refusal text against `MAX_SYMBOL_LEN` by asserting the refusal contains the
-constant's value, so moving the constant fails loudly rather than silently.
-
-What is left is narrower than filed: the bound is still spelled `32` inline
-rather than named, on the refusal a client sees at the venue's front door since
-order entry routes through it. Cosmetic now that the test stands behind it.
-
-Two clauses of this entry were corrected 2026-08-26. The divergence texts are
-not in `messages.rs` and there are not four of them: roughly nine live in
-`havoc.rs`, spelling their bounds inline (`vol_mult`, `thin_factor`,
-`extra_vol_mult`, the `PartialFillNext` fraction, the `FeeSurcharge` mult,
-`REFUSE_HALT_SECS`, `start_hour`, `rate_mult`, `children_mult`). Count at the
-production sites, since the module's tests carry the same strings as expected
-values. `messages.rs` itself has a second instance beside the symbol one -
-`validate_callsign`'s "callsigns are 1 to 64 bytes" against `MAX_CALLSIGN_LEN` -
-which likewise already has a `contains` test behind it.
-
-The other corrected clause: the entry claimed fixing this needs a changed return
-type or a `const` formatter that does not exist. `havoc.rs` already does the
-latter, in `format!("DelayAcks/GoDark/StallData ms must be <= {bound} (one
-hour)")`, so there is a shipped precedent to follow rather than a design to
-invent. The `&'static str` return is what blocks the two in `messages.rs`, not
-the absence of a pattern.
-
 ### C11. `RunComplete` reports slightly less than the declared duration
 
 Nothing on the wire lets a consumer tell that from a short run. The deadline is
@@ -204,6 +174,18 @@ rather than two, and there is a landed precedent for how to add it - including
 the reasoning recorded on that variant for why a new tag beats a new field: an
 old decoder ignores an unknown field and commits the same false transition, where
 an unknown tag fails loudly.
+
+Stated for a close pass, 2026-08-26. The change is a wire change and there are
+two shapes of it: a new field on `RunComplete` carrying the venue's own elapsed
+beside the socket's, or a second tag the way C10 took. The cost of the field
+shape is that an old decoder ignores it and commits the same false transition,
+which is the reasoning C10 already recorded for preferring a tag; the cost of
+the tag shape is a third terminal frame every consumer must classify, on top of
+`RunComplete` and `PassengerDurationComplete`. The alternative is to ship
+nothing and let the variant's doc carry it, which is the state today: the doc
+says `elapsed_ns` is the span that boat covered and not the run's declared
+duration, so a consumer that reads it is not misled - only one that assumes.
+Nobody has asked for the distinction.
 
 Adjacent, unfiled until now: `RunComplete` is also emitted on the
 already-complete-at-boarding path, where `elapsed_ns` measures from the boat
@@ -271,16 +253,19 @@ Recorded as a deliberate trade rather than an oversight, and documented at the
 site. Open only as the question of whether the interactive case deserves a
 forwarded signal.
 
-### C17. C10's fix left a doc comment describing the behaviour it removed
-
-Filed 2026-08-26 by the verification pass. `SocketQuery::duration_ms`'s doc in
-`ws.rs` still says each passenger "announces `RunComplete` and closes at its own
-deadline", which is exactly what shipping `PassengerDurationComplete` stopped
-being true. It was one of the three sites the old C10 entry credited with
-documenting the imprecision, and the fix moved the code without it.
-
-Small, but it is a durable comment asserting retired behaviour on the frame a
-consumer classifies on, which is the same reading error C10 existed to prevent.
+Stated for a close pass, 2026-08-26. No wire change is involved - this is a
+launcher-side signal question. The change would be a SIGINT handler in the
+launching process that forwards to the child's process group, which is the same
+`killpg` call `launch.rs` already makes on timeout, so the mechanism exists and
+is one handler away. The cost is that installing a process-wide signal handler
+is a decision the launcher makes on behalf of its host, and this crate is
+embedded in consumers - broadarrow, and a nautilus host - that may install
+their own; a library that claims SIGINT unasked is a worse defect than the one
+it fixes. The alternative is the status quo, which leaks nothing: the venue
+still dies with its launcher through `PR_SET_PDEATHSIG`, so what Ctrl-C costs
+is only latency to teardown in an interactive session, and the SIGTERM path is
+untouched. If a forwarding handler ships, it should be opt-in on `LaunchSpec`
+rather than a default the host cannot decline.
 
 ## D. Data and generator
 
@@ -742,14 +727,11 @@ refuses a consumer-stated price on a market order, so that arm is a `400` at the
 boundary and there is no longer a submit to observe. The defect claim itself is
 unchanged - `OrderFilled` carries no reading instant and no flag.
 
-The stale name is still cited from two other places, one of them durable source:
-`serving.rs`'s module docstring and `mogwai-venue/src/fills.rs`'s doc comment. A
-doc comment naming a test that no longer exists under that name is caught by
-nothing, so fix both while here. When `read_market` refuses - a cold volatility
-estimator, a truncated walk - the engine falls back to the order's stated price
-and logs a warn, and on a price-less market order the venue stamps the last print
-either way, so the fill lands on the tape whether a reading was taken or not.
-That is exactly the path the venue used to get wrong.
+When `read_market` refuses - a cold volatility estimator, a truncated walk - the
+engine falls back to the order's stated price and logs a warn, and on a
+price-less market order the venue stamps the last print either way, so the fill
+lands on the tape whether a reading was taken or not. That is exactly the path
+the venue used to get wrong.
 
 What the venue would have to ship: the reading's own instant, or a bare "reading
 taken" flag, on `OrderFilled`. Two things follow. The gate stops reading logs,
@@ -758,6 +740,25 @@ venue read - becomes an exact per-fill statement instead of the bracket it is
 now. The bracket exists only because the reading instant is unidentifiable from
 outside: it is neither the acceptance instant nor the fill instant, and
 `MarketReadingCache` buckets it further.
+
+Half closed 2026-08-26. This entry carried two things: stale citations of the
+renamed test, and the observability defect itself. The citation half is done -
+`mogwai-venue/src/fills.rs`, `mogwai-cli/tests/serving.rs` and `notes/todo.md`
+all name the live test now, and `fills.rs` was the one that mattered, being
+durable source naming a test that did not exist. Only the `OrderFilled`
+observability half remains, and it is what the paragraphs above describe.
+
+Stated for a close pass. The wire change is one optional field on
+`OrderFilled`: either the reading's own `sim_now_ns` or a bare boolean saying a
+reading was taken. The boolean is the cheaper of the two and is enough for the
+gate, which only needs to stop reading logs; the instant is what the exact
+per-fill slippage statement needs, and it is strictly more, so shipping the
+instant subsumes the boolean. The cost is a field on the highest-volume frame
+the venue emits - every fill carries it - which is a real byte-budget cost the
+boolean does not escape either. The alternative is the status quo: the gate
+keys on a warn log, which is not a wire contract and can be reworded by anyone
+touching the engine's fallback path without a test noticing, and the
+adverse-slippage invariant stays a bracket rather than an equality.
 
 ### G4. History-splice clamp has no test for the case that motivated it
 
@@ -902,21 +903,31 @@ sessions. When it fires it aborts the instrumented sweep and the gate then
 reports every `mogwai-data` test as orphaned; the tell is the orphan count
 equalling the missing sweep's pass count.
 
-### G12a. `brokkr.toml`'s gate comment points at the wrong document
-
-Filed 2026-08-26. The gate profile's comment ends by sending the reader to "the
-parallel item in `notes/todo.md`" for the rest of the story. That item is G1 in
-this document, moved by the 2026-08-24 transcription. Both files still exist so
-nothing errors, and a reader simply lands on the wrong page - which is the
-failure mode that makes a pointer worse than no pointer. Fix it when G1 is
-worked, since whoever is there is already reading both.
-
 ### G13. Watch the first live `mogwai measure` run
 
 Against the tightened `session_dates_are_23_sorted_unique` gate in
 `crates/mogwai-cli/src/measure.rs`. It has only ever executed under its unit
 test, because the gate sits mid-way through a multi-minute walk driver behind a
 Brick G cache that no test sweep in this workspace populates.
+
+### G12b. This document's extraction from `notes/todo.md` copied rather than moved
+
+Filed 2026-08-26 from round 2, as a lateral finding while closing G12a. This
+file's own preamble says it was "extracted from `notes/todo.md` on 2026-08-24",
+but the source entries were left in place, so at least G2 and G3 exist as two
+independent copies in two files. They have already drifted: the todo.md copy of
+G3 still cited the test name that was renamed out from under it, corrected here
+only because G3 sent someone looking. That is the same failure that produced
+G12a one paragraph up - a reader landing on the wrong page - except worse,
+because both pages look current.
+
+Not urgent and neither file is durable, so nothing cites either. What it needs
+is a decision rather than a fix: either todo.md's copies go and it keeps only
+what was never extracted, or this document names todo.md as the source of truth
+for the overlap and stops carrying its own copy. Doing neither means every
+future correction has to be made twice, and the next one will be made once.
+Scoped as a whole-file reconciliation of the two, not a per-entry chase, since
+which items moved on 2026-08-24 is not recoverable entry by entry.
 
 ---
 
@@ -1077,13 +1088,6 @@ Flagged in its own comment in the adapter. If sim speed is ever pushed hard, tha
 constant is the first wall.
 
 ---
-
-### I5. `nix` is an unconditional dependency of `mogwai-protocol`
-
-Filed 2026-08-24 from round 4. Every use of it is behind `cfg(unix)`, but it is
-declared in plain `[dependencies]` rather than under
-`[target.'cfg(unix)'.dependencies]`. Harmless while nothing builds this on
-Windows, and exactly the shape that bites the first time something does.
 
 ## J. Documentation owed
 

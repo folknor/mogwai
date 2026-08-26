@@ -14,6 +14,17 @@ serde_json.workspace = true
 # `log` facade for hosts that install one and no tracing subscriber, which is
 # the common shape for a nautilus host.
 tracing = { workspace = true, features = ["log"] }
+
+# Every use of `nix` sits behind `cfg(unix)` - the launcher's `killpg` on the
+# child's process group, and the launch tests' liveness probes - so it is
+# declared per-target rather than unconditionally. What that buys is the library
+# build: a non-Unix consumer of this crate no longer resolves or fetches nix at
+# all. It cannot be pinned by a test from inside this workspace, and no test
+# pretends to. Nothing here can build a Windows target, and this crate's `mod
+# tests` is Unix-only source independently of nix - `write_venue_script` uses
+# `std::os::unix::fs::PermissionsExt` and the fixtures are `/bin/sh` scripts, all
+# ungated - so a test asserting cross-platform compilation would assert nothing.
+[target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["process", "signal"] }
 
 [dev-dependencies]
