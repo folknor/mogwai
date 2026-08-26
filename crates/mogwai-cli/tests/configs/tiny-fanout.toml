@@ -14,7 +14,7 @@ speed = 0.0
 fanout_depth = 8
 
 # Do not park the unpaced tape for a peer that cannot keep up. The park exists
-# so a HEALTHY slow consumer is never the reason a firehose stalls, and it is
+# so a healthy slow consumer is never the reason a firehose stalls, and it is
 # effective enough that with it on, a merely-slow reader is never ejected at
 # all. Zero removes it, which is what puts the ring's own overrun policy - one
 # stall, then ejection - one stalled read away instead of hours of tape away.

@@ -2055,7 +2055,7 @@ pub(crate) async fn trades(
         return Err((StatusCode::BAD_REQUEST, body));
     }
 
-    // An explicit `end` past the ceiling is CLAMPED rather than refused, and
+    // An explicit `end` past the ceiling is clamped rather than refused, and
     // that asymmetry with the `start` refusal above is deliberate. A start past
     // the ceiling asks for a window that lies entirely beyond what this river
     // has produced and can only be a caller error; an end past it is the

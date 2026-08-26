@@ -332,7 +332,7 @@ pub const JSON_ESCAPE_FACTOR: usize = 6;
 /// in the width of the `kind` tag, and - for `Query` alone - by a serialized
 /// `QueryKind` value. Those deltas are fixed scaffolding, charged to
 /// `ADMISSION_ENVELOPE_BYTES`, which is why that constant is deliberately
-/// generous. `admission_frames_fit_their_ceiling` measures EVERY variant, so
+/// generous. `admission_frames_fit_their_ceiling` measures every variant, so
 /// "the widest" is a measurement rather than a claim.
 pub const ADMISSION_FRAME_MAX_BYTES: usize = 4096;
 

@@ -1622,8 +1622,10 @@ async fn handle_market_message(
             // socket down - would turn a recoverable gap into a total outage
             // and invent a policy the venue did not ask for. So the loudest
             // honest channel is the log, at the level a host alerts on. The
-            // real fix is a declared feed-gap event upstream; see the
-            // cross-repo entry in `notes/todo.md`.
+            // real fix is a declared feed-gap event upstream: a `DataEvent`
+            // variant or a `DataClient` health callback the engine surfaces, so
+            // a gap reaches the host as an event rather than as a log line.
+            // Nothing in this repository can supply it.
             //
             // The boundaries are the actionable part for whoever reads this
             // log: they delimit the affected span, so a bar folded across it,

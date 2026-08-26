@@ -297,7 +297,7 @@ impl Venue {
                 waited_from.elapsed(),
                 if clamped {
                     format!(
-                        " - which is the TEST'S REMAINING BUDGET, not the {timeout:?} asked for, \
+                        " - which is the test's remaining budget, not the {timeout:?} asked for, \
                          so an earlier phase of this test spent the budget and this is not \
                          evidence about the venue's shutdown"
                     )

@@ -195,6 +195,14 @@ consumer confusion C10 was filed for and nothing tracks it.
 
 ### C13. Named tape windows have no wire at all
 
+Provenance, folded in from `notes/todo.md` on 2026-08-26 when that file's
+shared-exchange section was reconciled away: this is the one axis of the
+optional shared-exchange mode still open, and it is open because the
+one-venue-per-run rewrite removed it and nothing has since undone that. The
+default mode - one venue owned by one run, serving several tapes to one account
+at one placement - is complete. Both modes must eventually be supported, so the
+axis is deferred rather than dropped.
+
 Owed, not optional. `reference/north-star.md`'s settled premises make a named
 window on a shared exchange one of the two ways a path is reproduced, so this is
 an end-state commitment the tree is behind on rather than a feature request.
@@ -644,6 +652,64 @@ after three green runs at 8, having already gone red at 16; three passes are not
 evidence about an intermittent race, a failure rate is. The parked list is empty
 as of 2026-08-19.
 
+Triaged 2026-08-26, and the raw count was hiding the shape. The often-quoted
+"73 sleep sites" is a count over the whole of `crates/`, and about forty-four of
+them are production pacing - the launcher's owner loop, the adapter clock and
+reconnect ladder, the boat and sweeper cadences - which price no test and belong
+to no part of this entry. The test and test-support sites number thirty-one:
+sixteen under `mogwai-cli/tests` and fifteen under `mogwai-adapter/tests`. What
+follows is the classification, so a later round finishes this without redoing
+it.
+
+- **Poll intervals inside a deadline-bounded loop, eighteen sites.** The
+  wanted shape already: the loop ends on a condition, the deadline is the
+  failure path, and the sleep only decides how often the condition is asked
+  about. These are not a gate cost - a passing run leaves them as soon as the
+  condition holds - and converting one buys nothing. Leave them.
+- **Negative-observation windows, six sites.** The adapter's blackout watch, its
+  stranger-socket and dial-cap watches, `havoc.rs`'s "the data client must never
+  ship divergences" window, its bound-to-another-run disconnect watch, and
+  `serving.rs`'s settle before reading the absence of a market-reading warn. The
+  assertion here is that something does not happen for a span, and there is no
+  condition to wait on because the property is an absence. The duration is the
+  subject rather than a bet on it, and shortening one weakens the test rather
+  than speeding the suite. Leave them, and do not let a later sweep mistake them
+  for the convertible class.
+- **The duration is the thing under test, three sites.** `lifecycle.rs`'s
+  `a_venue_launched_after_untracked_work_inherits_that_works_budget` sleeps to
+  spend wall budget, which is precisely what it asserts about; `serving.rs`'s
+  slow-connection gate reads on a deliberate stall, which is what makes it fall
+  behind; and the adapter harness sleeps the armed blackout's own window.
+- **Converted in this round, two sites.** `serving.rs`'s
+  `history_is_bounded_by_the_run_clock_and_no_boat_moves_it` slept 250 ms to make
+  its boat a late one, and now waits on the run clock reporting the lead through
+  `wait_for_run_lead`; and
+  `a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_ledger`
+  slept 500 ms for its order to reach the ledger, and now waits on the venue's
+  own acceptance through the existing `await_acceptance`. Both premises were
+  previously unstated bets whose losing side is silent: an early boat makes the
+  test pass under the rule it exists to reject, and an unaccepted order makes
+  eviction look like a lost book.
+- **Blocked, and on what, two sites.** `serving.rs`'s market-reading gate spaces
+  its attempts 500 ms apart - the spacing is convertible to a run-clock
+  condition, since fifty sim seconds is exactly what the comment says it wants,
+  but that same comment names the gap as the whole flake margin of the assertion
+  below it, so moving it is a change to the test's statistics and not a
+  mechanical conversion. And
+  `data_client_transport.rs`'s segmented-head test sleeps 20 ms so the reader
+  observes two reads rather than one; the condition is "the reader has consumed
+  the first segment", which no seam exposes, and losing the bet weakens the test
+  silently rather than failing it. Both need a decision or a seam, not a sweep.
+
+So the convertible class was two sites, not seventy-three, and it is now empty.
+The gate's ceiling therefore does not come from fixed sleeps in the way this
+entry assumed: the concentration the 164s profile found is declared `--duration`
+runs and reconnect ladders spending their attempts, which are durations the test
+asked the venue for rather than sleeps a test could stop taking. Whoever picks
+this up next should aim at that - a lifecycle test's declared duration, and
+whether the ladder's attempt spacing can be a parameter the test passes - rather
+than at the sleep count.
+
 ### G3. Nothing on the wire says whether a submit took a market reading
 
 Which forces
@@ -673,9 +739,10 @@ outside: it is neither the acceptance instant nor the fill instant, and
 
 Half closed 2026-08-26. This entry carried two things: stale citations of the
 renamed test, and the observability defect itself. The citation half is done -
-`mogwai-venue/src/fills.rs`, `mogwai-cli/tests/serving.rs` and `notes/todo.md`
-all name the live test now, and `fills.rs` was the one that mattered, being
-durable source naming a test that did not exist. Only the `OrderFilled`
+`mogwai-venue/src/fills.rs` and `mogwai-cli/tests/serving.rs` name the live test
+now, and `fills.rs` was the one that mattered, being durable source naming a test
+that did not exist. The third site, `notes/todo.md`, went with the section the
+G12b sweep deleted. Only the `OrderFilled`
 observability half remains, and it is what the paragraphs above describe.
 
 Stated for a close pass. The wire change is one optional field on
@@ -711,13 +778,6 @@ interval has nothing to take hold of. Closing it needs a seam the venue does not
 have, most plausibly a test-only delay or counter between the response and the
 handoff.
 
-### G8. The roll conformance fixture's Python half is manual
-
-`python3 analysis/roll_estimator.py conformance` is run by no lane, so its
-fixture-version guard fires only for a human who thinks to invoke it. The dwell
-pair has automated tests on both sides; this pair does not, because a Rust test
-may not spawn Python.
-
 ### G9. Neither shared conformance fixture detects a quietly widened `tolerance`
 
 The fixture version is a schema version, and a tolerance edit weakens both
@@ -725,6 +785,21 @@ implementations at once, so the second implementation - whose whole purpose is t
 catch a one-sided drift - is structurally blind to it. Unlike the arrival vectors
 there is no re-derivation to compare against; a fix needs an independently
 derived bound on the tolerance itself.
+
+Left filed 2026-08-26, with the dead end recorded so it is not re-walked. Every
+shape that closes this without new measurement is circular. Pinning the current
+tolerance in a test states the number twice and detects an edit that changes it,
+which is a rename check rather than a contract check - the sanctioned way to move
+a tolerance re-blesses the pin in the same change, exactly as for a frozen
+snapshot hash. Deriving a bound from the fixture's own cases asks the fixture to
+justify itself. Tightening the tolerance to whatever the current implementations
+happen to achieve pins two implementations against their present agreement and
+would fire on any legitimate float drift, which the correctness contract
+explicitly permits. What is actually owed is a bound from the estimator's
+sampling error at the fixture's sample sizes - a measurement nobody has run, and
+one that would have to name the decision it changes before it is run. Until
+then the standing mitigation is the doctrine's: review a tolerance change as a
+contract change, because no gate will.
 
 ### G10. Nothing routes a new wall-clock budget into the `timing` sweep
 
@@ -741,6 +816,21 @@ better answer; where it is not, there is no answer. An owner-level question if
 anyone wants it mechanised - a source scan for `Duration::from_` inside an
 `assert!` is the crude form, and would have to justify its false-positive rate
 against a repository full of legitimate loose bounds.
+
+Left filed 2026-08-26, and the crude form was checked rather than assumed away.
+The scan's false-positive rate is not marginal: the G1 triage counted thirty-one
+test-side wall-clock durations, and eighteen of them are poll intervals inside a
+deadline-bounded loop while six more are negative-observation windows - all of
+them legitimately a `Duration::from_` sitting next to an assertion, none of them
+a latency budget. A scan that flags twenty-four correct sites to find one
+incorrect one gets suppressed on its first run and then means nothing, which is
+the vacuous-control shape the doctrine names. The syntactic property the tool
+does enforce - an `only` entry the gate does not skip is an orphaned pair, a
+filter matching nothing is dead - stays the whole of the mechanism, and the
+converse stays a review obligation on whoever writes a wall-clock assertion.
+What would change this is a marker at the source rather than a scan of it: a
+budget-carrying test declaring itself, so the tool has something to enumerate
+instead of something to guess. That is a new convention and wants a ruling.
 
 ### G11. The no-shouting textlint is blind to several classes
 
@@ -776,6 +866,42 @@ two days.
   them is worth deciding once rather than per site, and the class is larger than
   the two examples originally given.
 
+  Decided 2026-08-26, both halves separately, because the round-5 fix pass
+  answered only the second and the entry asked for the first.
+
+  The rule covers them. An assertion message is prose a human reads at the
+  moment a test fails, which is the worst possible moment to be shouted at, and
+  the AGENTS.md rule is about the writing rather than about which token the
+  tokenizer calls a comment. So the sites named above were rewritten, along with
+  the eight others in the same class, and a future one is a review nit like any
+  other.
+
+  The lint does not cover them, and will not. Structurally the region would have
+  to become `string`, and a string region in this codebase is mostly wire
+  payloads, protocol tags, symbols, account ids and close reasons - `MOGWAI`,
+  `BTCUSDT`, `SubmitOrder`, `RETRYABLE_REJECT_PREFIX`'s text - so the rule would
+  fire overwhelmingly on values the venue is contractually obliged to spell that
+  way. Excepting them by shape is not available either: an assertion message and
+  a close reason are both plain string literals and nothing in the syntax tells
+  them apart. That leaves an allowlist per literal, which is the mechanism the
+  preset's own comment already rejects as unfinishable. So this class is
+  enforced by review and not by the tool, and the entry stays open only as that
+  standing statement rather than as work.
+
+The inline-code-span exemption was repaired 2026-08-26 and then repaired again
+in the same round, because the first repair traded one blind spot for its mirror
+image. Requiring a closing backtick stopped a line being exempted by a span that
+closed before the shouted word, and exposed nine Rust-comment violations that
+had been hidden; but the resulting pattern still matched from a span's close to
+the next span's open, so a shout sitting between two code spans was exempted
+just as silently. The pattern now counts complete span pairs from the start of
+the line, so the backtick it reaches is an opener by construction. Coverage also
+grew a TOML comment rule over the CLI test fixtures and the venue presets, which
+is where the third class above lived. The known coarseness that remains is the
+one the preset states: an exemption still applies to the whole physical line, so
+a line carrying both a genuine code span and genuine shouting slips through, and
+a shout built entirely of words under five letters never fires at all.
+
 ### G12. Open lead, not reproduced and not closed: the SIGTERM shutdown test
 
 `sigterm_stops_the_venue_within_the_shutdown_grace` in
@@ -807,22 +933,41 @@ Against the tightened `session_dates_are_23_sorted_unique` gate in
 test, because the gate sits mid-way through a multi-minute walk driver behind a
 Brick G cache that no test sweep in this workspace populates.
 
-### G12b. `notes/todo.md` still carries unverified copies of entries this file owns
+### G12b. Closed 2026-08-26: `notes/todo.md` no longer copies entries this file owns
 
 Decided 2026-08-26 by the close pass: this document is the source of truth for
-every entry both files carry, todo.md's preamble now says so, and any correction
-lands here and only here. Executed for the worst offender - todo.md's "Tests
-and tooling" section, verified entry by entry as a full duplicate of section G
-minus this file's corrections, is deleted there.
+every entry both files carry, todo.md's preamble says so, and any correction
+lands here and only here. The first execution took todo.md's "Tests and tooling"
+section, verified entry by entry as a full duplicate of section G minus this
+file's corrections.
 
-The residual is the sweep of todo.md's remaining sections. Its "Venue and
-protocol" section is known to still carry drifted copies - a C10 copy
-describing the pre-`PassengerDurationComplete` behaviour, a C11 copy with the
-pre-narrowing text, a C7 copy predating the round-2 close - and the other
-sections have not been compared at all. The banner means none of those copies
-can mislead a reader who saw it, so the sweep is cleanliness rather than
-urgency: verify a section is fully duplicated here, then delete it there, and
-keep in todo.md only what was never extracted.
+The remaining sweep ran in round 5 and the entry is closed. Every section of
+todo.md was compared entry by entry:
+
+- Deleted as full duplicates, nine sections: shared-exchange mode (C13),
+  instruments and account policy (E3 and all four E8 items), measurement and
+  method (H1 through H6), values wanting constants (I1 through I4), owner
+  rulings (K1 through K7), documentation owed (J1 through J5), the two appendix
+  sections, and the CLA gotcha (L1). The venue-and-protocol section's C10 copy
+  went with them - C10 is closed by `PassengerDurationComplete` and the copy
+  described the behaviour before it - along with the pre-narrowing C11 copy, and
+  the engine, data and adapter copies of B7, D1, D4, D5, D6, D7, F7, F10, F11,
+  F12, F3b and F5.
+- Kept in todo.md, never extracted and so not this document's to own: the
+  segment-sampler gate, the refusal-texts-spell-their-bounds item, the
+  zero-price fill, generator havoc forking the river, and four adapter items
+  (the leveraged-forex instrument gap, nautilus's `MarketToLimit` constructor,
+  the dropped perpetual funding fields, and `HavocSpec.data` having no reader).
+- Moved here rather than deleted, being content only the copy carried: C13's
+  shared-exchange provenance, the upstream emitter entry's statement of what
+  nautilus would have to ship, and five broadarrow items whose closing path this
+  document had summarized away.
+
+Two dangling citations fell out of the sweep and were fixed in the same change:
+`mogwai-adapter`'s `client/data.rs` and `client/exec.rs` each cited
+`notes/todo.md` for the upstream gap they sit on, which is doubly wrong - a code
+comment may not cite `notes/` at all, and the section it cited is now gone - so
+both comments now carry the upstream ask themselves.
 
 ---
 
@@ -1080,14 +1225,24 @@ crates.io release. Nothing here can be fixed from this tree.
   `nautilus_common::live::runner` set on the runner's thread. Every clone taken
   after that point freezes the sender state of the instant it was taken, and
   `send_order_event` on a sender-less clone only logs a warning. Our workaround
-  is a refusal, not a repair.
+  is a refusal, not a repair: a host that starts its clients on one thread and
+  connects them on another gets a named error rather than a working client.
+  What the other side would have to ship, and what retires this entry: an
+  emitter holding its sender behind a shared cell, or resolving it per send
+  from a process-wide rather than thread-local slot, so a clone taken before
+  `set_sender` still emits.
 
 - **No channel for a declared feed gap.** `VenueMessage::FeedLagged` carries
   `skipped` and `sim_now_ns` and the adapter has nowhere to put it. No
   `DataEvent` variant means "the stream you are aggregating has a hole", the
   client is handed to the host boxed as `dyn DataClient` so an adapter-owned
   counter or health accessor is unreachable, and `is_connected` is true
-  throughout because the socket never broke. The execution socket cannot self-heal
+  throughout because the socket never broke. So bar aggregation over the
+  missing span is silently wrong and the polling cursor resumes past it, and a
+  strategy cannot distinguish a quiet market from a dropped one. Fabricating a
+  report from the local mirror is not the escape: the mirror is built from the
+  frames the venue just said it dropped, which is the exact falsehood the
+  venue-truth move removed. The execution socket cannot self-heal
   either: the frame translator that sees `FeedLagged` runs as `handler(msg).await`
   inside the reader's own frame loop, so a venue-truth query issued there
   deadlocks by construction, and the client is `!Send` so spawning it off is
@@ -1148,23 +1303,36 @@ Theirs, not ours. One item is genuinely ours and is called out first.
 
 - Item 4 of the strategy-search route, consuming the multi-instrument venue.
   `run_prep::mogwai_facts` refuses a `/instruments` answer of anything but exactly
-  one instrument, precisely so a relaxed mogwai breaks their build loudly.
-- `POST /accounts` at run-prep preflight. Nothing here blocks it.
+  one instrument, precisely so a relaxed mogwai breaks their build loudly instead
+  of having broadarrow pick an instrument arbitrarily. Closing it means selecting
+  by the strategy's frontmatter `MOGWAI:<symbol>`, per worker rather than per
+  venue, after which the readiness record's `symbol` field needs its
+  one-venue-one-symbol meaning reconciled.
+- `POST /accounts` at run-prep preflight, so each worker opens its own ledger with
+  its own balances before the node is built. Nothing here blocks it.
 - Their profile row becomes `AtomicOuo` and brick 3 of
   `notes/venue-order-list-oco-spec.md` lands. Carve-out they must read before
   citing the group-admission guarantee: a member whose funds an earlier member's
   fill consumed is rejected on the second pass with its earlier siblings already
   accepted.
 - Whether a refusal marked `RETRYABLE_REJECT_PREFIX` should be treated as
-  retryable at all.
-- Boot-storm pacing for concurrent `/trades` and `/quotes` warmup.
+  retryable at all. Their standing reasoning - a rejection wrongly treated as
+  retryable is worse than a run that stops when the venue said no - is still
+  sound, and the marker only changes what the decision rests on. Nothing here
+  pushes them either way.
+- Boot-storm pacing for concurrent `/trades` and `/quotes` warmup, because their
+  daemon decides when workers spawn. Our bounded wait makes staggering an
+  optimization for ordinary paging rather than a precondition of correctness,
+  which is the change worth telling them about.
 - `submit_order_list` is the only route that emits a group frame, so a consumer
   wanting an atomic group by any other route has no API for it. None is owed
   until one is wanted.
-- Their own repo: the feed-stale message hard-codes the issue-4255 hypothesis as
-  fact even when the venue process is dead; `reference/mogwai.md` and
-  `ba man mogwai` still describe the venue as unfundable; stored scenario TOMLs
-  setting `transport_profile` no longer parse and want a sweep.
+- Their own repo: the feed-stale message hard-codes the issue-4255 hypothesis
+  ("the connection looks healthy...") as fact even when the venue process is
+  dead; `reference/mogwai.md` and `ba man mogwai` still describe the venue as
+  unfundable, stale since the `[balances]` seed landed; stored scenario TOMLs
+  setting `transport_profile` on either adapter config no longer parse, since the
+  field went with `TransportProfile` itself, and want a sweep.
 
 ### Runs owed against mogwai
 
@@ -1178,9 +1346,19 @@ mogwai defects, and several have been owed for weeks.
   reading the dependency rather than by observing a reconciliation, landed as an
   explicit operator override of its own gate - a known-unrun verification on a
   capital bound.
-- `go_live` restart de-duplication.
-- The futures run against a `preset = "MNQ"` venue.
-- The conditional half of the fed-fill path.
+- `go_live` restart de-duplication: kill a non-flat worker with orders resting at
+  the durable venue, restart, verify the batch de-duplicates against the
+  surviving book.
+- The futures run against a `preset = "MNQ"` venue: warmup, fed fills, a resting
+  stop triggering on the multiplied instrument, a settlement-currency commission
+  actually charged, and the brakes marking in that currency.
+- The conditional half of the fed-fill path: a fed fill from an order that
+  genuinely rested and then filled at venue timing, ideally under havoc.
 - Flip plus pyramid plus partial in one bar, end to end.
-- Gate B, the anchored-warmup overlap drop.
-- The poll-heal end-to-end test, which drives our control plane directly.
+- Gate B, the anchored-warmup overlap drop. Their `handoff.rs` covers Binance,
+  Kraken and Bybit but not mogwai, and is a consistency test rather than ground
+  truth.
+- The poll-heal end-to-end test, which drives our control plane directly: rest a
+  far-from-market limit, POST `CancelOpenOrderSilently`, assert the local order
+  converges to Canceled within the retry ladder's bound. Their fixture notes still
+  hold: carry no protective exits, and census the whole rotated log family.

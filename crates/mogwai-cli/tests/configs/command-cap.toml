@@ -4,7 +4,7 @@
 seed = 42
 warmup_ns = 300000000000
 speed = 0.0
-# The PER-CONNECTION queue is what this fixture pins, so the process-wide
+# The per-connection queue is what this fixture pins, so the process-wide
 # permit is left at its default: a refusal here can only come from the socket's
 # own bounded queue, not from the run-wide bound sitting in front of it.
 pending_command_acts = 1

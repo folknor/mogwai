@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! CLI-level coverage for `mogwai characterize`'s OUTPUT NAMING.
+//! CLI-level coverage for the output naming of `mogwai characterize`.
 //!
 //! The subcommand landed with library-level coverage of the estimand layer and
 //! none of the write path, which is where it broke: `resolve_path` accepts a

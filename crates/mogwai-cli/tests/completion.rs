@@ -226,7 +226,7 @@ async fn watch_a_bounded_run(
         let attempt_cost = attempt_started.elapsed();
         assert!(
             std::time::Instant::now() + attempt_cost < give_up,
-            "after {} launches this test never fully WATCHED a {duration} run - either some \
+            "after {} launches this test never fully watched a {duration} run - either some \
              socket was accepted and written nothing at all, which is a run already tearing down \
              when this test reached it, or a drain hit the clamped wall deadline before the run \
              ended, which observes only part of it. Endings on the last attempt: {:?}. That is a \

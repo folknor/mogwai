@@ -369,7 +369,7 @@ where
                     out.push('\n');
                 }
                 // The marker opens a fresh line; record that so a loose item's
-                // following `Paragraph` does not push a SECOND newline and open a
+                // following `Paragraph` does not push a second newline and open a
                 // stray blank line between the item and its body (S23).
                 self.end_newline = true;
                 // Indent nested bullets by list depth so architecture.md's nested

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # fast.toml with the TTL reaper armed and a short lifetime, so a gate can watch
-# an unattended account actually be COLLECTED rather than merely inspect the
+# an unattended account actually be collected rather than merely inspect the
 # flag that makes it collectable. That is the only externally visible
 # consequence of the freeze: a collected id can be opened again, and an id whose
 # ledger is still on the venue answers a second open with a conflict.

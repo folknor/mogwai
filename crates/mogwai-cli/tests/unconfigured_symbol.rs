@@ -89,7 +89,7 @@ async fn a_run_serves_a_symbol_nobody_configured() {
             Ok(None) => break "the venue ended the stream".to_string(),
             Ok(Some(Err(err))) => break format!("the socket failed: {err}"),
             Ok(Some(Ok(Message::Close(frame)))) => {
-                break format!("the venue CLOSED the socket: {frame:?}");
+                break format!("the venue closed the socket: {frame:?}");
             }
             Ok(Some(Ok(Message::Text(frame)))) => {
                 if frame.contains(UNCONFIGURED)

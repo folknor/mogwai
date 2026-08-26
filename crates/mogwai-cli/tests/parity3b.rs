@@ -17,7 +17,7 @@
 //! - `binding.harness_tree_commit`: the committed artifact binds the commit
 //!   the Python ran from. Any Rust run binds whatever HEAD it ran from, so
 //!   this field can only ever differ; it is not a measurement.
-//! - `binding.subcontract_hash`: CONFIRMED stale-input drift, not a port
+//! - `binding.subcontract_hash`: confirmed stale-input drift, not a port
 //!   defect. The committed artifact records
 //!   `35e5b033133f12205cf26938db10d16b7bbd9f7f686cc82b91e265ffea1e1924`,
 //!   which is the sub-contract as it stood at the protocol-11 fit. The

@@ -37,7 +37,7 @@ pub const DEFAULT_FANOUT_DEPTH: usize = 1_048_576;
 // value they never set (S20). `default` (missing keys keep built-in defaults) and
 // `deny` (unknown keys are rejected) are orthogonal and compose. The
 // Instrument overlay keys are guarded one step later, by
-// `deny_unknown_fields` on `ConfiguredInstrument`, which sees the RESOLVED
+// `deny_unknown_fields` on `ConfiguredInstrument`, which sees the resolved
 // table.
 #[serde(default, deny_unknown_fields)]
 pub struct Config {

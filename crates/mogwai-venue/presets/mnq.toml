@@ -30,9 +30,9 @@ breach_action = "liquidate"
 # median matches the observed 1.025 ticks; vol_scalar targets the pooled
 # RMS of adjacent-parent quote-mid log returns; start_price is the last
 # valid trade of the final usable session, an observed terminal anchor.
-# The landing is PARTIAL by verdict: the eight cadence, quote and anchor
+# The landing is partial by verdict: the eight cadence, quote and anchor
 # targets carry fitted provenance; the size pair and vol_scalar carry the
-# solver's best candidates under DECLARED provenance because one frozen
+# solver's best candidates under declared provenance because one frozen
 # gate each refused them - see the per-entry rationales below.
 [instrument.generator]
 symbol = "MNQ"
@@ -44,7 +44,7 @@ children_single_frac = 0.9048983982868222
 levels_mean = 1.1215513514243831
 # Structurally unidentifiable on the whole-contract grid at a one-lot
 # median (integral_lot is 1, both size arms materialize identically), so
-# it remains DECLARED; the fit artifact records the moot branch with its
+# it remains declared; the fit artifact records the moot branch with its
 # precondition values.
 size_round_frac = 0.20856767610054022
 start_price = "28284.00"
@@ -56,16 +56,16 @@ latent_size_median = "1.097264"
 # nested median), carried as the closest representable approximation: the
 # family's ecdf, mean and p90 checks pass and generated p99 improved from 14
 # to 10 contracts against observed 8, one contract over the frozen bound, so
-# the pair stays DECLARED rather than fitted. Stated explicitly also so the
+# the pair stays declared rather than fitted. Stated explicitly also so the
 # harness can override the sigma path - overriding an unset path is refused.
 size_log_sigma = 0.9333333333333333
 # The protocol-11 frozen solver's best candidate for the pooled quote-mid
 # RMS target, re-solved with the fitted per-parent session arrays installed
 # (the flattened vol_hour redistributes scale, so the scalar rises from the
-# protocol-10 candidate 8.70e-6). The pooled RMS gate PASSES around it; the
+# protocol-10 candidate 8.70e-6). The pooled RMS gate passes around it; the
 # per-seed minute-range envelope gates still fail (p99.9 433-607 ticks vs
 # the resampled observed bound; per-seed max to 3614 vs 968), so the value
-# stays DECLARED: the t(4)/GARCH cluster-tail SHAPE overproduces extreme
+# stays declared: the t(4)/GARCH cluster-tail shape overproduces extreme
 # minutes and no scalar can land a shape. The protocol-12 tail spec owns
 # the fix, and inherits the hourly wall-time contour evidence beside it.
 vol_scalar = 0.000013570223097752063
@@ -77,7 +77,7 @@ trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "
 # curves were per-minute quantities applied per parent event, which made
 # the generated minute-level peak-to-trough the product of both swings -
 # the roughly-5x-too-quiet overnight the owner's chart review found).
-# These factors are RELATIVE and CONDITIONAL ON THE MARKET BEING OPEN: the
+# These factors are relative and conditional on the market being open: the
 # calendar below owns whether an event may exist at all, and this table
 # owns how intense it is given that it may. The modulator divides the
 # composite by its own exposure-weighted mean over the calendar's open
@@ -85,31 +85,31 @@ trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "
 # rescaling of them is equivalent.
 #
 # Estimators, definitions in the fit artifact analysis/mnq-fit.json:
-# - intensity_hour is the CONDITIONAL hour parameter under the frozen
+# - intensity_hour is the conditional hour parameter under the frozen
 #   dow_weight: inferred-parent counts per (hour, day) cell divided by
 #   dow-weighted calendar exposure, so the runtime's hour-times-day
 #   product does not double-count day concentration. Fitted per-hour
 #   marginal reproduction on the generated month: worst hour 0.63 percent.
 #   Peak-to-trough 14.5x - real parent counts, not the volume proxy whose
 #   27.51x was a stated upper bound.
-# - vol_hour is the PER-PARENT robust scale: one-maximum-trimmed mean
+# - vol_hour is the per-parent robust scale: one-maximum-trimmed mean
 #   absolute adjacent-parent quote-mid log return per session-hour cell,
 #   median across the 22 sessions. The curve is nearly flat and slightly
-#   INVERTED - overnight parents individually move a little more than
+#   inverted: overnight parents individually move a little more than
 #   cash-session parents - which is what the per-minute proxy could never
 #   see. Worst generated-vs-observed hour: 6.6 percent.
 #
 # Limitations, none of which the fitted/corpus/window provenance schema can
 # structurally carry:
 #
-# - Hour 21 UTC is UNEXPOSED (the 16:00-17:00 Central daily break); its 1.0
+# - Hour 21 UTC is unexposed (the 16:00-17:00 Central daily break); its 1.0
 #   is a convention, not a measurement. Hour 20 is partially exposed, 45
 #   open minutes per session around the 15:15-15:30 halt.
-# - dow_weight is UNTOUCHED by the protocol-11 refit and keeps its NQ-bar
+# - dow_weight is untouched by the protocol-11 refit and keeps its NQ-bar
 #   provenance and caveats: Saturday's 1.0 is a zero-exposure convention,
 #   Sunday rests on an order of magnitude less exposure than any weekday,
 #   and 22 July sessions are too thin for a preregistered weekday refit.
-# - The hourly 60s and 300s WALL-TIME contour of the generated month misses
+# - The hourly 60s and 300s wall-time contour of the generated month misses
 #   its frozen 0.8-1.25 band at the reversion-heavy hours (300s at UTC 19,
 #   20, 23) even though arrival and per-parent scale match to fractions of
 #   a percent there: an hour-dependent aggregation-law mismatch recorded in
@@ -134,7 +134,7 @@ vol_hour = [
   1.0, 1.001102, 0.931623,
 ]
 
-# Exchange-local CME equity-index hours on a PERMANENT CDT clock: Sunday 17:00
+# Exchange-local CME equity-index hours on a permanent CDT clock: Sunday 17:00
 # through Friday 16:00 Chicago time, with the daily 15:15-15:30 halt, the
 # 16:00-17:00 break, and a genuinely shut Saturday. Minutes count from local
 # Sunday 00:00. Local minute 900 is 15:00, when the daily settlement price is

@@ -142,6 +142,29 @@ match = "contains"
 stream = "both"
 stage = "post-test"
 
+# The Python half of the stratified Roll conformance fixture.
+#
+# `analysis/spread_conformance.json` is a two-sided contract: the Rust estimator
+# reads it through an `include_str!`ed test, and `analysis/roll_estimator.py`
+# reads the same file. Only the Rust side was ever run by a lane, so the Python
+# side's fixture-version guard fired for a human who thought to invoke it and
+# for nobody else - which is a one-sided gate wearing a two-sided fixture's
+# clothes. A Rust test may not spawn Python, so the lane that runs it is this
+# one.
+#
+# `pre-test` because it needs no build: it reads a committed fixture and
+# computes, so putting it before the suite means a drifted fixture fails in
+# seconds rather than after the tests. The sentinel is the runner's own
+# all-passed line, which it prints only when every case passed - a version
+# mismatch or a failing case exits before reaching it.
+[[script_check]]
+name = "roll-conformance-python"
+command = "python3 analysis/roll_estimator.py conformance"
+expect = "spread conformance: all cases passed"
+match = "contains"
+stream = "stdout"
+stage = "pre-test"
+
 [test]
 gate_profile = "gate"
 # Without a default profile, a bare `brokkr check` runs every [[check]] entry -
@@ -500,7 +523,20 @@ except = [
     #
     #   `RUSTFLAGS`   an inline code span - the single best signal, and the
     #                 one to reach for when something is wrongly flagged
-    '`[^`]*[A-Z]{5,}',
+    #
+    #                 Counted from the start of the line, not matched loosely,
+    #                 because a span is decided by backtick parity and a loose
+    #                 match gets the parity wrong from either side. `RESOLVED`
+    #                 escaped a linted path for weeks because the pattern
+    #                 needed no closing backtick, so a line whose last backtick
+    #                 closed a span before the shouted word exempted the whole
+    #                 line; requiring the closing backtick alone then admits
+    #                 the mirror image, a shout sitting between one span's
+    #                 close and the next span's open. The leading run of
+    #                 complete span pairs is what forbids both: the backtick
+    #                 this reaches is an opener by construction, so the shout
+    #                 it exempts is genuinely inside a span.
+    '^(?:[^`]*`[^`]*`)*[^`]*`[^`]*[A-Z]{5,}[^`]*`',
     #   $RUSTFLAGS / ${RUSTFLAGS} / %PATH%
     '[$%]\{?[A-Z][A-Z0-9_]*',
     #   RUSTFLAGS=... or RUSTFLAGS: ... (an assignment or a table cell)
@@ -546,6 +582,14 @@ paths = ["crates/**/*.rs"]
 # shouting. Its tokenizer is Rust-only, which is why this rule does not also
 # claim the Python under scripts/ and analysis/ - those comments are simply
 # unlinted for now.
+region = "comment"
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
+
+[[textlint]]
+name = "no-shouting-toml-comments"
+preset = "no-shouting"
+pattern = '\b[A-Z]{5,}\b'
+paths = ["crates/mogwai-cli/tests/configs/*.toml", "crates/mogwai-venue/presets/*.toml"]
 region = "comment"
 message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
 

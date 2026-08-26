@@ -3809,7 +3809,7 @@ fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
     let at_probe = vols[probe].expect("horizon has filled by the probe index");
     assert_eq!(
         at_probe, 0.0,
-        "volatility at price i must EXCLUDE the return leaving i"
+        "volatility at price i must exclude the return leaving i"
     );
 }
 

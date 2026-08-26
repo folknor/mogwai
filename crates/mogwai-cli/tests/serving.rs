@@ -167,7 +167,7 @@ async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
             Ok(None) => break "the venue ended the stream".to_string(),
             Ok(Some(Err(err))) => break format!("the socket failed: {err}"),
             Ok(Some(Ok(Message::Close(frame)))) => {
-                break format!("the venue CLOSED the socket: {frame:?}");
+                break format!("the venue closed the socket: {frame:?}");
             }
             Ok(Some(Ok(Message::Text(frame)))) => {
                 if frame.contains("MNQ") {
@@ -206,7 +206,14 @@ async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
 #[ignore = "binds a loopback listener"]
 async fn history_is_bounded_by_the_run_clock_and_no_boat_moves_it() {
     let venue = spawn(&["--config", &two_symbols_config()]);
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // The premise, waited on rather than slept through: "well after boot" is a
+    // statement about the run clock, so this waits for the clock to say it and
+    // reports the reading if it never does. A fixed span here bet that the host
+    // got round to advancing the clock inside it, and a bet that loses is silent -
+    // the boat would be placed early, its frontier would sit where the window
+    // does, and the test would pass under both the retired ceiling and the live
+    // one without ever discriminating.
+    wait_for_run_lead(&venue.http_base(), venue.record.run_start_ns, 200_000_000).await;
     let (socket, _) =
         tokio_tungstenite::connect_async(format!("{}?symbol=MNQ&speed=1", venue.ws_url()))
             .await
@@ -1184,7 +1191,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
         let message = tokio::time::timeout_at(deadline, socket.next())
             .await
             .expect("the spot buy fills within 30 s")
-            .expect("the venue CLOSED the policed account's socket before the buy filled")
+            .expect("the venue closed the policed account's socket before the buy filled")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
             && let Ok(VenueMessage::OrderFilled(fill)) = serde_json::from_str::<VenueMessage>(&text)
@@ -1262,7 +1269,12 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         .send(Message::Text(submit.into()))
         .await
         .expect("submit an order on the first socket");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The order must be on the ledger before anyone claims it, and acceptance is
+    // that condition rather than a proxy for it. A fixed span here was a bet on
+    // the submit act's latency, and losing it silently: the second socket would
+    // inherit a book the order had not reached yet, and the resumed-ledger
+    // assertion below would fail as though eviction had lost the book.
+    await_acceptance(&mut first, "RESUMED-1").await;
 
     let (mut second, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -1318,7 +1330,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
                 .await
                 .map_err(|_| "the resumed socket did not answer Q-3 within 30 s".to_string())?
                 .ok_or_else(|| {
-                    "the venue CLOSED the resuming socket before it answered Q-3, so this run says \
+                    "the venue closed the resuming socket before it answered Q-3, so this run says \
                      nothing about whether the ledger resumes"
                         .to_string()
                 })?
@@ -2295,7 +2307,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
         let message = tokio::time::timeout_at(deadline, socket.next())
             .await
             .expect("the perpetual position opens within 30 s")
-            .expect("the venue CLOSED the perpetual socket before the position opened")
+            .expect("the venue closed the perpetual socket before the position opened")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
             && let Ok(VenueMessage::OrderFilled(fill)) = serde_json::from_str::<VenueMessage>(&text)
@@ -2815,7 +2827,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
                 .await
                 .map_err(|_| "the venue did not accept TAPE-99 within 60 s".to_string())?
                 .ok_or_else(|| {
-                    "the venue CLOSED the order socket mid-burst, so this run says nothing about \
+                    "the venue closed the order socket mid-burst, so this run says nothing about \
                      tape purity"
                         .to_string()
                 })?
@@ -2911,7 +2923,7 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
                 .await
                 .map_err(|_| "the venue did not accept STOP-99 within 60 s".to_string())?
                 .ok_or_else(|| {
-                    "the venue CLOSED the order socket mid-burst, so this run says nothing about \
+                    "the venue closed the order socket mid-burst, so this run says nothing about \
                      tape purity"
                         .to_string()
                 })?
@@ -3066,7 +3078,7 @@ where
             done = &mut work => return done,
             frame = idle.next() => match frame {
                 Some(Ok(Message::Close(spec))) => {
-                    panic!("the venue CLOSED {subject} while the test waited: {spec:?}")
+                    panic!("the venue closed {subject} while the test waited: {spec:?}")
                 }
                 Some(Err(err)) => {
                     panic!("{subject} failed in transport while the test waited: {err}")
@@ -3124,7 +3136,7 @@ async fn a_background_drain_says_nothing_about_a_stream_that_is_still_running() 
 }
 
 #[tokio::test]
-#[should_panic(expected = "the venue CLOSED the idle socket while the test waited")]
+#[should_panic(expected = "the venue closed the idle socket while the test waited")]
 async fn a_socket_drained_alongside_other_work_reports_its_own_close() {
     let mut idle = futures_util::stream::iter(vec![Ok(Message::Close(None))]);
     // The work never completes, so the only way out is the idle socket's close -
@@ -3154,7 +3166,7 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
             .await
             .unwrap_or_else(|_| panic!("the venue accepted {client_order_id} within 30 s"))
             .unwrap_or_else(|| {
-                panic!("the venue CLOSED this socket before accepting {client_order_id}")
+                panic!("the venue closed this socket before accepting {client_order_id}")
             })
             .expect("a well-formed frame");
         let Message::Text(text) = message else {
@@ -3387,6 +3399,29 @@ fn completed_sweep_passes(base: &str, symbol: &str) -> Option<u64> {
         .iter()
         .find(|row| row["symbol"] == symbol)
         .and_then(|row| row["completed"].as_u64())
+}
+
+/// Wait until the run clock has advanced `lead_ns` past the run's own start.
+///
+/// The observable behind "a boat placed well after boot". The lead is a
+/// property of the venue's clock, so the venue is the thing to ask; the wait
+/// ends on the reading rather than on a span the caller guessed, and a clock
+/// that never moves is reported as that rather than as an unattributed slow
+/// test.
+async fn wait_for_run_lead(base: &str, run_start_ns: u64, lead_ns: u64) {
+    let deadline = common::deadline(Duration::from_secs(10));
+    loop {
+        let now = venue_sim_now(base, "/clock");
+        if now.saturating_sub(run_start_ns) >= lead_ns {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run clock never reached {lead_ns} ns past its start: it reads {now} against a \
+             start of {run_start_ns}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Wait until the sweeper has finished `additional` further passes over this

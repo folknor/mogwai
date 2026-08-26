@@ -3149,8 +3149,12 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 // carried are simply gone. Same severity and same wording as
                 // the `FeedLagged` arm below, and for the same reason: the
                 // mirror may now disagree with venue truth and only a host-
-                // driven reconciliation can settle it. Nothing here can
-                // trigger that; see the cross-repo item in notes/todo.md.
+                // driven reconciliation can settle it. Nothing here can trigger
+                // that, and the missing piece is upstream: nautilus has no
+                // client-initiated reconciliation request the execution engine
+                // would service on a client's behalf, so this client cannot say
+                // "my mirror is suspect, re-run mass status" without owning an
+                // async handle to itself, which it is `!Send` and cannot.
                 tracing::error!(
                     ?subject,
                     %reason,

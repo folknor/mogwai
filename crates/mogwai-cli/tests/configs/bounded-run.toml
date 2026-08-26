@@ -56,7 +56,7 @@ USD = "100000"
 # speed by the test's own query string", and that was false on its face - this
 # file is `speed = 1.0` and the query asks for `speed=1`, the same number.
 # `boatyard.rs` gives every boat `sim_epoch_ns = origin_ns`, identical, and
-# `wall_anchor_ns = now_ns()` AT BOAT CONSTRUCTION, so two boats built at
+# `wall_anchor_ns = now_ns()` at boat construction, so two boats built at
 # different instants read different sim-now at the same wall instant. That is
 # the difference the gate's `assert_ne!` is sensitive to, and it is what a
 # shared-clock regression would erase.

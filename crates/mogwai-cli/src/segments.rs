@@ -365,7 +365,7 @@ fn write_bars(
     Ok(())
 }
 
-/// `BarAcc` stores only the window's CLOSE instant; the open is that close
+/// `BarAcc` stores only the window's close instant; the open is that close
 /// minus the interval it was folded at, which is exact because `fold_trade`
 /// anchors windows on the epoch.
 fn emit_bar(bar: &BarAcc, interval: NonZeroU64, out: &mut impl Write) -> anyhow::Result<()> {
@@ -426,7 +426,7 @@ mod tests {
     }
 
     /// The kebab-case rename is load-bearing: `NyMorning` resolves to the lab's
-    /// `ny-morning`, and clap must ACCEPT that same string, or the enum's
+    /// `ny-morning`, and clap must accept that same string, or the enum's
     /// variant name and the lab's name would be two different command-line
     /// spellings with only one of them documented.
     #[test]

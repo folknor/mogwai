@@ -210,7 +210,7 @@ pub(crate) struct Passenger {
     ///
     /// Taken in the admission rather than at the top of `handle_socket`,
     /// and the difference is a real window rather than tidiness. `handle_socket`
-    /// runs in the task `on_upgrade` spawns, which is polled only AFTER hyper's
+    /// runs in the task `on_upgrade` spawns, which is polled only after hyper's
     /// connection future has already resolved at the 101 - so a guard taken
     /// there is not yet held when `axum::serve` can complete, and a completion
     /// landing in that gap sees `passengers_drained` answer with this passenger
@@ -219,7 +219,7 @@ pub(crate) struct Passenger {
     /// here it is held before the 101 exists, so there is no instant at which
     /// this connection is upgraded and uncounted.
     ///
-    /// Never read. It is a `watch::Receiver` whose LIVENESS is the whole
+    /// Never read. It is a `watch::Receiver` whose liveness is the whole
     /// signal; see `Run::passengers_tx`.
     #[expect(
         dead_code,

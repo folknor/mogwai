@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 folknor
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# A venue serving a PERPETUAL, for the funding gate.
+# A venue serving a perpetual, for the funding gate.
 #
-# The funding interval is one simulated SECOND rather than the eight hours every
+# The funding interval is one simulated second rather than the eight hours every
 # real venue uses. That is a test-rig choice with a reason: funding instants sit
 # at multiples of the interval from the unix epoch, so an eight-hour cycle needs
 # eight sim-hours to cross one, and the mechanism under test is what happens AT
@@ -20,7 +20,7 @@ USDT = "1000000"
 
 [symbols.BTCUSDT-PERP]
 price_precision = 2
-# FRACTIONAL contract sizing, which is what a crypto perpetual actually has -
+# Fractional contract sizing, which is what a crypto perpetual actually has:
 # Binance sizes BTCUSDT.P in thousandths. It also lets this venue serve the
 # default generator's size distribution without a fitted override.
 size_precision = 8
@@ -35,7 +35,7 @@ multiplier = "1"
 asset_class = "cryptocurrency"
 funding_interval_ns = 1000000000
 # One percent per interval. Enormous by any real standard, and deliberately so:
-# the gate asserts that funding MOVED the balance, and a realistic basis point
+# the gate asserts that funding moved the balance, and a realistic basis point
 # on a small position is lost in the noise of a decimal comparison.
 funding_rate = "0.01"
 
