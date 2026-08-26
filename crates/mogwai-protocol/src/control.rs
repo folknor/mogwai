@@ -243,7 +243,7 @@ impl GeneratorArm {
 /// passenger-local by construction. That was true of a one-account venue and
 /// stopped being true when a run started carrying tens of ledgers; the venue and
 /// `docs/havoc.md` both describe the per-account routing above.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::VariantNames)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Divergence {
     /// Fill the next matching order only `fraction` of the way, leaving the rest open.
@@ -361,8 +361,41 @@ pub enum Divergence {
     FaultTape,
 }
 
-/// Every externally armable divergence tag, derived from the wire enum.
-///
-/// `GET /control/divergence` publishes this slice so out-of-crate harnesses can
-/// prove their scenario coverage is complete instead of hand-copying the enum.
-pub const DIVERGENCE_KINDS: &[&str] = <Divergence as strum::VariantNames>::VARIANTS;
+/// Expands to `DIVERGENCE_KINDS` plus a compile-time proof that the list names
+/// every variant of [`Divergence`] exactly once. The proof is an exhaustive
+/// match: a variant added to the enum and not to the macro call fails to
+/// compile with a missing-arm error naming it, and a name listed twice fails
+/// as an unreachable pattern. That is the same transcription-proof property a
+/// derive would buy, without the wire crate taking a dependency for twelve
+/// strings. The names double as the serde `type` tags because the enum carries
+/// no `serde(rename)`; the `control-shapes` script check proves that end to
+/// end by posting every published kind against a live venue.
+macro_rules! divergence_kinds {
+    ($($variant:ident),+ $(,)?) => {
+        /// Every externally armable divergence tag, in declaration order.
+        ///
+        /// `GET /control/divergence` publishes this slice so out-of-crate
+        /// harnesses can prove their scenario coverage is complete instead of
+        /// hand-copying the enum.
+        pub const DIVERGENCE_KINDS: &[&str] = &[$(stringify!($variant)),+];
+
+        const _: fn(&Divergence) = |divergence| match divergence {
+            $(Divergence::$variant { .. } => ()),+
+        };
+    };
+}
+
+divergence_kinds!(
+    PartialFillNext,
+    RejectNextSubmit,
+    RejectNextCancel,
+    DelayAcks,
+    CommandLatency,
+    DuplicateNextFill,
+    DropNextAccountUpdate,
+    GoDark,
+    StallData,
+    FeeSurcharge,
+    CancelOpenOrderSilently,
+    FaultTape,
+);

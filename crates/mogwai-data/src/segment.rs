@@ -986,6 +986,54 @@ mod tests {
         );
     }
 
+    /// The claim `step` is built on, pinned: skipping emission below the seek
+    /// threshold leaves byte-identical state behind, so the river read after a
+    /// seek is the river a plain read would have reached. Two identically
+    /// seeded sources over a sampling, seam-gapped, gap-returning library - the
+    /// configuration with the most state a skipped tick could fail to carry -
+    /// with one walked tick by tick and one seeking mid-stream; every field of
+    /// every subsequent event must agree, not just the timestamps.
+    #[test]
+    fn a_seek_and_a_plain_read_produce_the_same_river_after_the_threshold() {
+        let build = || {
+            let mut config = SegmentCompose::new("MNQ", 11);
+            config.seam_gap_ns = 3_000_000;
+            config.start_price = 20_000.0;
+            SegmentSource::new(
+                library(vec![
+                    segment("d1", Some(1_000_000), &[0, 500_000, -200_000]),
+                    segment("d2", Some(-2_000_000), &[0, 300_000]),
+                ]),
+                config,
+            )
+            .expect("a valid library")
+        };
+        let mut walked = build();
+        let mut target = 0;
+        for _ in 0..500 {
+            target = walked.next_tick().expect("endless").ts_event();
+        }
+        let mut sought = build();
+        let head = sought
+            .seek_to(target)
+            .expect("an instant the plain walk reached is reachable");
+        assert_eq!(
+            head.ts_event(),
+            target,
+            "the seek must land on the same instant the plain walk reached"
+        );
+        // Debug text rather than `==`: `TickEvent` derives no `PartialEq`, and
+        // the format spells out every field, so agreement here is agreement in
+        // full - price, size, side and timestamp alike.
+        for i in 0..200 {
+            assert_eq!(
+                format!("{:?}", sought.next_tick()),
+                format!("{:?}", walked.next_tick()),
+                "tick {i} after the threshold diverged between the seek and the plain read"
+            );
+        }
+    }
+
     /// The one thing that genuinely puts a forward instant out of reach: a
     /// library with no time in it. Every `dt_ns` is zero and the seam gap is
     /// zero, so the composed clock is frozen at its origin and no amount of
