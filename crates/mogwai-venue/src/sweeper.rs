@@ -1546,11 +1546,7 @@ mod tests {
         engine.process_with_market(
             Command::SubmitOrder(order),
             1,
-            Some(MarketReading {
-                last_px: Decimal::from(21_000),
-                ts_ns: 1,
-                band_ticks: 0,
-            }),
+            Some(MarketReading::flat(Decimal::from(21_000), 1, 0)),
         );
         engine
     }
@@ -1588,7 +1584,7 @@ mod tests {
                 basis: Default::default(),
             },
         );
-        engine.process(
+        engine.process_with_market(
             Command::SubmitOrder(SubmitOrder {
                 client_order_id: "OPEN-PERP".into(),
                 symbol: "BTCUSDT.P".into(),
@@ -1607,6 +1603,7 @@ mod tests {
                 link: None,
             }),
             1,
+            Some(MarketReading::flat(Decimal::from(50_000), 1, 0)),
         );
         engine
     }
@@ -2124,10 +2121,7 @@ mod tests {
             client_order_id: scan.client_order_id,
             from_ns: scan.from_ns,
             revision: scan.revision,
-            hit: Some(Hit {
-                ts_ns: 4,
-                px: Decimal::from(21_100),
-            }),
+            hit: Some(Hit::flat(4, Decimal::from(21_100))),
             scanned_to_ns: 4,
         };
         let (events, _) = engine.apply_scans(&[reopened], 4);

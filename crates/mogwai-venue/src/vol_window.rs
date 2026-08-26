@@ -53,7 +53,7 @@
 
 use std::{collections::VecDeque, sync::Mutex};
 
-use mogwai_data::VolReading;
+use mogwai_data::{BookState, VolReading};
 use rust_decimal::Decimal;
 
 /// Prints retained. At the raw fill cadence a 300 s window is ~15,000 prints,
@@ -71,9 +71,16 @@ struct WindowTrade {
     cum_events: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WindowQuote {
+    book: BookState,
+    cum_events: u64,
+}
+
 #[derive(Debug)]
 struct Inner {
     trades: VecDeque<WindowTrade>,
+    quotes: VecDeque<WindowQuote>,
     /// Every instant at or before this is fully folded in: set to `ts - 1` on
     /// each pull (the walk's proof rule - the pulled event proves everything
     /// strictly before it) and to the final instant on `close`.
@@ -108,6 +115,7 @@ impl VolWindow {
         Self {
             inner: Mutex::new(Inner {
                 trades: VecDeque::new(),
+                quotes: VecDeque::new(),
                 frontier_ns: origin_ns,
                 covered_from_ns: origin_ns,
                 events_seen: 0,
@@ -120,7 +128,7 @@ impl VolWindow {
     /// Fold one pulled event in. Called by the tape thread for every tick, at
     /// pull time; `px` carries the price when the event is a trade and `None`
     /// for a quote, which still advances the frontier and the event count.
-    pub(crate) fn fold(&self, ts_ns: u64, px: Option<Decimal>) {
+    pub(crate) fn fold(&self, ts_ns: u64, px: Option<Decimal>, book: Option<BookState>) {
         let mut inner = self.locked();
         inner.events_seen += 1;
         inner.frontier_ns = inner.frontier_ns.max(ts_ns.saturating_sub(1));
@@ -135,6 +143,15 @@ impl VolWindow {
             while inner.trades.len() > MAX_TRADES {
                 let evicted = inner.trades.pop_front().expect("len checked above");
                 inner.covered_from_ns = inner.covered_from_ns.max(evicted.ts_ns);
+                inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
+            }
+        }
+        if let Some(book) = book {
+            let cum_events = inner.events_seen;
+            inner.quotes.push_back(WindowQuote { book, cum_events });
+            while inner.quotes.len() > MAX_TRADES {
+                let evicted = inner.quotes.pop_front().expect("len checked above");
+                inner.covered_from_ns = inner.covered_from_ns.max(evicted.book.ts_ns);
                 inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
             }
         }
@@ -180,6 +197,43 @@ impl VolWindow {
         Some(mogwai_data::vol_reading_from_trades(&window))
     }
 
+    pub(crate) fn book_at(&self, ts_ns: u64, budget: usize) -> Option<Option<BookState>> {
+        let inner = self.locked();
+        if ts_ns > inner.frontier_ns
+            || ts_ns < inner.covered_from_ns
+            || inner.events_seen.saturating_sub(inner.covered_cum) > budget as u64
+        {
+            return None;
+        }
+        let hi = inner
+            .quotes
+            .partition_point(|quote| quote.book.ts_ns <= ts_ns);
+        let index = hi.checked_sub(1)?;
+        Some(inner.quotes.get(index).map(|quote| quote.book))
+    }
+
+    /// The last print at or before `ts_ns`, or `None` where this window is not
+    /// entitled to answer.
+    ///
+    /// The same coverage refusal [`VolWindow::read`] and [`VolWindow::book_at`]
+    /// apply, and for the same reason rather than for symmetry. Past the fold
+    /// frontier the window has not seen the instant yet, so the newest print it
+    /// holds is from before it and would be served as though it were the last
+    /// one - which is not a look-ahead but is a stale answer presented as a
+    /// current one. Before `covered_from_ns` the eviction has thrown away the
+    /// prints that would have been the answer, so the oldest survivor is served
+    /// instead of the print that really preceded `ts_ns`. Both are silently
+    /// wrong rather than absent, which is the shape this window refuses.
+    pub(crate) fn last_trade_at(&self, ts_ns: u64) -> Option<Decimal> {
+        let inner = self.locked();
+        if ts_ns > inner.frontier_ns || ts_ns < inner.covered_from_ns {
+            return None;
+        }
+        let hi = inner.trades.partition_point(|trade| trade.ts_ns <= ts_ns);
+        hi.checked_sub(1)
+            .and_then(|index| inner.trades.get(index).map(|trade| trade.px))
+    }
+
     fn locked(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -216,8 +270,18 @@ mod tests {
     fn fold_all(window: &VolWindow, ticks: &[TickEvent]) {
         for tick in ticks {
             match tick {
-                TickEvent::Trade(t) => window.fold(t.ts_event, Some(t.price)),
-                TickEvent::Quote(q) => window.fold(q.ts_event, None),
+                TickEvent::Trade(t) => window.fold(t.ts_event, Some(t.price), None),
+                TickEvent::Quote(q) => window.fold(
+                    q.ts_event,
+                    None,
+                    Some(BookState {
+                        bid_px: q.bid_px,
+                        ask_px: q.ask_px,
+                        bid_sz: q.bid_sz,
+                        ask_sz: q.ask_sz,
+                        ts_ns: q.ts_event,
+                    }),
+                ),
             }
         }
     }
@@ -304,7 +368,7 @@ mod tests {
         let window = VolWindow::starting_at(0);
         let count = MAX_TRADES as u64 + 100;
         for i in 1..=count {
-            window.fold(i, Some(Decimal::from(100)));
+            window.fold(i, Some(Decimal::from(100)), None);
         }
         // The first 100 prints are gone, so the boundary sits at print 100 and
         // a span opening before it is refused while one opening at it reads.

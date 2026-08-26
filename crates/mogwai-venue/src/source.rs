@@ -380,6 +380,11 @@ impl RiverKey {
         scalars.quoted_width.ticks().get().hash(&mut digest);
         scalars.top_sizes.bid.hash(&mut digest);
         scalars.top_sizes.ask.hash(&mut digest);
+        // `depth_levels` and `depth_growth` are deliberately absent. This
+        // digest identifies a river - the bytes a tape produces - and the
+        // ladder is derived at read time from the published top of book, so
+        // moving either knob moves no tape byte. Hashing them would split the
+        // river cache on a parameter the river does not depend on.
         match scalars.arrival {
             None => 0_u8.hash(&mut digest),
             Some(mogwai_data::ArrivalConfig::EventMarkov {

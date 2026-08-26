@@ -44,8 +44,7 @@ pub(crate) const SWEEP_DRAIN_BUDGET: usize = 13_110_000_000;
 /// old 5,000,000-budget warning point exactly.
 const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 
-/// One-entry memo of the acceptance-time market reading, keyed on the sweep
-/// interval bucket rather than on the exact command instant.
+/// One-entry memo of the volatility-band half of an acceptance-time reading.
 ///
 /// Why it exists: `read_market` walks `VOL_WINDOW_NS` (300 s) of tape, which at
 /// the raw-fill cadence is ~15,000 prints instead of the ~32 the print-layer
@@ -62,19 +61,11 @@ const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 /// coverage, and pays the tape walk only as the fallback (a cold boat's first
 /// `VOL_WINDOW_NS`, a bucket the pacing has not proven, `speed = 0.0`).
 ///
-/// What it costs, stated plainly because it is a behaviour change and not only
-/// an optimization: the reading a submit is decided against is the reading at
-/// the start of its sweep-interval bucket, so it is stale by up to
-/// `fill_sweep_interval_ms` (100 ms by default, ~5 raw fills). The venue still
-/// never fills a market order on the favourable side of the market it read - the
-/// band is adverse - but that is now a statement about a reading no observer can
-/// name: the reading instant is whenever the submit reached the handler, and
-/// nothing on the wire carries it. The end-to-end gates
-/// (`serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
-/// and `scripts/smoke.py`) consequently assert the bracketed form - a buy fills
-/// at or above the lowest print in a window that must contain the reading - and
-/// the exact per-fill statement is recoverable only by putting the reading
-/// instant on `OrderFilled` or by dropping this bucketing.
+/// Only the queue-position band is bucketed. Each returned reading composes it
+/// with the last quote at or before the exact requested `ts`, served from the
+/// boat's retained quote series where coverage is proven and from a tape walk
+/// otherwise. A repeated exact instant is memoized too. Marketability and book
+/// crossing therefore never consult the bucket's stale touch.
 ///
 /// One boat owns one memo for its river. The bucket is a function of that
 /// boat's clock, and the walk it saves is a walk of that river only. The lock
@@ -103,7 +94,9 @@ struct CachedMarketReading {
     bucket_ns: u64,
     mult_bits: u64,
     max_ticks: u32,
-    reading: Option<MarketReading>,
+    band_ticks: u32,
+    exact_ts: Option<u64>,
+    exact_reading: Option<MarketReading>,
 }
 
 impl MarketReadingCache {
@@ -138,40 +131,95 @@ impl MarketReadingCache {
             .entry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The exact-instant memo is keyed on the band's parameters as well as
+        // on `ts`, not on `ts` alone: the reading it holds carries a band
+        // computed under one `mult` and `max_ticks`, and serving it back after
+        // either moved would answer the new configuration with the old band.
         if let Some(cached) = entry.as_ref()
+            && cached.exact_ts == Some(ts)
             && cached.bucket_ns == bucket_ns
             && cached.mult_bits == mult_bits
             && cached.max_ticks == max_ticks
         {
-            return cached.reading;
+            return cached.exact_reading;
         }
-        let resident = vol.and_then(|window| {
-            // This must stay the same budget `read_market` passes to the tape
-            // walk. The window may answer only where that walk would answer.
-            window.read(
-                bucket_ns.saturating_sub(VOL_WINDOW_NS),
+        let cached_band = if let Some(cached) = entry.as_ref()
+            && cached.bucket_ns == bucket_ns
+            && cached.mult_bits == mult_bits
+            && cached.max_ticks == max_ticks
+        {
+            cached.band_ticks
+        } else {
+            let resident_band = vol.and_then(|window| {
+                // This must stay the same budget `read_market` passes to the tape
+                // walk. The window may answer only where that walk would answer.
+                window.read(
+                    bucket_ns.saturating_sub(VOL_WINDOW_NS),
+                    bucket_ns,
+                    SWEEP_DRAIN_BUDGET,
+                )
+            });
+            let band_ticks = match resident_band {
+                Some(answer) => answer
+                    .and_then(|vol| band_ticks(&self.river, rivers, &vol, mult, max_ticks))
+                    .unwrap_or(0),
+                None => {
+                    #[cfg(test)]
+                    self.walks
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    read_band(&self.river, bucket_ns, rivers, mult, max_ticks).unwrap_or(0)
+                }
+            };
+            *entry = Some(CachedMarketReading {
                 bucket_ns,
-                SWEEP_DRAIN_BUDGET,
-            )
-        });
-        let reading = match resident {
-            Some(answer) => {
-                answer.and_then(|vol| band_reading(&self.river, rivers, &vol, mult, max_ticks))
-            }
-            None => {
-                #[cfg(test)]
-                self.walks
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                read_market(&self.river, bucket_ns, rivers, mult, max_ticks)
-            }
+                mult_bits,
+                max_ticks,
+                band_ticks,
+                exact_ts: None,
+                exact_reading: None,
+            });
+            band_ticks
         };
-        *entry = Some(CachedMarketReading {
-            bucket_ns,
-            mult_bits,
-            max_ticks,
-            reading,
-        });
-        reading
+        drop(entry);
+        let book = match vol.and_then(|window| window.book_at(ts, SWEEP_DRAIN_BUDGET)) {
+            Some(book) => book?,
+            None => read_book(&self.river, ts, rivers)?,
+        };
+        let last_px = vol
+            .and_then(|window| window.last_trade_at(ts))
+            .or_else(|| read_last(&self.river, ts, rivers))?;
+        let profile = rivers.resolve_profile(self.river.symbol()).ok()?;
+        let composed = MarketReading {
+            bid_px: book.bid_px,
+            ask_px: book.ask_px,
+            bid_sz: book.bid_sz,
+            ask_sz: book.ask_sz,
+            ts_ns: book.ts_ns,
+            band_ticks: cached_band,
+            last_px,
+            depth: mogwai_engine::DepthLadder {
+                levels: profile.scalars.depth_levels.levels(),
+                growth: profile.scalars.depth_growth.growth(),
+            },
+        };
+        let mut entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only onto the entry this reading's band actually came from. Another
+        // thread may have replaced it against a different bucket or a different
+        // multiplier while the book read ran outside the lock, and stamping the
+        // exact memo onto that one would pair this instant with a band it was
+        // not composed with.
+        if let Some(cached) = entry.as_mut()
+            && cached.bucket_ns == bucket_ns
+            && cached.mult_bits == mult_bits
+            && cached.max_ticks == max_ticks
+        {
+            cached.exact_ts = Some(ts);
+            cached.exact_reading = Some(composed);
+        }
+        Some(composed)
     }
 
     /// Walks actually performed. The memo's hit/miss split is invisible in the
@@ -336,7 +384,21 @@ fn scan_triggers_with_budget(
             from_ns: scan.from_ns,
         })
         .collect();
-    let walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, budget);
+    let mut walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, budget);
+    // The walk read the river; only this side of the seam can resolve the
+    // instrument. Stamping the ladder here is what turns the walk's unresolved
+    // books into ones the engine may cross, and it is the same resolution the
+    // arrival path's `MarketReading` carries, so the two paths cannot disagree
+    // about an instrument's depth.
+    let profile = rivers.resolve_profile(river.symbol()).ok()?;
+    for hit in walk.hits.iter_mut().flatten() {
+        if let Some(book) = hit.book.as_mut() {
+            book.resolve_ladder(
+                profile.scalars.depth_levels.levels(),
+                profile.scalars.depth_growth.growth(),
+            );
+        }
+    }
     if walk.drained > SWEEP_DRAIN_WARN_TICKS {
         tracing::warn!(
             symbol = river.symbol(),
@@ -365,12 +427,20 @@ fn scan_triggers_with_budget(
 /// `horizon_return` carries the time dimension (see `mogwai_data::vol_reading`),
 /// so one `mult` stays meaningful across instruments and cadences. `None`
 /// whenever the reading would be untrue rather than imprecise - a cold
-/// estimator, a truncated walk, a price that will not convert - and the engine's
-/// no-reading path then rests the order untriggerable rather than guessing.
-/// Refusing is the conservative answer: a zero band is the most permissive fill
-/// regime the venue has.
+/// estimator, a truncated walk, or a price that will not convert. A refused
+/// volatility half becomes a zero queue-position band; it never suppresses the
+/// exact book half or changes a taking fill price.
 ///
 /// Synchronous and CPU-bound; callers run it on `spawn_blocking`.
+///
+/// Test-only since the cache stopped calling it. The serving path composes a
+/// bucketed band with a per-instant book read instead, and `read_band` and
+/// `read_book` are the halves it walks; this whole-reading walk survives
+/// because `fill_golden` needs the exact per-order reading at an arbitrary
+/// instant with no boat resident. `cfg(test)` rather than an `allow(dead_code)`
+/// so it cannot quietly become a second answer to "what is the market" on a
+/// shipped path.
+#[cfg(test)]
 pub(crate) fn read_market(
     river: &source::RiverKey,
     ts: u64,
@@ -385,21 +455,80 @@ pub(crate) fn read_market(
         from_ns.saturating_add(1),
         "market reading could not read its river",
     )?;
-    let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
-    band_reading(river, rivers, &reading, mult, max_ticks)
+    let (vol, book) =
+        mogwai_data::market_snapshot_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
+    let profile = rivers.resolve_profile(river.symbol()).ok()?;
+    let last_px = vol
+        .as_ref()
+        .map_or_else(|| read_last(river, ts, rivers), |v| Some(v.last_px))?;
+    let band_ticks = vol
+        .as_ref()
+        .and_then(|reading| band_ticks(river, rivers, reading, mult, max_ticks))
+        .unwrap_or(0);
+    Some(MarketReading {
+        bid_px: book.bid_px,
+        ask_px: book.ask_px,
+        bid_sz: book.bid_sz,
+        ask_sz: book.ask_sz,
+        ts_ns: book.ts_ns,
+        band_ticks,
+        last_px,
+        depth: mogwai_engine::DepthLadder {
+            levels: profile.scalars.depth_levels.levels(),
+            growth: profile.scalars.depth_growth.growth(),
+        },
+    })
+}
+
+fn read_band(
+    river: &source::RiverKey,
+    ts: u64,
+    rivers: &source::Rivers,
+    mult: f64,
+    max_ticks: u32,
+) -> Option<u32> {
+    let from_ns = ts.saturating_sub(VOL_WINDOW_NS);
+    let mut source = history_or_warn(
+        rivers,
+        river,
+        from_ns.saturating_add(1),
+        "band reading could not read its river",
+    )?;
+    let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET);
+    Some(
+        reading
+            .as_ref()
+            .and_then(|value| band_ticks(river, rivers, value, mult, max_ticks))
+            .unwrap_or(0),
+    )
+}
+
+fn read_book(
+    river: &source::RiverKey,
+    ts: u64,
+    rivers: &source::Rivers,
+) -> Option<mogwai_data::BookState> {
+    let start = ts.saturating_sub(VOL_WINDOW_NS).saturating_add(1);
+    let mut source = history_or_warn(
+        rivers,
+        river,
+        start,
+        "book reading could not read its river",
+    )?;
+    mogwai_data::book_reading(source.as_mut(), ts, SWEEP_DRAIN_BUDGET)
 }
 
 /// One volatility reading converted into the band the engine consumes. The one
 /// implementation of that conversion, whether the reading came from the tape
 /// walk above or from a boat's resident window - splitting it out is what keeps
 /// the two sources indistinguishable past this point.
-fn band_reading(
+fn band_ticks(
     river: &source::RiverKey,
     rivers: &source::Rivers,
     reading: &mogwai_data::VolReading,
     mult: f64,
     max_ticks: u32,
-) -> Option<MarketReading> {
+) -> Option<u32> {
     // Resolved, not configured-only: this reading is taken for whatever symbol
     // a boat is serving, and after piece 13 that need not be one an operator
     // named. A configured-only lookup would silently drop the reading.
@@ -416,11 +545,7 @@ fn band_reading(
     } else {
         raw.floor().min(f64::from(max_ticks)) as u32
     };
-    Some(MarketReading {
-        last_px: reading.last_px,
-        ts_ns: reading.last_ts_ns,
-        band_ticks: ticks,
-    })
+    Some(ticks)
 }
 
 /// The last print at or before `ts`, with no volatility reading attached.
@@ -768,11 +893,21 @@ mod tests {
         let mut source = tape(from + 1);
         loop {
             let tick = source.next_tick().expect("infinite generated tape");
-            let (ts, px) = match tick {
-                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price)),
-                TickEvent::Quote(quote) => (quote.ts_event, None),
+            let (ts, px, book) = match tick {
+                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price), None),
+                TickEvent::Quote(quote) => (
+                    quote.ts_event,
+                    None,
+                    Some(mogwai_data::BookState {
+                        bid_px: quote.bid_px,
+                        ask_px: quote.ask_px,
+                        bid_sz: quote.bid_sz,
+                        ask_sz: quote.ask_sz,
+                        ts_ns: quote.ts_event,
+                    }),
+                ),
             };
-            window.fold(ts, px);
+            window.fold(ts, px, book);
             if ts > bucket {
                 break;
             }
@@ -1088,11 +1223,21 @@ mod tests {
         let mut feed = tape(window_from + 1);
         let horizon = base_ts + 100 * INTERVAL_MS * 1_000_000;
         loop {
-            let (ts, px) = match feed.next_tick().expect("infinite generated tape") {
-                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price)),
-                TickEvent::Quote(quote) => (quote.ts_event, None),
+            let (ts, px, book) = match feed.next_tick().expect("infinite generated tape") {
+                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price), None),
+                TickEvent::Quote(quote) => (
+                    quote.ts_event,
+                    None,
+                    Some(mogwai_data::BookState {
+                        bid_px: quote.bid_px,
+                        ask_px: quote.ask_px,
+                        bid_sz: quote.bid_sz,
+                        ask_sz: quote.ask_sz,
+                        ts_ns: quote.ts_event,
+                    }),
+                ),
             };
-            window.fold(ts, px);
+            window.fold(ts, px, book);
             if ts > horizon {
                 break;
             }

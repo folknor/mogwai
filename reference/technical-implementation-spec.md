@@ -4,6 +4,13 @@ The single document from which an open TODO item is built to completion without
 re-deriving its design. Two implementers working from it independently produce
 the same artifact.
 
+Before writing a spec, read `reference/north-star.md` and
+`reference/glossary.md`. Both state the end state rather than the present:
+where either and the code disagree, the code owes the change. A spec written
+without them optimizes toward the tree as it is, which is exactly the
+re-derivation this document exists to prevent - and its vocabulary drifts from
+the one the project has already settled.
+
 ## What it is
 
 1. **Every brick.** It lays each step on the road from the current code to the

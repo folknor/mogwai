@@ -2004,6 +2004,26 @@ fn size_grid_separates_unit_mismatch_from_thin_truthful_sizes() {
 }
 
 #[test]
+fn depth_ladder_validates_bounds_and_sub_grid_growth_degrades_flat() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.latent_size_median = Decimal::ONE;
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
+
+    scalars.depth_levels = DepthLevels::uncalibrated(0);
+    assert_eq!(scalars.validate(), Err(ScalarError::field("depth_levels")));
+    scalars.depth_levels = DepthLevels::uncalibrated(8);
+    scalars.depth_growth = DepthGrowth::uncalibrated(Decimal::new(9, 1));
+    assert_eq!(scalars.validate(), Err(ScalarError::field("depth_growth")));
+
+    scalars.depth_growth = DepthGrowth::uncalibrated(Decimal::new(11, 1));
+    assert!(
+        scalars.validate_size_grid(Decimal::ONE).is_ok(),
+        "repeated flooring keeps every 1.1-times level at one whole lot"
+    );
+}
+
+#[test]
 fn tick_traversal_uses_grid_return_over_unconditional_sigma() {
     let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);

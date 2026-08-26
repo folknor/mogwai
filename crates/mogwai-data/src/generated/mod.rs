@@ -59,7 +59,7 @@ pub use fingerprint::{
     ScalarError, SessionProfile, SessionProfileError, TickTraversal,
 };
 pub use quote::{
-    CalibrationProvenance, PublishedBook, QuotedWidth, TopOfBookSizes, TradeDisplacement,
-    book_mid_ticks, place_book,
+    CalibrationProvenance, DepthGrowth, DepthLevels, PublishedBook, QuotedWidth, TopOfBookSizes,
+    TradeDisplacement, book_mid_ticks, place_book,
 };
 pub use source::{GeneratedSource, ParentSummary, SizeGrid, VolTrace};

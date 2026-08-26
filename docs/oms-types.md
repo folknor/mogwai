@@ -76,16 +76,11 @@ type exists, not about which time in force it may carry, so the combination is
 admitted rather than refused.
 
 A `MarketToLimit` takes the market and keeps the limit, which is both halves of
-its name. Its first act is priced off the tape exactly as a market order's is -
-the last print, slipped adversely by the fill band - except that its own stated
-price bounds what it pays: a buy never fills above its limit, a sell never below
-it. If the touch is short of the limit - a buy limited at 100 against a print of
-101 - nothing is taken and the whole quantity rests, because the consumer asked not
-to trade through that price. Marketability is judged against the band-drawn
-trigger rather than the stated price, exactly as a `Limit`'s is, so a touch
-inside the limit but outside that draw also rests; the two types answer the
-question the same way on purpose, and neither promises the stated price alone
-decides it. Whatever is not taken rests as an
+its name. Its first act walks the opposing quoted ladder exactly as a market
+order does, except that its own stated price bounds the walk: a buy never fills
+above its limit, a sell never below it. If the opposing touch is beyond the
+limit, nothing is taken and the whole quantity rests. Marketability is judged
+against that touch, without a band draw. Whatever is not taken rests as an
 ordinary limit at the stated price and is swept, filled and expired like one,
 subject to the time in force above.
 

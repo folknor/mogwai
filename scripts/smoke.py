@@ -555,53 +555,64 @@ def mode_default(venue: Venue) -> str:
         assert accepted, "the order socket answered nothing"
         assert accepted["type"] != "OrderRejected", accepted
 
-        # Market slippage, observed end to end: the fill price against the tape
-        # the venue itself read when it decided the order. Adverse or equal,
-        # never better - equality is admitted because u = 0 is a legitimate
-        # draw, and this is the only gate in the suite that watches a fill PRICE.
+        # The book half of a market reading is taken at the submit's own
+        # instant, not at the start of a sweep-interval bucket, so the fill is
+        # checkable against /quotes at last. Which quote it crossed is still
+        # not checkable: the reading instant is whenever the submit reached the
+        # handler, and nothing on the wire carries it. It lies somewhere between
+        # the last market frame this socket saw before sending and the fill's
+        # own timestamp, and at speed that bracket spans many quotes.
         #
-        # The reading is memoized on the fill-sweep-interval bucket (100 ms by
-        # default - see MarketReadingCache) and is taken when the submit reaches
-        # the handler, not at the fill instant, so the print the venue actually
-        # read cannot be named from outside - only bracketed by the lookback
-        # below. The fill band is adverse, so the surviving statement is
-        # directional: a market buy fills at or above the LOWEST print in that
-        # bracket, a market sell at or below the highest. A fill decided off no
-        # reading at all breaks it; a fill decided off a slightly stale reading
-        # does not.
-        bucket_ns = 100_000_000
-
-        def slippage_is_adverse(client_order_id: str, side: str) -> None:
-            ws.send(order(client_order_id, venue.symbol, side=side))
+        # So the claim is bracketed, not exact: a market buy crosses the ask at
+        # SOME instant in that window, and every ask in it is a candidate, so
+        # the buy must fill at or above the LOWEST ask in the window. That
+        # catches a fill inside the spread by more than the market moved, which
+        # is the defect the crossing path exists to remove; asserting against
+        # the last quote alone reads as exact and is simply flaky, because the
+        # tape moves on between the reading and the fill.
+        #
+        # Four satoshi, which is absurd for a BTCUSDT order and is deliberate:
+        # BTCUSDT has no fitted top_sizes, so its placeholder ladder displays
+        # eight satoshi in total and anything larger partially fills and
+        # cancels for insufficient displayed depth. That would make this a test
+        # of the exhaustion path rather than of the crossing price. The cliff is
+        # filed in notes/todo.md against the calibration brick.
+        def crossing_is_adverse(client_order_id: str, side: str, quantity: str) -> None:
+            ws.send(
+                order(
+                    client_order_id,
+                    venue.symbol,
+                    side=side,
+                    quantity=quantity,
+                )
+            )
             fill = ws.until(
                 lambda frame: frame.get("type") in ("OrderFilled", "OrderRejected")
                 and frame.get("client_order_id") == client_order_id
             )
             assert fill and fill["type"] == "OrderFilled", fill
             ts = int(fill["ts_event"])
-            reading_ts = ts // bucket_ns * bucket_ns
-            tape = venue.http(
-                f"/operator/trades?symbol={venue.symbol}&start={reading_ts - 300_000_000_000}"
-                f"&end={reading_ts}&limit=50000"
+            quotes = venue.http(
+                f"/operator/quotes?symbol={venue.symbol}&start={ts - 60_000_000_000}"
+                f"&end={ts}&limit=50000"
             )
-            assert tape, f"no tape reading at the {side} fill"
-            prices = [float(trade["price"]) for trade in tape]
-            got = float(fill["last_px"])
+            assert quotes, f"no quote at or before the {side} fill"
+            got = Decimal(fill["last_px"])
             if side == "Buy":
-                floor = min(prices)
+                floor = min(Decimal(quote["ask_px"]) for quote in quotes)
                 assert got >= floor, (
-                    f"a market buy filled below every print it could have read: "
+                    f"a market buy filled below every ask it could have crossed: "
                     f"{got} < {floor}"
                 )
             else:
-                ceiling = max(prices)
+                ceiling = max(Decimal(quote["bid_px"]) for quote in quotes)
                 assert got <= ceiling, (
-                    f"a market sell filled above every print it could have read: "
+                    f"a market sell filled above every bid it could have crossed: "
                     f"{got} > {ceiling}"
                 )
 
-        slippage_is_adverse("SMOKE-SLIP-BUY", "Buy")
-        slippage_is_adverse("SMOKE-SLIP-SELL", "Sell")
+        crossing_is_adverse("SMOKE-CROSS-BUY", "Buy", "0.00000004")
+        crossing_is_adverse("SMOKE-CROSS-SELL", "Sell", "0.00000002")
 
         # The one ledger answers for the order the same socket just worked.
         ws.send({"type": "QueryOrders", "request_id": "SMOKE-Q", "open_only": False})
@@ -1046,10 +1057,9 @@ def mode_stop(venue: Venue) -> str:
                 and frame.get("client_order_id") == client_order_id
             )
             assert fill, "a triggered stop did not fill"
-            # The fill is priced off the print that TRIGGERED it, slipped
-            # adversely - down for a sell, up for a buy. Never the stop price
-            # itself, which is the consumer's own number and the lie the fill
-            # band exists to remove.
+            # The fill crosses the book prevailing at the triggering print.
+            # It is adverse or fair to the stop, never the consumer's stop
+            # price manufactured as an execution.
             filled_px = Decimal(fill["last_px"])
             if side == "Sell":
                 assert filled_px <= trigger, (

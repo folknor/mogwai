@@ -39,6 +39,48 @@ and a lint cannot separate an assertion message from a wire payload. Each was
 correct and none was work. Where such a limit is worth recording, it is recorded
 at the site it constrains, not here.
 
+## Priority order across the slates
+
+Ruled by the owner 2026-08-26. Tape research v1 was rejected and v2 has not
+started, so the tree currently holds one or two tapes, neither in a good
+state - and that is irrelevant to the backend: mogwai must work like an
+exchange, and everything below is implementable against the tapes we have.
+The ranking is by how directly a slate serves the north-star claim, and by
+what unblocks what.
+
+1. **The order path** (the section below). Was the largest open correctness
+   item: systematically optimistic fills made a forward test worse than
+   useless because it reported success. Crossing has now landed - a market
+   or marketable-limit order walks the opposing quoted touch and a
+   parametric ladder rather than slipping the last print by a draw. What
+   remains under this heading is the synthetic-book calibration that would
+   make the ladder's constants real, the owner's rendered-chart gate, and
+   the margin-refold profiling question.
+2. **Risk enforcement closure and instrument resolution**: the
+   unvaluable-policed-account entry under Engine, plus the
+   instrument-definition entry under Venue and protocol. The ruling is made,
+   the shape is settled (boarding is the boot moment), and it closes the
+   sharp end of the liquidation promise. Most of the work is definitional:
+   what information mogwai needs to cover all markets and instrument types,
+   traditional and crypto alike, resolved defaults-then-preset-then-user
+   with a loud failure when the merge cannot reconcile. `Balance.locked`
+   rides behind it but still needs its owner ruling first.
+3. **Tests and tooling**: the gate-ceiling work - declared durations,
+   reconnect-ladder spacing as a parameter, and whatever turns
+   `test_threads = 16` red. Force-multiplying rather than product work;
+   interleave it while slate 1 waits on a gate.
+4. **The adapter and consumer surface**: the perpetual funding publisher is
+   the buildable piece, a test pinning the `MarketToLimit` refusal makes that
+   gap loud, `DuplicateNextFill` waits on the next pin. The unsent broadarrow
+   message is pulled out of this ranking entirely: write it immediately, it
+   costs an hour and every week it waits their scenarios run against a wire
+   shape that 422s.
+
+Excluded as tape-gated: the segment-sampler gate, the composed-river
+checkpoint chain behind it, and the whole tape-research-v2 cluster. The
+documentation and CLA items are small or owner-only; the architecture.md
+headings step is filler between slates.
+
 ## The gate that blocks other work
 
 - **Segment-sampler gate: failed 2026-08-18, still failing.** The owner viewed
@@ -103,86 +145,43 @@ at the site it constrains, not here.
 
 ## The order path
 
-One entry, because these are one problem seen from four sides. This is the
-largest open correctness item in the repository.
+Crossing landed 2026-08-26: a market or marketable-limit order now walks the
+opposing quoted touch and a parametric ladder instead of slipping the last
+print by a volatility-scaled draw, per `TAPE_PROTOCOL_VERSION` 27. What
+remains is what the mechanism exposed rather than what it was built to fix.
 
-- **Market orders do not cross a book, and in a quiet market that makes
-  execution better rather than worse.** Established 2026-08-26 by reading the
-  fill path end to end.
+- **The placeholder ladder displays eight size increments, which is a usability
+  cliff on every preset without fitted `top_sizes`.** Depth is `top_sizes`
+  scaled over `depth_levels` levels, and only MNQ has a fitted touch (3
+  contracts, so 24 displayed). Every other instrument falls back to
+  `TopOfBookSizes::uncalibrated(min_size)`, so BTCUSDT displays one satoshi at
+  the touch and eight across the whole placeholder ladder. Any order larger than
+  that partially fills and cancels the remainder for insufficient displayed
+  depth - which is the crossing path working exactly as specified, against a
+  book that is not the instrument's.
 
-  What a real exchange does: a market buy lifts the best offer and, if its size
-  exceeds the top level, walks down the book level by level. Slippage is the
-  arithmetic consequence of depth against order size, not a draw. In a quiet
-  market the spread widens and depth thins, so execution gets *worse*.
+  Not a defect in the mechanism, and deliberately not worked around in it: the
+  fix is the calibration brick, and until it lands the gates that cross a
+  BTCUSDT book (`serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
+  and `scripts/smoke.py`) size their orders to the placeholder and say so at the
+  call site. Recorded here so the next reader meets it as a known state rather
+  than as a venue that refuses to fill anything.
 
-  What mogwai does. `orders.rs`'s market branch fills at `stated_px` plus a band
-  drawn from a trailing volatility reading, and for a price-less market submit
-  `stated_px` is the last print the venue stamped on via `fills::read_last`. When
-  the trailing window carries fewer than `MIN_VOL_SAMPLES` returns, `read_market`
-  refuses, the band is zero, and the order fills at exactly the last print with
-  no slippage at all. `fills.rs` calls a zero band "the most permissive fill
-  regime the venue has".
+- **A forced close crosses a book the venue invents rather than the one it
+  read.** `Engine::mark` is handed marks and nothing else, so the three
+  liquidation sites build their reading with `MarketReading::forced_close`: a
+  one-level book quoted `liquidation_band_ticks` away from the mark on each
+  side. That is adverse or equal to every price the retired uniform draw could
+  have produced, and deterministic, so it is not a fill the venue manufactured
+  in its own favour - but it is not the book at the mark instant either, and
+  every other taking path now crosses the real one.
 
-  Three things are wrong at once, and the third is the serious one:
-
-  - The fill is centred on the last *trade*, never on the offer. The last print
-    may have occurred at the bid, so a market buy gives away the half-spread on
-    every order at every instant, not only quiet ones.
-  - Depth is never consulted. `bid_sz` and `ask_sz` exist and a 1-lot and a
-    500-lot are treated identically.
-  - The sign is inverted. Quiet means fewer samples, a refused reading, a zero
-    band, and therefore a *perfect* fill - where a real quiet market is where
-    execution is worst. And this is not an edge case:
-    `serving.rs`'s own comment records that the fitted BTCUSDT tape falls under
-    `MIN_VOL_SAMPLES` "at a substantial fraction of instants".
-
-  The tape already carries what is needed and the fill path discards it.
-  `QuoteTick` in `messages.rs` has `bid_px`, `ask_px`, `bid_sz` and `ask_sz`, it
-  is published to consumers and it is what `/quotes` answers from. The only two
-  places `fills.rs` touches a quote read it as
-  `TickEvent::Quote(quote) => (quote.ts_event, None)` - take the timestamp,
-  discard the payload. There is no `bid`, `ask` or `spread` anywhere in that
-  file. So the venue quotes a bid and an offer to the strategy and then fills
-  that strategy's market order without looking at either.
-
-  Why it matters more than its size suggests: the north-star says a forward run
-  proves execution robustness and nothing else. Systematically optimistic fills
-  are the one failure that makes a forward test worse than useless, because it
-  reports success.
-
-  Refusing the order is not the escape route. A refused reading is the routine
-  case rather than a fault, so refusing would refuse a substantial fraction of
-  every market order a strategy sends - a venue that declines an order type
-  because its own estimator was quiet.
-
-  The work, roughly in order: fills consult the BBO and cross the spread;
-  slippage comes from walking `bid_sz`/`ask_sz` against order size; the
-  volatility band retires or is demoted to whatever it is genuinely good for.
-  This moves generated execution behaviour, so it owes the realism gates, a
-  rendered chart under the owner's eye, and a tape protocol version bump.
-
-  Three former entries fold in here:
-
-  - **The synthetic top of book is uncalibrated.** Quoted width, top sizes and
-    trade displacement are placeholder constants pending CME TBBO. The layer has
-    existed since tape protocol 7; what is absent is the calibration. This stops
-    being a nice-to-have the moment fills read the book, because the fill price
-    then depends on those constants being real. Blocking, not adjacent.
-  - **Nothing on the wire says whether a submit took a market reading**, which
-    forces `serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path`
-    to key on the venue's `warn` text - not a wire contract, and reworded by
-    anyone touching the engine's fallback path without a test noticing. The
-    proposed fix was an optional field on `OrderFilled` carrying the reading's
-    instant. Do not ship that first: it buys visibility into behaviour that is
-    probably wrong. With a book, "did it take a reading" stops being the
-    question.
-  - **The price-span-per-inferred-match-event measurement.** How wide the fill
-    band should be for a triggered stop has never been computed, and the sweep
-    tail quoted elsewhere (up to 2,213 aggTrade rows in one inferred event on
-    BTC) counts rows rather than distinct prices, so it does not establish how
-    far a marketable order walks. Measuring the right width for a band we intend
-    to retire is work aimed at the wrong target. If the band survives in some
-    reduced role, this measurement comes back.
+  Closing it means giving `mark` a reading per symbol the way the submit path
+  gets one, which is a venue-side plumb rather than an engine change: the
+  sweeper already reads marks per river at the same instant, so the book read
+  would ride along with them. Left open deliberately - the order-path spec
+  scoped itself to the arrival and trigger paths, and this is the one taking
+  path it did not reach.
 
 - **The order path refolds all holds whenever a margin-equity sell is
   involved.** `rest_open`, `take_open` and `refresh_open_hold` each trigger a
@@ -341,6 +340,47 @@ instrument class is not a finding and does not need re-reporting.
   the frozen sentence is a section 17 amendment through review, not an edit.
 
 ## Venue and protocol
+
+- **Instrument definition: the resolution contract, and the default moves to
+  USD cash equity.** Ruled 2026-08-26, and part of priority slate 2.
+
+  A symbol string carries zero information. "MNQ" tells mogwai something only
+  because a preset happens to be registered under that name - happenstance,
+  not a mechanism. `MBT`, `SEKDKK` and `DOGEUSDT.P` will not be presets.
+  Everything
+  that defines an instrument and how the account's ledger resolves against it
+  - class, multiplier, increments, settlement currency, calendar, lot, borrow
+  and funding conventions - comes from exactly three layers: defaults, then
+  any relevant preset, then user-supplied config, merged in that order. If
+  the merged result cannot reconcile, the venue fails loudly. Serve anything
+  still holds: any symbol is served when its shape resolves; a preset is
+  nothing but a named bundle of knobs the user could have set by hand.
+
+  The tree already has the three-layer merge and `profile_from_configured`
+  already refuses an invalid resolved shape, so the buildable work is an
+  audit that every unreconcilable merge dies loudly, plus the boarding-time
+  valuation-reachability refusal (the Engine entry) - undefined-shape and
+  unreachable-policy-currency are two named refusal reasons at the same door.
+
+  The default preset moves from BTCUSDT spot/USDT to standard USD cash
+  equity - trading NVDA or AAPL. The coupling documented at
+  `DEFAULT_PRESET`'s declaration binds: the default preset's settlement
+  currency and the default account policy's funding currency are a joint
+  decision, because if they disagree the wholly-unnamed request fails its
+  own funding check, the one path that must never fail. So the change
+  carries an equity-class default preset with currency USD and standard
+  stock knobs, and moves the default policy's opening balance from USDT to
+  USD, in the same landing.
+
+  Two sub-decisions to take deliberately rather than inherit:
+  - The default preset also picks the tape fit, and BTCUSDT is the
+    best-fitted tape in the tree, so the change inverts "the default happens
+    to be the fitted one". Fine under the standing ruling that tape fidelity
+    gates nothing; worth stating so it is chosen, not stumbled into.
+  - Standard stock defaults imply cash-equity hours, so an unmatched symbol's
+    market would be genuinely shut most of the day, where the current default
+    deliberately makes no calendar claim. Whether the equity default keeps
+    24/7 water or takes real hours is open.
 
 - **`RunComplete` reports slightly less than the declared duration, and nothing
   on the wire lets a consumer tell.** The deadline is judged on the venue clock

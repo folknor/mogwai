@@ -84,10 +84,22 @@ impl Tape {
                 };
                 match &tick {
                     mogwai_data::TickEvent::Trade(trade) => {
-                        spawn.vol_window.fold(trade.ts_event, Some(trade.price));
+                        spawn
+                            .vol_window
+                            .fold(trade.ts_event, Some(trade.price), None);
                     }
                     mogwai_data::TickEvent::Quote(quote) => {
-                        spawn.vol_window.fold(quote.ts_event, None);
+                        spawn.vol_window.fold(
+                            quote.ts_event,
+                            None,
+                            Some(mogwai_data::BookState {
+                                bid_px: quote.bid_px,
+                                ask_px: quote.ask_px,
+                                bid_sz: quote.bid_sz,
+                                ask_sz: quote.ask_sz,
+                                ts_ns: quote.ts_event,
+                            }),
+                        );
                     }
                 }
                 pace(

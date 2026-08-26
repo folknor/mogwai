@@ -71,6 +71,8 @@ size_log_sigma = 0.9333333333333333
 vol_scalar = 0.000013570223097752063
 quoted_width = { ticks = 2, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
 top_sizes = { bid = "3", ask = "3", provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
+depth_levels = { levels = 8, provenance = { kind = "uncalibrated" } }
+depth_growth = { growth = "1", provenance = { kind = "uncalibrated" } }
 trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
 # Intraday shape, refitted at protocol 11 from the July 2026 MNQ TBBO
 # month in the units the runtime actually applies (the protocol-8 NQ-bar
@@ -204,6 +206,10 @@ open_windows = [
 "generator.trade_displacement_ticks.ticks" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
 "generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
 "generator.trade_displacement_ticks.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
+"generator.depth_levels.levels" = { kind = "declared", rationale = "placeholder ladder depth pending mbp-1 calibration" }
+"generator.depth_levels.provenance.kind" = { kind = "declared", rationale = "the ladder depth is explicitly uncalibrated" }
+"generator.depth_growth.growth" = { kind = "declared", rationale = "flat placeholder ladder pending mbp-1 calibration" }
+"generator.depth_growth.provenance.kind" = { kind = "declared", rationale = "the ladder growth is explicitly uncalibrated" }
 "session.intensity_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; conditional hour parameter from inferred-parent counts under the frozen dow_weight", window = "2026-07 full month, 22 usable sessions" }
 "session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected mechanically by the preregistered fallback after the era-stability check failed at 22.83 percent divergent exposure - the era is a fallback choice, not a passed one" }
 "session.vol_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; per-parent trimmed mean absolute quote-mid return, median across sessions", window = "2026-07 full month, 22 usable sessions" }

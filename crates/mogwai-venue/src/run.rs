@@ -3419,7 +3419,11 @@ pub(crate) mod tests {
                 link: None,
             }),
             clock.sim_epoch_ns,
-            None,
+            Some(mogwai_engine::MarketReading::flat(
+                Decimal::from(100),
+                clock.sim_epoch_ns,
+                0,
+            )),
             clock,
         );
         events

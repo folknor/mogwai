@@ -728,6 +728,13 @@ example = "envelope_evaluation_bench"
 package = "mogwai-protocol"
 example = "tag_decode_probe"
 
+# Submit, amend and cancel against the aggregate hold fold for a margin-equity
+# account. Argv is `[resting orders] [rounds]`; the canonical decision cell is
+# 50 resting orders.
+[mogwai.targets.order_path_refold]
+package = "mogwai-engine"
+example = "order_path_refold_bench"
+
 # Not registered: `fill_walk_bench`, also an example target in `mogwai-data`.
 # It is a criterion harness that parses `--bench` itself - that is what lets it
 # live in an example target at all - so it would collide with the mode flag.

@@ -51,18 +51,18 @@ pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, AbsReturnAcf, AnchorRange, ArrivalConfig,
     ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk,
-    CalendarError, CalibrationProvenance, CheckpointIndex, EmpiricalRanges, Fingerprint,
-    GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets, LogOuParams,
-    MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax, ParentDraw, ParentSummary,
-    PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError,
-    SelfExcitingParams, SessionCalendar, SessionProfile, SessionProfileError, ShotNoiseParams,
-    SizeGrid, SweepShape, TickTraversal, TopOfBookSizes, TradeDisplacement, VolTrace,
-    WallMmppParams, WeeklyWindow, book_mid_ticks, place_book,
+    CalendarError, CalibrationProvenance, CheckpointIndex, DepthGrowth, DepthLevels,
+    EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars,
+    GoldenTargets, LogOuParams, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax,
+    ParentDraw, ParentSummary, PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers,
+    ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar, SessionProfile,
+    SessionProfileError, ShotNoiseParams, SizeGrid, SweepShape, TickTraversal, TopOfBookSizes,
+    TradeDisplacement, VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
-    FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk, scan_triggers,
-    vol_reading, vol_reading_from_trades,
+    BookState, FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk,
+    book_reading, market_snapshot_reading, scan_triggers, vol_reading, vol_reading_from_trades,
 };
 
 /// Identity of the tape generation process, not of any one path. Two runs are
@@ -165,7 +165,7 @@ pub use trigger::{
 /// rather than owed - it costs one integer, no tape identity has ever been
 /// depended on, and a spent identity is cheaper than an argument about whether
 /// the next reader will agree the placement analysis was exhaustive.
-pub const TAPE_PROTOCOL_VERSION: u32 = 26;
+pub const TAPE_PROTOCOL_VERSION: u32 = 27;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

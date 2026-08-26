@@ -110,12 +110,101 @@ pub fn touches_toward(side: Side, trigger: Decimal, traded: Decimal) -> bool {
     }
 }
 
-/// The print that satisfied a scan: both its instant and its price, because a
-/// triggered stop-market prices its fill off exactly this print.
+/// The book a triggered taking order crosses: the last quote at or before the
+/// print that satisfied the scan, plus the ladder shape the sweep resolved from
+/// that instrument's preset.
+///
+/// The ladder rides here rather than being resolved by the engine because the
+/// engine holds no preset table. It is the same resolution the arrival path's
+/// `MarketReading` carries, taken in the same pass of the same river, so the
+/// two paths cannot disagree about an instrument's depth.
+///
+/// No `Default`, and not flattened into [`Hit`]: a book is either read or it is
+/// not, and a zeroed one is a ladder with no levels quoted at a price of zero.
+/// An earlier draft did flatten it, defaulted the ladder to zero levels, and
+/// then had to recognise that zero as "no book" in the engine - so every
+/// producer that forgot to populate the fields shipped a legitimate-looking
+/// invalid ladder instead of a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitBook {
+    pub bid_px: Decimal,
+    pub ask_px: Decimal,
+    pub bid_sz: Decimal,
+    pub ask_sz: Decimal,
+    pub depth_levels: u16,
+    pub depth_growth: Decimal,
+}
+
+/// The print that satisfied a scan, and the book it is crossed against.
+///
+/// `book` is `None` when the walk reached the print without having seen a quote
+/// at or before it - an instant before the river's first quote, or a walk whose
+/// budget opened past one. The order is then cancelled with a named reason
+/// rather than filled at any price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     pub ts_ns: u64,
     pub px: Decimal,
+    pub book: Option<HitBook>,
+}
+
+impl HitBook {
+    /// The book a tape walk read, before anything resolved the instrument's
+    /// ladder onto it. The walk knows the river; it does not know the preset.
+    ///
+    /// The unresolved ladder is deliberately not a usable one - zero levels
+    /// quoted, zero growth - so a consumer that reaches the crossing path
+    /// without [`HitBook::resolve_ladder`] having run refuses instead of
+    /// walking a ladder nobody configured.
+    #[must_use]
+    pub fn unresolved(bid_px: Decimal, ask_px: Decimal, bid_sz: Decimal, ask_sz: Decimal) -> Self {
+        Self {
+            bid_px,
+            ask_px,
+            bid_sz,
+            ask_sz,
+            depth_levels: 0,
+            depth_growth: Decimal::ZERO,
+        }
+    }
+
+    /// Stamp the ladder the venue resolved from this instrument's preset onto a
+    /// book the walk read. Called once, by the venue, on the way out of the
+    /// sweep.
+    pub fn resolve_ladder(&mut self, levels: u16, growth: Decimal) {
+        self.depth_levels = levels;
+        self.depth_growth = growth;
+    }
+}
+
+impl Hit {
+    /// A hit whose book is quoted flat at the print on both sides, one level
+    /// deep, with more size than any order a caller of this constructor states.
+    ///
+    /// Crossing it walks that single level and reports the print, so a caller
+    /// with no book of its own gets the print by the same arithmetic every
+    /// other fill goes through rather than by a special case in the crossing
+    /// path. The engine's conditional-order suites predate the quoted ladder
+    /// and assert against the triggering print; they drive this.
+    #[must_use]
+    pub fn flat(ts_ns: u64, px: Decimal) -> Self {
+        // Large, and deliberately not `Decimal::MAX`: the crossing path
+        // multiplies a level's size by its price, and a saturated size would
+        // overflow that product and truncate the walk to nothing.
+        let depth = Decimal::from(1_000_000_000_i64);
+        Self {
+            ts_ns,
+            px,
+            book: Some(HitBook {
+                bid_px: px,
+                ask_px: px,
+                bid_sz: depth,
+                ask_sz: depth,
+                depth_levels: 1,
+                depth_growth: Decimal::ONE,
+            }),
+        }
+    }
 }
 
 /// A venue account identity. Kept deliberately small and log-safe because it
@@ -478,7 +567,7 @@ pub enum OrderType {
     /// `a_market_to_limit_remainder_is_governed_by_its_time_in_force`.
     ///
     /// The engine implements both halves of that model: the executing part
-    /// takes the market's drawn price, bounded by the stated limit rather than
+    /// crosses the quoted ladder, bounded by the stated limit rather than
     /// filled at it, and a kept remainder rests as a scannable limit at that
     /// price. Both halves were broken until 2026-08-19 - the whole quantity
     /// filled at the order's own limit with no reference to the tape, and a
@@ -497,9 +586,10 @@ pub enum OrderType {
     /// ratchet, so it follows the trigger rather than drifting away from it.
     ///
     /// What it buys over `TrailingStopMarket`: a bound on the price the exit
-    /// accepts. A trailing stop that takes liquidity fills at whatever the
-    /// triggering print slipped to, which is the shape a consumer uses when
-    /// certainty of exit beats price; this one refuses to fill through its
+    /// accepts. A trailing stop that takes liquidity crosses whatever book
+    /// prevailed at the triggering print, however deep it has to walk, which is
+    /// the shape a consumer uses when certainty of exit beats price; this one
+    /// refuses to fill through its
     /// limit, and rests instead. That is a real strategy choice and the venue
     /// does not make it for anyone.
     TrailingStopLimit,
@@ -2280,6 +2370,17 @@ pub struct QuoteTick {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Walk` carries one `Option<Hit>` per scan, so the book payload is a
+    /// widening on a sweep-sized vector rather than on one value. The sweep
+    /// contract is stated in numbers here rather than argued: at the 128 bytes
+    /// below, a thousand-scan sweep allocates 128 KiB of hit slots, which is
+    /// the whole cost. The bound is asserted rather than the exact size so a
+    /// niche the compiler finds is not a red test.
+    #[test]
+    fn hit_memory_shape_is_accounted_for_by_the_sweep_contract() {
+        assert!(std::mem::size_of::<Option<Hit>>() <= 128);
+    }
 
     /// The one alphabet both ends judge a URL-carried symbol by. Written here
     /// rather than only at the two call sites because a drift in this function

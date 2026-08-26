@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use mogwai_protocol::{
-    ClientOrderId, Contingency, Hit, LiquiditySide, MAX_LINKED_ORDERS, OrderFilled, OrderType,
-    Side, SubmitOrder, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
+    ClientOrderId, Contingency, Hit, HitBook, LiquiditySide, MAX_LINKED_ORDERS, OrderFilled,
+    OrderType, Side, SubmitOrder, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
     control::Divergence, touches_trigger, trades_through,
 };
 use rand::{RngExt, SeedableRng};
@@ -484,16 +484,15 @@ impl Engine {
             }];
         }
 
-        // The fill band. Every order draws a trigger from a stream keyed on its
-        // own identity, never on the generator's: a limit fills at its stated
-        // price the moment a print is strictly through that trigger, and a
-        // market order fills at the last print slipped adversely by the same
-        // draw. The band applies to IOC and FOK as well, on narrower grounds
-        // than the resting case - the venue does not know what price an
-        // aggressor would really get, and filling it at its own stated price is
-        // the same lie for an IOC as for a market order.
+        // The queue-position band, and only that. Every resting order draws a
+        // trigger from a stream keyed on its own identity, never on the
+        // generator's: a limit fills at its stated price the moment a print is
+        // strictly through that trigger. Market-taking does not use the band at
+        // all - a taking price is the arithmetic consequence of the quoted
+        // ladder below, with no draw in it anywhere.
         let stated_px = risk_px(&order);
         let increment = self.instruments[&order.symbol].price_increment;
+        let size_increment = self.instruments[&order.symbol].size_increment;
         let band_ticks = reading.map_or(0, |value| value.band_ticks);
 
         // An order-list child whose parent has not executed rests held: accepted
@@ -549,71 +548,59 @@ impl Engine {
         // A market-to-limit takes the market, and its stated price is the limit
         // that bounds what it will pay and the price its remainder rests at -
         // not, as this used to read, the price it fills its whole quantity at.
-        // It shares the market order's draw for the part that executes and the
-        // limit order's marketability test for whether any of it does, which is
-        // both halves of the type's name. It filled at its own limit with no
+        // It crosses the ladder for the part that executes and takes the limit
+        // order's marketability test for whether any of it does, which is both
+        // halves of the type's name. It filled at its own limit with no
         // reference to the tape until 2026-08-19: a buy limited at 200 against a
         // last print of 100 paid 200.
         let takes_the_market = matches!(
             order.order_type,
             OrderType::Market | OrderType::MarketToLimit
         );
-        let fill_px = if takes_the_market {
-            reading.map_or_else(
-                || {
-                    tracing::warn!(client_order_id = %order.client_order_id, "market order has no market reading; using its stated price");
-                    stated_px
-                },
-                |value| {
-                    draw_market_price(
-                        self.fill_seed,
-                        &order,
-                        stated_px,
-                        value.last_px,
-                        increment,
-                        band_ticks,
-                        0,
-                    )
-                },
-            )
-        } else {
-            stated_px
-        };
-        // The limit half of the name. The band's adverse slip is drawn against
-        // the last print and can carry a market-to-limit past its own stated
-        // price; the limit is the one thing the consumer asked the venue to
-        // respect, so it bounds the fill rather than the other way round. A
-        // plain market order has no such bound and is left alone.
-        let fill_px = if order.order_type == OrderType::MarketToLimit {
-            match order.side {
-                Side::Buy => fill_px.min(stated_px),
-                Side::Sell => fill_px.max(stated_px),
-            }
-        } else {
-            fill_px
-        };
-        if !order.reduce_only
-            && let Err(reason) = self.validate_fill_funds(
-                &order,
-                order.quantity,
-                fill_px,
-                Decimal::ZERO,
-                LiquiditySide::Taker,
-                ts,
-                apply_divergences,
-            )
-        {
+        if takes_the_market && reading.is_none() {
             return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
-                reason,
+                reason: "no market data available".into(),
                 ts_event: ts,
             }];
         }
+        let price_bound = matches!(
+            order.order_type,
+            OrderType::Limit | OrderType::MarketToLimit
+        )
+        .then_some(stated_px);
+        // Planned against the requested quantity, before any divergence cuts
+        // it, because fill-or-kill is judged against what the consumer asked
+        // for and the book's capacity within its price bound - a targeted
+        // partial must not be able to turn a kill into a fill.
+        let requested_cross = reading.map(|value| {
+            cross_book(
+                order.side,
+                order.quantity,
+                price_bound,
+                &value,
+                increment,
+                size_increment,
+            )
+        });
         // A market order is marketable by definition; every type that states a
         // limit - `MarketToLimit` included, which is what the type's first act
-        // is judged by - has to have been traded through.
+        // is judged by - is judged against the opposing touch. Against the
+        // touch, not against the last print and a drawn trigger: a price that
+        // crosses the quoted book is exactly what marketable means, and the
+        // drawn trigger is a queue-position claim about a resting order that
+        // has no bearing on whether the order rests at all.
+        //
+        // The two judgments therefore use different prices and can disagree: an
+        // order non-marketable against the touch may already sit through its
+        // drawn trigger. Arrival wins for acceptance and the order rests; the
+        // first sweep after acceptance may then fill it at once at its own
+        // stated price, which is never better than the price it asked for.
         let marketable = order.order_type == OrderType::Market
-            || reading.is_some_and(|value| trades_through(order.side, trigger_px, value.last_px));
+            || reading.is_some_and(|value| match order.side {
+                Side::Buy => stated_px >= taking_touch(order.side, &value),
+                Side::Sell => stated_px <= taking_touch(order.side, &value),
+            });
 
         if order.order_type.is_conditional() {
             let venue_order_id = self.next_venue_order_id();
@@ -659,9 +646,21 @@ impl Engine {
                 // frontier is the application instant, because a stop accepted
                 // at `ts` must never be offered prints that predate it.
                 let pos = self.open.len() - 1;
+                // A stop that triggers on arrival crosses the book the same
+                // reading carries, so it crosses a book and not a price - the
+                // arrival path and the sweep path reach `on_trigger` with the
+                // same shape of evidence.
                 let hit = Hit {
                     ts_ns: value.ts_ns,
                     px: value.last_px,
+                    book: Some(HitBook {
+                        bid_px: value.bid_px,
+                        ask_px: value.ask_px,
+                        bid_sz: value.bid_sz,
+                        ask_sz: value.ask_sz,
+                        depth_levels: value.depth.levels,
+                        depth_growth: value.depth.growth,
+                    }),
                 };
                 out.extend(self.on_trigger(pos, hit, ts, ts));
             }
@@ -761,20 +760,37 @@ impl Engine {
 
         // Order here is load-bearing. `plan_fill` consumes the targeted
         // `PartialFillNext` for this id, and it must run before the FOK decision
-        // because all-or-nothing is judged against the (possibly diverged) fill
-        // size, not the requested quantity. A FOK the partial pushes below full
-        // is rejected right here, and the partial it consumed goes with it: the
-        // divergence fired on its target (it is what killed the order), so it is
-        // correctly spent rather than left armed to ambush a later resubmit of
-        // the same id. `plan_fill` needs no venue id precisely so this ordering
-        // survives: a rejected FOK must not burn its client order id.
+        // because the divergence is consumed before all-or-nothing is judged
+        // against requested quantity and book capacity. A killed FOK takes its
+        // targeted divergence with it, but a cut cannot turn insufficient book
+        // capacity into a fill. `plan_fill` needs no venue id precisely so this
+        // ordering survives: a rejected FOK must not burn its client order id.
         let planned_qty = self.plan_fill(&order, order.quantity, apply_divergences);
         let cap = self.reduce_only_cap(&order);
-        let last_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
+        let diverged_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
+        let crossed = reading.map(|value| {
+            cross_book(
+                order.side,
+                diverged_qty,
+                price_bound,
+                &value,
+                increment,
+                size_increment,
+            )
+        });
+        let last_qty = crossed.map_or(diverged_qty, |outcome| outcome.filled_qty);
+        // The price of the walk the diverged quantity actually makes, not of
+        // the one the requested quantity would have made. A cut fill walks less
+        // depth and is therefore priced better, which is what a smaller order
+        // really gets, and it is why the requested walk above may not be reused
+        // for pricing. A resting limit never crossed anything and books at its
+        // own stated price.
+        let fill_px = crossed
+            .and_then(|outcome| outcome.vwap_px)
+            .unwrap_or(stated_px);
         let leaves_qty = order.quantity - last_qty;
 
-        if order.reduce_only
-            && last_qty > Decimal::ZERO
+        if last_qty > Decimal::ZERO
             && let Err(reason) = self.validate_fill_funds(
                 &order,
                 last_qty,
@@ -792,7 +808,14 @@ impl Engine {
             }];
         }
 
-        if order.time_in_force == TimeInForce::Fok && leaves_qty > Decimal::ZERO {
+        // Judged on the requested quantity against the book's capacity within
+        // this type's price bound, so a targeted `PartialFillNext` cannot turn
+        // a kill into a fill - and cannot rescue one either: the divergence was
+        // already consumed above, so a killed fill-or-kill still spends it
+        // rather than leaving it armed to ambush a later resubmit of the id.
+        if order.time_in_force == TimeInForce::Fok
+            && requested_cross.is_some_and(|outcome| outcome.filled_qty < order.quantity)
+        {
             return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason: "fill-or-kill could not fully fill".into(),
@@ -922,6 +945,31 @@ impl Engine {
                 ts_event: ts,
             });
             out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
+        } else if leaves_qty > Decimal::ZERO && record.submit.order_type == OrderType::Market {
+            // A market order has no resting price, so no time in force can
+            // convert its remainder into a resting order - a price the venue
+            // invented is exactly what crossing removes. The remainder is
+            // cancelled under every one of them, which is the protection-band
+            // behaviour a real venue shows and the one place a market order
+            // partially fills.
+            //
+            // Reached whenever the walk left something behind, whether the
+            // ladder exhausted or a targeted `PartialFillNext` cut the fill;
+            // the warn names the exhausted case because that is the one an
+            // operator can act on, and a diverged cut is already visible as the
+            // divergence it was armed as.
+            let reason = if requested_cross.is_some_and(|outcome| outcome.exhausted) {
+                "insufficient displayed depth"
+            } else {
+                "market remainder cancelled"
+            };
+            tracing::warn!(client_order_id = %record.submit.client_order_id, reason);
+            out.push(VenueMessage::OrderCanceled {
+                client_order_id: record.submit.client_order_id.clone(),
+                venue_order_id: record.venue_order_id.clone(),
+                ts_event: ts,
+            });
+            out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
         } else if leaves_qty > Decimal::ZERO {
             // Every partial increments `band_draw`, and the sweep is not the
             // only place a partial happens: a marketable-on-arrival limit cut
@@ -945,7 +993,7 @@ impl Engine {
                 TimeInForce::Gtc | TimeInForce::Day | TimeInForce::Gtd => {
                     self.rest_open(record);
                 }
-                TimeInForce::Ioc => {
+                TimeInForce::Ioc | TimeInForce::Fok => {
                     out.push(VenueMessage::OrderCanceled {
                         client_order_id: record.submit.client_order_id.clone(),
                         venue_order_id: record.venue_order_id.clone(),
@@ -953,7 +1001,6 @@ impl Engine {
                     });
                     out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
                 }
-                TimeInForce::Fok => unreachable!("FOK partials are rejected before acceptance"),
             }
         } else {
             out.extend(self.close_unrested(&record, WireOrderStatus::Filled, ts));
@@ -1763,7 +1810,7 @@ impl Engine {
     /// stop-limit to a live banded limit (filling it at once if the triggering
     /// print is already through its drawn trigger), rejects a post-only
     /// stop-limit that would take liquidity, or cancels the order when the
-    /// slipped price outruns the account or a reduce-only cap has gone to zero.
+    /// crossed price outruns the account or a reduce-only cap has gone to zero.
     /// Every terminal branch removes the order, frees its hold and calls
     /// `record_closed`.
     ///
@@ -1817,21 +1864,50 @@ impl Engine {
             // happens next, which is why they share this arm rather than three
             // copies of it.
             OrderType::StopMarket | OrderType::TrailingStopMarket | OrderType::MarketIfTouched => {
-                // The triggering print, slipped adversely by a fresh draw from
-                // the band the order was accepted under. Never `read_market`
-                // again: the print is what made the order live, and a second
-                // reading would be exactly the look-ahead the venue refuses.
-                let fill_px = draw_market_price(
-                    self.fill_seed,
-                    &order.submit,
-                    hit.px,
-                    hit.px,
-                    increment,
-                    order.band_ticks,
-                    order.band_draw.saturating_add(1),
-                );
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
-                let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
+                let diverged = cap.map_or(planned, |cap| planned.min(cap));
+                let size_increment = self.instruments[&order.submit.symbol].size_increment;
+                let Some(reading) = hit_reading(&hit, order.band_ticks) else {
+                    out.extend(self.cancel_triggered(pos, &order, "no market data available", ts));
+                    return out;
+                };
+                let crossed = cross_book(
+                    order.submit.side,
+                    diverged,
+                    None,
+                    &reading,
+                    increment,
+                    size_increment,
+                );
+                if order.submit.time_in_force == TimeInForce::Fok {
+                    let requested = cross_book(
+                        order.submit.side,
+                        order.leaves_qty,
+                        None,
+                        &reading,
+                        increment,
+                        size_increment,
+                    );
+                    if requested.filled_qty < order.leaves_qty {
+                        out.extend(self.cancel_triggered(
+                            pos,
+                            &order,
+                            "fill-or-kill could not fully fill",
+                            ts,
+                        ));
+                        return out;
+                    }
+                }
+                let fill_qty = crossed.filled_qty;
+                let Some(fill_px) = crossed.vwap_px else {
+                    out.extend(self.cancel_triggered(
+                        pos,
+                        &order,
+                        "insufficient displayed depth",
+                        ts,
+                    ));
+                    return out;
+                };
                 let held = self.hold_for(&order.submit, order.leaves_qty, risk_px(&order.submit));
                 if let Err(reason) = self.validate_fill_funds(
                     &order.submit,
@@ -1875,7 +1951,14 @@ impl Engine {
                     });
                     out.extend(reaped);
                 } else {
-                    order.resting = Resting::Inert;
+                    tracing::warn!(client_order_id = %order.submit.client_order_id, "insufficient displayed depth");
+                    let reaped = self.close_unrested(&order, WireOrderStatus::Canceled, ts);
+                    out.push(VenueMessage::OrderCanceled {
+                        client_order_id: order.submit.client_order_id.clone(),
+                        venue_order_id: order.venue_order_id.clone(),
+                        ts_event: ts,
+                    });
+                    out.extend(reaped);
                     // The frontier and the revision move even though nothing
                     // scans an inert remainder, and that is not bookkeeping for
                     // its own sake: `apply_scans_on_clock` admits a result whose
@@ -1913,7 +1996,14 @@ impl Engine {
                     order.band_ticks,
                     order.band_draw,
                 );
-                let marketable = trades_through(order.submit.side, fill_trigger_px, hit.px);
+                let Some(reading) = hit_reading(&hit, order.band_ticks) else {
+                    out.extend(self.cancel_triggered(pos, &order, "no market data available", ts));
+                    return out;
+                };
+                let marketable = match order.submit.side {
+                    Side::Buy => stated >= taking_touch(order.submit.side, &reading),
+                    Side::Sell => stated <= taking_touch(order.submit.side, &reading),
+                };
                 if !marketable {
                     order.resting = Resting::Limit { fill_trigger_px };
                     order.scanned_ns = frontier;
@@ -1942,12 +2032,50 @@ impl Engine {
                     return out;
                 }
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
-                let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
+                let diverged = cap.map_or(planned, |cap| planned.min(cap));
+                let size_increment = self.instruments[&order.submit.symbol].size_increment;
+                let crossed = cross_book(
+                    order.submit.side,
+                    diverged,
+                    Some(stated),
+                    &reading,
+                    increment,
+                    size_increment,
+                );
+                if order.submit.time_in_force == TimeInForce::Fok {
+                    let requested = cross_book(
+                        order.submit.side,
+                        order.leaves_qty,
+                        Some(stated),
+                        &reading,
+                        increment,
+                        size_increment,
+                    );
+                    if requested.filled_qty < order.leaves_qty {
+                        out.extend(self.cancel_triggered(
+                            pos,
+                            &order,
+                            "fill-or-kill could not fully fill",
+                            ts,
+                        ));
+                        return out;
+                    }
+                }
+                let fill_qty = crossed.filled_qty;
+                let Some(fill_px) = crossed.vwap_px else {
+                    order.resting = Resting::Limit { fill_trigger_px };
+                    order.scanned_ns = frontier;
+                    order.revision = order.revision.saturating_add(1);
+                    let before = self.open[pos].clone();
+                    self.open[pos] = order;
+                    self.refresh_open_hold(pos, &before);
+                    return out;
+                };
                 let held = self.hold_for(&order.submit, order.leaves_qty, stated);
                 if let Err(reason) = self.validate_fill_funds(
                     &order.submit,
                     fill_qty,
-                    stated,
+                    fill_px,
                     held,
                     LiquiditySide::Taker,
                     ts,
@@ -1963,7 +2091,7 @@ impl Engine {
                         &order.venue_order_id,
                         fill_qty,
                         leaves,
-                        stated,
+                        fill_px,
                         LiquiditySide::Taker,
                         ts,
                         true,
@@ -2091,11 +2219,10 @@ impl Engine {
 
     /// Emit and book a planned fill at the price the caller decided: `apply_fill`,
     /// `record_fill`, and the `DuplicateNextFill` consumption. Shared by
-    /// `on_submit` (marketable on arrival, or a slipped market order) and
+    /// `on_submit` (marketable on arrival) and
     /// `apply_scans` (the tape has now traded through a trigger), so the two
-    /// paths cannot diverge in what they produce, only in when. A limit always
-    /// books at its own stated price; only a market order is slipped, and the
-    /// slippage is applied by the caller, not here.
+    /// paths cannot diverge in what they produce, only in when. The caller
+    /// supplies either a crossed ladder price or a resting limit's stated price.
     #[expect(
         clippy::too_many_arguments,
         reason = "fill booking carries the complete execution fact"
@@ -2600,11 +2727,9 @@ impl Engine {
     }
 
     /// The funds check re-run against the price the order will actually fill
-    /// at, which for a market order is the slipped price rather than the stated
-    /// one. `validate_submit` cleared the stated notional; without this a
-    /// slipped buy could overdraw an account that validator had passed. A limit
-    /// fills at its own price, so for one this is the same question twice and
-    /// answers it the same way.
+    /// at, which for a taking order is the ladder's volume-weighted price rather
+    /// than the stated risk price. Without this recheck, a buy that walks depth
+    /// could overdraw an account that validation passed at the touch.
     #[expect(
         clippy::too_many_arguments,
         reason = "the funds question carries the complete prospective execution"
@@ -3453,39 +3578,125 @@ pub(super) fn draw_trigger(
     )
 }
 
-/// The fill price for a market order: the last print slipped adversely by a
-/// draw from the same band and the same key, with `band_draw = 0`.
-///
-/// The consumer's stated price is ignored for pricing - answering "what price did
-/// this trade at" with the consumer's own number is the same defect the limit
-/// band removes - but it is still validated and still keys the draw, because
-/// the wire contract requires it. The magnitude here is borrowed rather than
-/// fitted: it is the limit band's multiplier, so it introduces no unmeasured
-/// number, and a separately fitted market multiplier is a successor change to
-/// one config field.
-fn draw_market_price(
-    fill_seed: u64,
-    order: &SubmitOrder,
-    stated_px: Decimal,
-    last_px: Decimal,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CrossOutcome {
+    filled_qty: Decimal,
+    vwap_px: Option<Decimal>,
+    exhausted: bool,
+}
+
+fn cross_book(
+    side: Side,
+    qty: Decimal,
+    limit: Option<Decimal>,
+    reading: &MarketReading,
     increment: Decimal,
-    band_ticks: u32,
-    band_draw: u32,
-) -> Decimal {
-    let offset = increment.checked_mul(Decimal::from(draw_offset(
-        fill_seed,
-        order,
-        risk_px(order),
+    size_increment: Decimal,
+) -> CrossOutcome {
+    let mut remaining = qty;
+    let mut filled = Decimal::ZERO;
+    let mut notional = Decimal::ZERO;
+    let mut level_size = match side {
+        Side::Buy => reading.ask_sz,
+        Side::Sell => reading.bid_sz,
+    };
+    let touch = taking_touch(side, reading);
+    for level in 0..reading.depth.levels {
+        let offset = increment
+            .checked_mul(Decimal::from(level))
+            .unwrap_or(Decimal::MAX);
+        let price = match side {
+            Side::Buy => touch.checked_add(offset),
+            Side::Sell => touch.checked_sub(offset),
+        };
+        let Some(price) = price else { break };
+        if limit.is_some_and(|bound| match side {
+            Side::Buy => price > bound,
+            Side::Sell => price < bound,
+        }) {
+            break;
+        }
+        let take = remaining.min(level_size);
+        if take > Decimal::ZERO {
+            let Some(part) = take.checked_mul(price) else {
+                break;
+            };
+            let Some(next) = notional.checked_add(part) else {
+                break;
+            };
+            notional = next;
+            filled += take;
+            remaining -= take;
+        }
+        if remaining <= Decimal::ZERO {
+            break;
+        }
+        let Some(grown) = level_size.checked_mul(reading.depth.growth) else {
+            break;
+        };
+        level_size = floor_to_increment(grown, size_increment).max(size_increment);
+    }
+    let vwap_px = if filled > Decimal::ZERO {
+        let raw = notional / filled;
+        let floor = floor_to_increment(raw, increment);
+        Some(match side {
+            Side::Buy if floor < raw => floor + increment,
+            _ => floor,
+        })
+    } else {
+        None
+    };
+    CrossOutcome {
+        filled_qty: filled,
+        vwap_px,
+        exhausted: remaining > Decimal::ZERO,
+    }
+}
+
+/// The reading a triggered order crosses: the book the sweep carried beside the
+/// print that made the order live, with the band the order was accepted under.
+///
+/// Never a second `read_market`. The print is what made the order live, and a
+/// fresh reading at the delivery instant would be exactly the look-ahead the
+/// venue refuses.
+///
+/// `None` when the walk carried no book, which is the reachable refusal the
+/// caller answers with a named cancel. A book whose ladder is unresolved is a
+/// venue that forgot to resolve it rather than a river that could not be read,
+/// so it trips an assertion in test and dev builds and is refused the same way
+/// in release rather than crossing a ladder with no levels in it.
+fn hit_reading(hit: &Hit, band_ticks: u32) -> Option<MarketReading> {
+    let book = hit.book?;
+    debug_assert!(
+        book.depth_levels >= 1 && book.depth_growth >= Decimal::ONE,
+        "the sweep delivered a hit whose ladder was never resolved from a preset"
+    );
+    if book.depth_levels == 0 || book.depth_growth < Decimal::ONE {
+        return None;
+    }
+    Some(MarketReading {
+        bid_px: book.bid_px,
+        ask_px: book.ask_px,
+        bid_sz: book.bid_sz,
+        ask_sz: book.ask_sz,
+        ts_ns: hit.ts_ns,
         band_ticks,
-        band_draw,
-    )));
-    safe_price(
-        stated_px,
-        offset.and_then(|offset| match order.side {
-            Side::Buy => last_px.checked_add(offset),
-            Side::Sell => last_px.checked_sub(offset),
-        }),
-    )
+        last_px: hit.px,
+        depth: crate::DepthLadder {
+            levels: book.depth_levels,
+            growth: book.depth_growth,
+        },
+    })
+}
+
+/// The price the first level of an aggressor's walk is quoted at: a buy takes
+/// the offer, a sell hits the bid. The one definition of "the touch" on the
+/// taking path, so marketability and the walk's first level cannot disagree.
+fn taking_touch(side: Side, reading: &MarketReading) -> Decimal {
+    match side {
+        Side::Buy => reading.ask_px,
+        Side::Sell => reading.bid_px,
+    }
 }
 
 /// The one price a price-less `StopMarket` substitutes everywhere the engine
@@ -3652,5 +3863,78 @@ fn terminal_or_unknown_reject(
             Some(venue_order_id.clone()),
         ),
         None => ("unknown order".into(), None),
+    }
+}
+
+#[cfg(test)]
+mod book_cross_tests {
+    use super::*;
+    use crate::DepthLadder;
+
+    fn reading() -> MarketReading {
+        MarketReading {
+            bid_px: Decimal::from(99),
+            ask_px: Decimal::from(101),
+            bid_sz: Decimal::ONE,
+            ask_sz: Decimal::ONE,
+            last_px: Decimal::from(100),
+            ts_ns: 1,
+            band_ticks: 0,
+            depth: DepthLadder {
+                levels: 3,
+                growth: Decimal::ONE,
+            },
+        }
+    }
+
+    #[test]
+    fn a_larger_buy_walks_beyond_the_offer() {
+        let one = cross_book(
+            Side::Buy,
+            Decimal::ONE,
+            None,
+            &reading(),
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        let three = cross_book(
+            Side::Buy,
+            Decimal::from(3),
+            None,
+            &reading(),
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(one.vwap_px, Some(Decimal::from(101)));
+        assert_eq!(three.vwap_px, Some(Decimal::from(102)));
+    }
+
+    #[test]
+    fn adverse_rounding_never_places_a_buy_inside_the_offer() {
+        let mut book = reading();
+        book.ask_sz = Decimal::from(2);
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(3),
+            None,
+            &book,
+            Decimal::new(25, 2),
+            Decimal::ONE,
+        );
+        assert_eq!(outcome.vwap_px, Some(Decimal::new(10125, 2)));
+    }
+
+    #[test]
+    fn a_limit_bound_stops_the_walk() {
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(3),
+            Some(Decimal::from(101)),
+            &reading(),
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(outcome.filled_qty, Decimal::ONE);
+        assert!(outcome.exhausted);
     }
 }

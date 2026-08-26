@@ -829,7 +829,7 @@ pub(crate) async fn process_order_cmd(
             &order_cmd,
             lanes,
             &order.client_order_id.clone(),
-            "venue could not synthesize a market price at sim-now",
+            "no market data available",
             ts,
         );
     }
@@ -1926,18 +1926,18 @@ pub(crate) async fn clock(
 ///
 /// Every submit takes one, and so does every price amend: a limit needs it to
 /// size the band its trigger is drawn from and to judge marketability, a market
-/// order needs it to price its slippage, and an amend needs it so the re-draw
+/// order needs it to cross the book, and an amend needs it so the re-draw
 /// adopts the current regime instead of the acceptance one. A quantity-only
 /// amend and every non-order message take none.
 ///
 /// A wire market order carries no price (mirroring Nautilus, which never stamps
 /// one), but the engine has no book of its own, so a price-less market order is
-/// additionally stamped here with the last print at or before `ts`. That is the
-/// same number the reading carries; the former separate price path returned
+/// additionally stamped here with the opposing touch at or before `ts`. The
+/// former separate price path returned
 /// the first tick at or after sim-now, which is a
 /// look-ahead, and keeping two sources of "what is the market" is how they drift
-/// apart. `fills::read_last` is consulted only when `read_market` refuses
-/// outright, since the protocol still requires a price on the wire.
+/// apart. A refused book reading leaves the order price-less so the venue can
+/// reject it as `no market data available`.
 ///
 /// The reading is otherwise returned, never stamped - an order keeps its own
 /// stated price, and what the venue read is the engine's business.
@@ -1985,7 +1985,7 @@ async fn market_reading(
         let max_ticks = state.cfg.fill_band_max_ticks;
         let interval_ms = state.cfg.fill_sweep_interval_ms;
         let boat = Arc::clone(boat);
-        let (reading, last_px) = tokio::task::spawn_blocking(move || {
+        let (reading, _last_px) = tokio::task::spawn_blocking(move || {
             let reading = boat.market_readings.read(
                 ts,
                 &rivers,
@@ -1994,9 +1994,7 @@ async fn market_reading(
                 interval_ms,
                 Some(&boat.vol_window),
             );
-            let last_px = reading
-                .map(|value| value.last_px)
-                .or_else(|| crate::fills::read_last(boat.key().river(), ts, &rivers));
+            let last_px = reading.map(|value| value.last_px);
             (reading, last_px)
         })
         .await
@@ -2010,7 +2008,13 @@ async fn market_reading(
         // whose market entry took one price while a sibling took another would
         // have met two markets in one atomic admission, which is the property
         // the group frame exists to guarantee against.
-        let stamp = |order: &mut mogwai_protocol::SubmitOrder| stamp_market_price(order, last_px);
+        let stamp = |order: &mut mogwai_protocol::SubmitOrder| {
+            let touch = reading.map(|value| match order.side {
+                mogwai_protocol::Side::Buy => value.ask_px,
+                mogwai_protocol::Side::Sell => value.bid_px,
+            });
+            stamp_market_price(order, touch);
+        };
         let msg = match msg {
             Command::SubmitOrder(mut order) => {
                 stamp(&mut order);
@@ -2034,7 +2038,7 @@ async fn market_reading(
 /// so a test can cross that boundary through the production code instead of
 /// spelling the rule a second time. A market order arrives priceless -
 /// `boundary_error` refuses a consumer-stated price - and leaves here carrying
-/// the last print, which is the price the engine then fills it at.
+/// the opposing touch, which is also the first level the engine crosses.
 ///
 /// A `None` reading leaves the order priceless. That is not silent: the engine
 /// answers a priceless market member of a group with the post-stamp refusal,

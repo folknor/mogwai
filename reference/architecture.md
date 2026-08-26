@@ -835,27 +835,47 @@ the event order all follow from that order, and the positions themselves are
 held in a `HashMap`. Determinism per binary is a contract over everything the
 same seed and config produce, and it is not satisfied by a set the run happened
 to iterate one way. A
-resting order is one of three explicit states: a live limit, an
-untriggered conditional, or an inert market remainder left by a partial fill
-that is never scanned again and ends only on cancel. Every resting limit
+resting order is one of two explicit states: a live limit or an untriggered
+conditional. Every resting limit
 carries a trigger price drawn once at submit from a seeded, volatility-scaled
 band around its stated price (`fill_band_vol_mult = 0.0` degenerates to a
 strict through-at-the-stated-price fill), and it fills only when the run's
 fill sweep walks a print strictly through that trigger; the fill is delivered
-to each connection's lanes from the run, not from a command response. A
-market order slips the same way, adverse to its side, off the same seeded
-band. The trailing-volatility reading is cached once per symbol and fill-sweep
-interval, using the interval's simulated-time floor, so a command burst shares
-one coherent coarse band instead of repeating the full 300-second synthesis.
+to each connection's lanes from the run, not from a command response. A market
+order crosses the opposing quoted touch and a parametric ladder. Level zero has
+the published quote size; later levels are one price increment farther away and
+grow by the preset's decimal factor. The result is an adversely snapped
+volume-weighted average. A marketable limit walks the same ladder only through
+its stated price and rests its remainder. Exhausted market quantity is canceled
+and logged as `insufficient displayed depth`; it never rests. FOK plans the
+bounded walk before committing a fill, while IOC cancels its remainder.
+
+The ladder is exogenous water. Each order sees it fresh, so no passenger can
+consume depth another passenger would otherwise observe. This makes slicing
+cheaper than one order of the same total size; the accepted alternative would
+be stateful depletion and passenger interference. Any later mitigation belongs
+in a per-account transient impact term.
+
+The trigger walk carries the quote with each optional hit. On the current
+64-bit build, `Option<Hit>` is 120 bytes, up from 32 bytes before the quote and
+ladder fields were added. The widening is 88 bytes per pending scan for one
+sweep pass; it is transient and scales with the scans gathered for that pass.
+
+The trailing-volatility band is only a resting-limit queue-position offset. It
+is cached per river and sweep interval, while the quote half of a reading comes
+from the boat's retained quote series at the command's exact instant. A cold
+volatility estimator yields a zero offset, not a perfect taking fill. A taking
+submit without a book is rejected as `no market data available`; a triggered
+order without its hit-instant book is canceled with the same diagnostic.
 Sweep marks and settlement prices are separate exact-instant last-print reads;
 the coarse band cache never supplies unrealized P&L.
 A conditional (`StopMarket`/`StopLimit`) rests untriggered until the
 same sweep walks a print that touches its stop price - the mirror-image
 predicate, since a stop holds no queue position and every real venue fires one
 on touch rather than through. On trigger the venue emits `OrderTriggered` and,
-in the same batch, either fills a stop-market at the triggering print slipped
-by the same band, or promotes a stop-limit to a live limit judged against that
-same print (filling at once if already marketable, resting with a fresh band
+in the same batch, either crosses a stop-market against the book at the
+triggering instant, or promotes a stop-limit to a live limit judged against that
+same book (filling at once if already marketable, resting with a fresh band
 otherwise - it does not manufacture a fill through a gapped print). Reduce-only
 and post-only are first-class wire flags: reduce-only clamps every fill to the
 position it would close and cancels the order once that position is gone;
@@ -1103,7 +1123,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 26; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 27; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -1473,11 +1493,10 @@ neither the band nor the fill golden's banded half needed to move.
 
 ## The three tiers of a market reading
 
-Reading the market at a submit pays one of three tiers. Acceptance-time
-readings are memoized on the boat - one memo per boat, bucketed by fill-sweep
-interval on that boat's own clock - and a submit sees a reading that may be up
-to one interval stale. A market order therefore fills at or beyond the market
-as of that reading, not as of the fill instant. The memo lives on the boat
+Reading the market at a submit pays one of three tiers. The volatility band is
+memoized on the boat, one memo per boat bucketed by fill-sweep interval, while
+the book is read from the retained quote series at the submit's exact instant.
+The memo lives on the boat
 rather than on the run because the bucket is a function of the boat's clock
 and the reading it saves is a reading of one river: a run-level memo held a
 single entry, so two symbols evicted each other into a guaranteed miss and

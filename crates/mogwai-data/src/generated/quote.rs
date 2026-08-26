@@ -63,6 +63,68 @@ pub struct TopOfBookSizes {
     pub provenance: CalibrationProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DepthLevels {
+    levels: u16,
+    #[serde(default)]
+    provenance: CalibrationProvenance,
+}
+
+impl DepthLevels {
+    #[must_use]
+    pub fn uncalibrated(levels: u16) -> Self {
+        Self {
+            levels,
+            provenance: CalibrationProvenance::Uncalibrated,
+        }
+    }
+    #[must_use]
+    pub fn levels(&self) -> u16 {
+        self.levels
+    }
+    #[must_use]
+    pub fn provenance(&self) -> &CalibrationProvenance {
+        &self.provenance
+    }
+}
+
+impl Default for DepthLevels {
+    fn default() -> Self {
+        Self::uncalibrated(8)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DepthGrowth {
+    growth: Decimal,
+    #[serde(default)]
+    provenance: CalibrationProvenance,
+}
+
+impl DepthGrowth {
+    #[must_use]
+    pub fn uncalibrated(growth: Decimal) -> Self {
+        Self {
+            growth,
+            provenance: CalibrationProvenance::Uncalibrated,
+        }
+    }
+    #[must_use]
+    pub fn growth(&self) -> Decimal {
+        self.growth
+    }
+    #[must_use]
+    pub fn provenance(&self) -> &CalibrationProvenance {
+        &self.provenance
+    }
+}
+
+impl Default for DepthGrowth {
+    fn default() -> Self {
+        Self::uncalibrated(Decimal::ONE)
+    }
+}
+
 impl TopOfBookSizes {
     #[must_use]
     pub fn uncalibrated(min_size: Decimal) -> Self {

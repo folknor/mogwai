@@ -43,7 +43,7 @@ use common::{
     scheduled_close_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{LiquiditySide, TradeTick, VenueMessage};
+use mogwai_protocol::{LiquiditySide, QuoteTick, TradeTick, VenueMessage};
 use tokio_tungstenite::tungstenite::Message;
 
 /// A config whose boot river is named only by `[instrument] preset`, with no
@@ -2588,200 +2588,133 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     }
 }
 
-/// Market slippage is only real if the submit path actually takes a reading. A
-/// price-less market order used to return early with a stamped price and no
-/// reading at all, so an engine that slips perfectly would otherwise never
-/// receive a reading in production while every engine-side unit test passed.
+/// A price-less market submit crosses a quoted book rather than slipping the
+/// last print by a draw.
 ///
-/// The fill price cannot prove it, which is why this test reads the venue's log.
-/// There is no consumer-stated price on the wire: `market_reading`
-/// stamps the order with the last print either way, from the reading when there
-/// is one and from `fills::read_last` when there is not, and the engine's
-/// no-reading branch then fills at that same stamp. Both outcomes land on the
-/// tape, so `fill.last_px < last * 2` is satisfied by a fill decided off no
-/// reading at all - it was green by construction for the very arm the docstring
-/// says this test exists for.
+/// The book half of the reading is now taken at the submit's own instant rather
+/// than at the start of a sweep-interval bucket, which is what makes a fill
+/// checkable against `/quotes` at all. Which quote it crossed is still not
+/// checkable: the reading instant is whenever the submit reached the handler, and
+/// no wire field carries it. It lies between the last market frame this socket
+/// was handed before sending and the acceptance timestamp, and at this venue's
+/// pacing that bracket holds many quotes.
 ///
-/// The one observable that separates them is the engine's own `warn`, `market
-/// order has no market reading; using its stated price`, emitted with the
-/// client order id. An attempt whose id never appears in it took a reading.
-/// Retried, because `read_market` legitimately refuses at any instant whose
-/// trailing window carries fewer than `MIN_VOL_SAMPLES` returns, and the fitted
-/// BTCUSDT tape does that at a substantial fraction of instants. A refused
-/// reading is the documented fallback - stated price, no slippage, warn - so a
-/// single attempt would be a coin flip. What is pinned is that a reading is
-/// taken on the wire path: every attempt warning would mean the path never reads
-/// at all, which is the defect this test exists for.
+/// So the assertion is the strongest one that survives the bracket: a market
+/// buy crosses the ask at some instant inside it, so it must fill at or above
+/// the lowest ask in it, and a sell at or below the highest bid. That fails on
+/// a fill inside the spread by more than the market moved, which is the defect
+/// crossing exists to remove. Asserting against the last quote alone would read
+/// as an exact per-fill statement and would simply be flaky - the tape moves
+/// between the reading and the fill, and a buy filling below a quote it could
+/// not have seen is not a favourable fill.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
-    const ATTEMPTS: usize = 8;
-    /// The engine's no-reading fallback, verbatim from `orders.rs`.
-    const NO_READING: &str = "market order has no market reading";
     let venue = spawn(&["--config", &band_config()]);
-    let log = &venue.log;
-    // Before anything is concluded from an absence in that buffer. The property
-    // below is scored on attempts whose id does not appear beside the warn, and
-    // an empty buffer satisfies that for every attempt - a silenced filter, a
-    // dead capture thread or a closed pipe would all render as "the venue always
-    // took a reading". `common::spawn` pins `RUST_LOG` so the ambient
-    // environment cannot silence it, and this proves the pin took effect and the
-    // lines actually arrive here.
-    log.await_positive_control();
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open the order socket");
+    // Both sides, and the sell is not optional: it is the half that catches a
+    // sign error in the touch the venue stamps a price-less market order with,
+    // which a buy-only test would pass straight through. It sells half of what
+    // the buy bought, because the seeded account holds no base currency.
+    //
+    // Four satoshi, which looks absurd for a BTCUSDT order and is: BTCUSDT has
+    // no fitted `top_sizes`, so its touch is one size increment and its whole
+    // eight-level placeholder ladder displays eight satoshi. Anything larger
+    // partially fills and cancels the rest for insufficient displayed depth,
+    // which would make this a test of the exhaustion path rather than of the
+    // touch. Sized to the placeholder deliberately, and the cliff itself is
+    // filed in `notes/todo.md` against the calibration brick rather than
+    // papered over here.
+    for (side, id, qty) in [
+        ("Buy", "MKT-BOOK-BUY", "0.00000004"),
+        ("Sell", "MKT-BOOK-SELL", "0.00000002"),
+    ] {
+        let before_ns = drain_last_market_ts(&mut socket).await;
+        let submit = format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"{side}","order_type":"Market","quantity":"{qty}","time_in_force":"Gtc"}}"#,
+            venue.symbol
+        );
+        socket
+            .send(Message::Text(submit.into()))
+            .await
+            .expect("submit the market order");
 
-    // One arm, and a loop so a second costs nothing. It carried two until the
-    // wire started refusing a consumer-stated price on a market order: the
-    // priced arm sent `"price":"9000000"` and is now a `400` at the boundary,
-    // so the shape it exercised no longer exists to be exercised. What went
-    // with it is noted above - the log and the wire can no longer be
-    // cross-checked against each other here, because only the priced arm made
-    // the fill price an independent witness.
-    for path in ["priceless"] {
-        // (id, whether the fill landed near the tape).
-        let mut attempts: Vec<(String, bool)> = Vec::new();
-        for attempt in 0..ATTEMPTS {
-            let id = format!("MKT-{path}-{attempt}");
-            // The lower end of the bracket the floor below is taken over: the
-            // last market instant this socket has actually been given before the
-            // submit goes out. Delivery is monotone and the handler reads a tape
-            // at or beyond what it has already published, so this is a true
-            // lower bound. Anchoring the window on the acceptance instant
-            // instead, which is what this did, put the window's start after
-            // prints the reading could legitimately have been taken at, and the
-            // floor then rejected honest fills.
-            //
-            // Not `/clock`, and not because the read is expensive: that route is
-            // a run fact now and the run clock runs ahead of what any boat has
-            // published, so it is not a lower bound at all and would reinstate
-            // exactly the too-late anchor described above. What the socket has
-            // been handed is its own knowledge and needs no route.
-            let before_ns = drain_last_market_ts(&mut socket).await;
-            let submit = format!(
-                r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
-                venue.symbol
-            );
-            socket
-                .send(Message::Text(submit.into()))
+        let deadline = common::deadline(common::TEST_WALL_BUDGET);
+        let mut accepted_ts = None;
+        let fill = loop {
+            let message = tokio::time::timeout_at(deadline, socket.next())
                 .await
-                .expect("submit the market order");
-
-            let deadline = common::deadline(common::TEST_WALL_BUDGET);
-            let mut accepted_ts = None;
-            let fill = loop {
-                let message = tokio::time::timeout_at(deadline, socket.next())
-                    .await
-                    .expect("the venue answered the market submit")
-                    .expect("the socket stayed open")
-                    .expect("a websocket frame");
-                let Message::Text(text) = message else {
-                    continue;
-                };
-                match serde_json::from_str::<VenueMessage>(&text) {
-                    Ok(VenueMessage::OrderAccepted {
-                        client_order_id,
-                        ts_event,
-                        ..
-                    }) if client_order_id == id => accepted_ts = Some(ts_event),
-                    Ok(VenueMessage::OrderFilled(fill)) if fill.client_order_id == id => {
-                        break fill;
-                    }
-                    Ok(VenueMessage::OrderRejected { reason, .. }) => {
-                        panic!("{id} was rejected: {reason}")
-                    }
-                    _ => {}
-                }
+                .expect("the venue answered the market submit")
+                .expect("the socket stayed open")
+                .expect("a websocket frame");
+            let Message::Text(text) = message else {
+                continue;
             };
+            match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::OrderAccepted {
+                    client_order_id,
+                    ts_event,
+                    ..
+                }) if client_order_id == id => accepted_ts = Some(ts_event),
+                Ok(VenueMessage::OrderFilled(fill)) if fill.client_order_id == id => {
+                    break fill;
+                }
+                Ok(VenueMessage::OrderRejected { reason, .. }) => {
+                    panic!("{id} was rejected: {reason}")
+                }
+                _ => {}
+            }
+        };
 
-            // The venue decides a market submit against `MarketReadingCache`,
-            // which memoizes `read_market` on the sweep-interval bucket (10 ms
-            // under band.toml). The reading therefore names the last print at or
-            // before the start of the acceptance instant's bucket, and the
-            // adverse-slippage invariant has to be asserted against that print,
-            // not against the last print at the fill instant - the tape moves on
-            // between the reading and the fill, and a buy filling below a print
-            // it could not have seen is not favourable slippage.
-            //
-            // Worse, the reading instant is not the acceptance instant either:
-            // it is whenever the submit reached the handler, which at speed 100
-            // can be many sim seconds earlier. So the print the venue read
-            // cannot be identified from outside - only bracketed. What is
-            // asserted is therefore the strongest statement that survives the
-            // bracket: the reading's print lies somewhere in the lookback below,
-            // and the fill band is adverse, so a market buy must fill at or
-            // above the lowest price in that window. Recovering the exact
-            // per-fill statement means putting the reading instant on the
-            // `OrderFilled` event or dropping the cache's bucketing; neither is
-            // this test's call to make.
-            const BUCKET_NS: u64 = 10_000_000;
-            let reading_ts = accepted_ts.unwrap_or(fill.ts_event) / BUCKET_NS * BUCKET_NS;
-            // A 60 s lookback below the pre-submit instant, not below the
-            // acceptance one, so the window covers every print the reading could
-            // have named. Not 1 s, because the arrival clock's quiet state runs a
-            // mean gap of several seconds and a one-second window is legitimately
-            // empty often enough to make this flaky for a reason that has nothing
-            // to do with fills.
-            //
-            // Fetched through `trade_window`, which pages. A single `/trades`
-            // query returns the window's oldest prints when the page fills, and
-            // the floor was then taken over stale water the market had since
-            // fallen through - asserted as favourable slippage that never
-            // happened. Guarding that with `trades.len() < PAGE` instead would
-            // have turned a slow round trip, which widens this window without
-            // bound at speed 100, into a red test on a run where nothing is
-            // wrong.
-            let trades = trade_window(
-                &venue.http_base(),
-                &venue.symbol,
-                before_ns.saturating_sub(60_000_000_000),
-                reading_ts,
-            );
-            let last = trades
-                .last()
-                .expect("a print at or before the reading")
-                .price;
-            let floor = trades
-                .iter()
-                .map(|trade| trade.price)
-                .min()
-                .expect("a print in the lookback");
-            let on_the_tape = fill.last_px < last * rust_decimal::Decimal::TWO;
-            if on_the_tape {
+        // The bracket, and no wider. It opens at the last market instant this
+        // socket had been handed before the submit went out - a true lower
+        // bound on the reading, since delivery is monotone and the handler
+        // reads a tape at or beyond what it has already published - and closes
+        // at acceptance. Quotes are dense enough that this window is never
+        // empty, so there is no reason to pad it: every extra second of
+        // lookback admits an ask the venue could not have crossed and weakens
+        // the floor toward vacuity.
+        let reading_ts = accepted_ts.unwrap_or(fill.ts_event);
+        let (status, body) = http_get(
+            &venue.http_base(),
+            &format!(
+                "/operator/quotes?symbol={}&start={before_ns}&end={reading_ts}&limit={}",
+                venue.symbol,
+                mogwai_protocol::MAX_HISTORY_LIMIT,
+            ),
+        );
+        assert_eq!(status, 200, "the quote history answers: {body}");
+        let quotes: Vec<QuoteTick> = serde_json::from_str(&body).expect("quote history");
+        assert!(!quotes.is_empty(), "a quote at or before acceptance");
+        match side {
+            "Buy" => {
+                let floor = quotes
+                    .iter()
+                    .map(|quote| quote.ask_px)
+                    .min()
+                    .expect("a quote in the bracket");
                 assert!(
                     fill.last_px >= floor,
-                    "a market buy filled below every print it could have read: {} < {floor}",
+                    "a market buy filled below every ask it could have crossed: {} < {floor}",
                     fill.last_px
                 );
             }
-            attempts.push((id, on_the_tape));
-            // Let the clock move so the next attempt reads a genuinely different
-            // window - at speed 100 this is fifty sim seconds of fresh tape.
-            // Unconditional now: every attempt is scored, so there is no early
-            // exit to skip it. The count and this gap are the whole flake margin
-            // on the assertion below, whose false-failure mode is every attempt
-            // legitimately refusing, so neither may be trimmed for wall time
-            // without something else compensating.
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            "Sell" => {
+                let ceiling = quotes
+                    .iter()
+                    .map(|quote| quote.bid_px)
+                    .max()
+                    .expect("a quote in the bracket");
+                assert!(
+                    fill.last_px <= ceiling,
+                    "a market sell filled above every bid it could have crossed: {} > {ceiling}",
+                    fill.last_px
+                );
+            }
+            _ => unreachable!(),
         }
-
-        // The venue writes the warn before it emits the fill, but that is its
-        // stderr pipe and this is a websocket, so the draining thread is allowed
-        // a settle. Bounded because the question is an absence, which nothing
-        // can signal; the loop's own last inter-attempt sleep already gave it
-        // 500 ms, and this adds a second one rather than betting on a single.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let warned: Vec<&(String, bool)> = attempts
-            .iter()
-            .filter(|(id, _)| log.contains_both(NO_READING, id))
-            .collect();
-        assert!(
-            warned.len() < attempts.len(),
-            "the {path} market path warned `{NO_READING}` on all {} attempts, so it never took \
-             a reading at all",
-            attempts.len()
-        );
     }
 }
 
@@ -3187,26 +3120,12 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
     }
 }
 
-/// Every trade in `[start, end]`, paged - never a prefix of them.
-///
-/// `/trades` fills its page from the oldest end of the window and stops at the
-/// limit, so one query over a window wider than a page returns the window's
-/// oldest prints and says nothing about it. A statistic taken over that - a
-/// minimum, a last price - is then a statistic over stale water the market has
-/// since moved through, and it is silently wrong rather than absent. Round 2 of
-/// the test hunt found a live instance asserting favourable slippage that never
-/// happened.
-///
 /// The cursor obeys the frontier rule: a full page's last instant may be cut off
 /// mid-instant, so that whole instant is dropped and the next query resumes at
 /// it rather than past it. A timestamp-only cursor may only advance onto an
 /// instant once every row at that instant has been seen.
-fn trade_window(base: &str, symbol: &str, start: u64, end: u64) -> Vec<TradeTick> {
-    trade_window_paged(base, symbol, start, end, mogwai_protocol::MAX_HISTORY_LIMIT)
-}
-
-/// [`trade_window`] with the page size named, so the paging itself can be
-/// exercised on a window a real page would swallow whole.
+/// The page size is named so the paging itself can be exercised on a window a
+/// real page would swallow whole.
 fn trade_window_paged(
     base: &str,
     symbol: &str,
@@ -3247,9 +3166,9 @@ fn trade_window_paged(
     }
 }
 
-/// The helper the slippage floor rests on is itself checked, against the venue.
+/// The paging helper is checked against the venue.
 ///
-/// `trade_window` exists because a single `/trades` query silently returns the
+/// A single `/trades` query silently returns the
 /// window's oldest prints once the page fills, and a statistic over that is
 /// wrong rather than absent. That is a claim about paging, and a helper whose
 /// paging is wrong fails the same way its caller did - quietly, with a plausible

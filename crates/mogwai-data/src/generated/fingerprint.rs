@@ -304,6 +304,10 @@ pub struct GeneratorScalars {
     #[serde(default)]
     pub top_sizes: super::quote::TopOfBookSizes,
     #[serde(default)]
+    pub depth_levels: super::quote::DepthLevels,
+    #[serde(default)]
+    pub depth_growth: super::quote::DepthGrowth,
+    #[serde(default)]
     pub trade_displacement_ticks: super::quote::TradeDisplacement,
     /// Optional protocol-12b arrival mechanism.  Its absence is structural:
     /// the generator retains the protocol-11 main-stream path byte for byte.
@@ -337,6 +341,8 @@ impl GeneratorScalars {
             vol_scalar: VOL_SCALAR,
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
+            depth_levels: super::quote::DepthLevels::default(),
+            depth_growth: super::quote::DepthGrowth::default(),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
         }
@@ -363,6 +369,8 @@ impl GeneratorScalars {
             vol_scalar: VOL_SCALAR,
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
+            depth_levels: super::quote::DepthLevels::default(),
+            depth_growth: super::quote::DepthGrowth::default(),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
         }
@@ -378,7 +386,7 @@ impl GeneratorScalars {
     /// and nothing would have said so. Now a new field fails to compile here
     /// until it is either named as a provenance or bound to `_` as one that
     /// carries none.
-    fn provenances(&self) -> [(&'static str, &super::quote::CalibrationProvenance); 3] {
+    fn provenances(&self) -> [(&'static str, &super::quote::CalibrationProvenance); 5] {
         let Self {
             symbol: _,
             modal_tick: _,
@@ -394,12 +402,16 @@ impl GeneratorScalars {
             vol_scalar: _,
             quoted_width,
             top_sizes,
+            depth_levels,
+            depth_growth,
             trade_displacement_ticks,
             arrival: _,
         } = self;
         [
             ("quoted_width", quoted_width.provenance()),
             ("top_sizes", &top_sizes.provenance),
+            ("depth_levels", depth_levels.provenance()),
+            ("depth_growth", depth_growth.provenance()),
             (
                 "trade_displacement_ticks",
                 trade_displacement_ticks.provenance(),
@@ -431,6 +443,12 @@ impl GeneratorScalars {
         }
         if self.modal_tick <= Decimal::ZERO {
             return Err(ScalarError::field("modal_tick"));
+        }
+        if self.depth_levels.levels() == 0 {
+            return Err(ScalarError::field("depth_levels"));
+        }
+        if self.depth_growth.growth() < Decimal::ONE {
+            return Err(ScalarError::field("depth_growth"));
         }
         // `modal_tick` must be representable at `price_decimals`. `next_price`
         // snaps every quote with `round_dp(price_decimals)`; a tick carrying
@@ -596,6 +614,16 @@ impl GeneratorScalars {
                 < decimal_to_f64(min_size) * LATENT_SIZE_MIN_RATIO
         {
             return Err(ScalarError::field("latent_size_median"));
+        }
+        for touch in [self.top_sizes.bid, self.top_sizes.ask] {
+            let mut level = touch;
+            for _ in 1..self.depth_levels.levels() {
+                level = level
+                    .checked_mul(self.depth_growth.growth())
+                    .ok_or_else(|| ScalarError::field("depth_growth"))?;
+                level = (level / min_size).floor() * min_size;
+                level = level.max(min_size);
+            }
         }
         Ok(())
     }

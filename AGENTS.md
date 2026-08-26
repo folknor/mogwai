@@ -112,7 +112,7 @@ one-leaf correction of `analysis/fingerprint.json`
 an exhaustive reader audit proved its sole consumer advisory and never on the
 generator's path. It does not generalize to any other leaf: the rule stays
 unconditional, and the next leaf needs its own audit and its own ruling.
-`TAPE_PROTOCOL_VERSION` next takes 27. If a non-tape artifact revision ever
+`TAPE_PROTOCOL_VERSION` next takes 28. If a non-tape artifact revision ever
 needs an identity of its own, give it a content hash or a method version
 rather than overloading this constant.
 

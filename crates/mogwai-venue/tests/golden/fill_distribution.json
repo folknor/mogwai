@@ -11,10 +11,10 @@
       "band_vol_mult": 0.0,
       "offset_ticks": 1,
       "samples": 5,
-      "filled": 4,
-      "censored": 1,
+      "filled": 5,
+      "censored": 0,
       "buy_filled": 2,
-      "sell_filled": 2,
+      "sell_filled": 3,
       "trigger_offset_ticks": [
         0,
         0,
@@ -23,12 +23,14 @@
         0
       ],
       "latency_ns": [
+        0,
         1000000000,
         2000000000,
         3000000000,
         10000000000
       ],
       "passes": [
+        0,
         1,
         2,
         3,
@@ -155,24 +157,26 @@
       "band_vol_mult": 0.005,
       "offset_ticks": 1,
       "samples": 5,
-      "filled": 4,
-      "censored": 1,
+      "filled": 5,
+      "censored": 0,
       "buy_filled": 2,
-      "sell_filled": 2,
+      "sell_filled": 3,
       "trigger_offset_ticks": [
         0,
-        0,
+        2,
         1,
         2,
         1
       ],
       "latency_ns": [
+        0,
         1000000000,
         2000000000,
         3000000000,
         10000000000
       ],
       "passes": [
+        0,
         1,
         2,
         3,

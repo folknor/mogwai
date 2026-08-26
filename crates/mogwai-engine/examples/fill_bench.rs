@@ -76,10 +76,7 @@ fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
             client_order_id: scan.client_order_id.clone(),
             from_ns: scan.from_ns,
             revision: scan.revision,
-            hit: fill.then_some(Hit {
-                ts_ns: 2,
-                px: scan.px,
-            }),
+            hit: fill.then_some(Hit::flat(2, scan.px)),
             scanned_to_ns: 2,
         })
         .collect();
@@ -137,11 +134,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
         let _ = engine.process_with_market(
             Command::SubmitOrder(submit),
             1,
-            Some(MarketReading {
-                last_px: Decimal::from(21_000),
-                ts_ns: 1,
-                band_ticks: 0,
-            }),
+            Some(MarketReading::flat(Decimal::from(21_000), 1, 0)),
         );
     }
     let marks = (0..size)
@@ -193,11 +186,7 @@ fn benches(c: &mut Criterion) {
                 let out = engine.process_with_market(
                     Command::SubmitOrder(order),
                     1,
-                    Some(mogwai_engine::MarketReading {
-                        last_px: Decimal::from(99),
-                        ts_ns: 0,
-                        band_ticks: 0,
-                    }),
+                    Some(MarketReading::flat(Decimal::from(99), 0, 0)),
                 );
                 (engine, out)
             },

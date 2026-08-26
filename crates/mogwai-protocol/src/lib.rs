@@ -56,7 +56,7 @@ pub use instruments::{
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
     AdmissionSubject, AggressorSide, Balance, Command, CommandClass, Contingency, FillSnapshot,
-    HeldBreakdown, HistoryKind, HistoryRow, Hit, JSON_ESCAPE_FACTOR, LiquiditySide,
+    HeldBreakdown, HistoryKind, HistoryRow, Hit, HitBook, JSON_ESCAPE_FACTOR, LiquiditySide,
     MAX_ACCOUNT_ID_LEN, MAX_CALLSIGN_LEN, MAX_CURRENCY_LEN, MAX_ECHOED_ID_LEN, MAX_GROUP_ORDERS,
     MAX_INBOUND_MESSAGE_BYTES, MAX_LINKED_ORDERS, MAX_REASON_LEN, MAX_SYMBOL_LEN, OrderFilled,
     OrderLink, OrderStatusInfo, OrderStatusSnapshot, OrderType, POST_ONLY_REFUSAL, Position,

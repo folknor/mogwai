@@ -3,10 +3,87 @@
 
 //! Bounded tape walks used by the venue's trigger-price fill model.
 
-use mogwai_protocol::{Hit, ScanKind, Side};
+use mogwai_protocol::{Hit, HitBook, ScanKind, Side};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{TickEvent, TickSource};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookState {
+    pub bid_px: Decimal,
+    pub ask_px: Decimal,
+    pub bid_sz: Decimal,
+    pub ask_sz: Decimal,
+    pub ts_ns: u64,
+}
+
+#[must_use]
+pub fn book_reading(source: &mut dyn TickSource, ts_ns: u64, budget: usize) -> Option<BookState> {
+    let mut last = None;
+    let mut reached = false;
+    for _ in 0..budget {
+        let Some(event) = source.next_tick() else {
+            reached = true;
+            break;
+        };
+        if event.ts_event() > ts_ns {
+            reached = true;
+            break;
+        }
+        if let TickEvent::Quote(quote) = event {
+            last = Some(BookState {
+                bid_px: quote.bid_px,
+                ask_px: quote.ask_px,
+                bid_sz: quote.bid_sz,
+                ask_sz: quote.ask_sz,
+                ts_ns: quote.ts_event,
+            });
+        }
+    }
+    reached.then_some(last).flatten()
+}
+
+#[must_use]
+pub fn market_snapshot_reading(
+    source: &mut dyn TickSource,
+    from_ns: u64,
+    to_ns: u64,
+    budget: usize,
+) -> Option<(Option<VolReading>, BookState)> {
+    let mut trades = Vec::new();
+    let mut book = None;
+    let mut reached = false;
+    for _ in 0..budget {
+        let Some(event) = source.next_tick() else {
+            reached = true;
+            break;
+        };
+        if event.ts_event() > to_ns {
+            reached = true;
+            break;
+        }
+        match event {
+            TickEvent::Trade(trade) if trade.ts_event > from_ns => {
+                trades.push((trade.ts_event, trade.price));
+            }
+            TickEvent::Quote(quote) => {
+                book = Some(BookState {
+                    bid_px: quote.bid_px,
+                    ask_px: quote.ask_px,
+                    bid_sz: quote.bid_sz,
+                    ask_sz: quote.ask_sz,
+                    ts_ns: quote.ts_event,
+                });
+            }
+            TickEvent::Trade(_) => {}
+        }
+    }
+    if reached {
+        Some((vol_reading_from_trades(&trades), book?))
+    } else {
+        None
+    }
+}
 
 /// Trailing window the realized-volatility estimator samples, ending inclusively
 /// at the reading instant. A const, not a knob: it sets the estimator's
@@ -161,6 +238,7 @@ pub fn scan_triggers(
     let mut last_ts: Option<u64> = None;
     let mut drained = 0;
     let mut proved_past = false;
+    let mut last_book: Option<BookState> = None;
     for _ in 0..budget {
         let Some(event) = source.next_tick() else {
             // The source ended, so its final instant carries nothing further and
@@ -183,7 +261,15 @@ pub fn scan_triggers(
             reached_ns = reached_ns.max(previous);
         }
         last_ts = Some(event.ts_event());
-        if let TickEvent::Trade(trade) = event {
+        if let TickEvent::Quote(quote) = event {
+            last_book = Some(BookState {
+                bid_px: quote.bid_px,
+                ask_px: quote.ask_px,
+                bid_sz: quote.bid_sz,
+                ask_sz: quote.ask_sz,
+                ts_ns: quote.ts_event,
+            });
+        } else if let TickEvent::Trade(trade) = event {
             let any_price_can_hit = fill_buy_max.is_some_and(|px| trade.price < px)
                 || fill_sell_min.is_some_and(|px| trade.price > px)
                 || touch_buy_min.is_some_and(|px| trade.price >= px)
@@ -198,9 +284,21 @@ pub fn scan_triggers(
                     && trade.ts_event > scan.from_ns
                     && scan.kind.hit(scan.side, scan.px, trade.price)
                 {
+                    // A hit with no book is still a hit. Suppressing it here
+                    // would leave the order resting as though the tape had
+                    // never reached its trigger, and the scan would re-ask the
+                    // same question of the same span forever; the engine
+                    // cancels it with a named reason instead.
+                    //
+                    // The ladder is left unresolved: this walk knows the
+                    // river, not the preset. The venue fills it in from the
+                    // resolved profile before the engine sees the walk.
                     *hit = Some(Hit {
                         ts_ns: trade.ts_event,
                         px: trade.price,
+                        book: last_book.map(|book| {
+                            HitBook::unresolved(book.bid_px, book.ask_px, book.bid_sz, book.ask_sz)
+                        }),
                     });
                 }
             }
@@ -401,6 +499,21 @@ mod tests {
         })
     }
 
+    #[test]
+    fn book_reading_never_looks_ahead() {
+        let mut source = MemorySource::new(vec![quote(10, 99, 101), quote(20, 109, 111)]);
+        let book = book_reading(&mut source, 15, 10).expect("the earlier quote is covered");
+        assert_eq!(book.ts_ns, 10);
+        assert_eq!(book.bid_px, Decimal::from(99));
+        assert_eq!(book.ask_px, Decimal::from(101));
+    }
+
+    #[test]
+    fn book_reading_refuses_when_its_budget_does_not_prove_the_instant() {
+        let mut source = MemorySource::new(vec![quote(10, 99, 101), quote(20, 109, 111)]);
+        assert_eq!(book_reading(&mut source, 15, 1), None);
+    }
+
     // ------------------------------------------------------------------------
     // The trades-only assumption, driven against a hand-built stream rather than
     // asserted. Every walk in this file consumes `TickEvent`, and before the BBO
@@ -420,7 +533,13 @@ mod tests {
             walk.hits[0],
             Some(Hit {
                 ts_ns: 2,
-                px: Decimal::from(101)
+                px: Decimal::from(101),
+                book: Some(HitBook::unresolved(
+                    Decimal::from(100),
+                    Decimal::from(101),
+                    Decimal::ONE,
+                    Decimal::ONE
+                )),
             }),
             "the print sharing the horizon with its quote was never evaluated"
         );
@@ -436,7 +555,13 @@ mod tests {
             walk.hits[0],
             Some(Hit {
                 ts_ns: 2,
-                px: Decimal::from(105)
+                px: Decimal::from(105),
+                book: Some(HitBook::unresolved(
+                    Decimal::from(100),
+                    Decimal::from(101),
+                    Decimal::ONE,
+                    Decimal::ONE
+                )),
             }),
             "the walk stopped on the first print at the horizon"
         );
@@ -545,7 +670,12 @@ mod tests {
 
     #[test]
     fn a_walk_reports_every_scan_that_triggered() {
-        let mut source = MemorySource::new(vec![trade(1, 99), trade(2, 101)]);
+        let mut source = MemorySource::new(vec![
+            quote(1, 98, 100),
+            trade(1, 99),
+            quote(2, 100, 102),
+            trade(2, 101),
+        ]);
         let walk = scan_triggers(
             &mut source,
             &[scan(Side::Buy, 100, 0), scan(Side::Sell, 100, 0)],
@@ -556,7 +686,12 @@ mod tests {
     }
     #[test]
     fn a_walk_reports_the_price_and_instant_of_each_hit() {
-        let mut source = MemorySource::new(vec![trade(1, 99), trade(2, 101)]);
+        let mut source = MemorySource::new(vec![
+            quote(1, 98, 100),
+            trade(1, 99),
+            quote(2, 100, 102),
+            trade(2, 101),
+        ]);
         let walk = scan_triggers(
             &mut source,
             &[
@@ -571,14 +706,26 @@ mod tests {
             walk.hits[0],
             Some(Hit {
                 ts_ns: 1,
-                px: Decimal::from(99)
+                px: Decimal::from(99),
+                book: Some(HitBook::unresolved(
+                    Decimal::from(98),
+                    Decimal::from(100),
+                    Decimal::ONE,
+                    Decimal::ONE
+                )),
             })
         );
         assert_eq!(
             walk.hits[1],
             Some(Hit {
                 ts_ns: 2,
-                px: Decimal::from(101)
+                px: Decimal::from(101),
+                book: Some(HitBook::unresolved(
+                    Decimal::from(100),
+                    Decimal::from(102),
+                    Decimal::ONE,
+                    Decimal::ONE
+                )),
             })
         );
         assert_eq!(walk.hits[2], None);
@@ -587,7 +734,7 @@ mod tests {
     #[test]
     fn a_touch_scan_hits_at_the_price_and_a_through_scan_does_not() {
         let at = Decimal::from(100);
-        let mut source = MemorySource::new(vec![trade(1, 100)]);
+        let mut source = MemorySource::new(vec![quote(1, 99, 101), trade(1, 100)]);
         let scans = [
             TriggerScan {
                 side: Side::Buy,
@@ -608,15 +755,20 @@ mod tests {
     }
     #[test]
     fn a_print_that_jumps_past_a_trigger_still_triggers() {
-        let mut source = MemorySource::new(vec![trade(1, 90)]);
+        let mut source = MemorySource::new(vec![quote(1, 89, 91), trade(1, 90)]);
         assert!(scan_triggers(&mut source, &[scan(Side::Buy, 100, 0)], 1, 10).hits[0].is_some());
     }
     #[test]
     fn a_walk_stops_once_every_scan_has_triggered() {
-        let mut source = MemorySource::new(vec![trade(1, 99), trade(2, 98)]);
+        let mut source = MemorySource::new(vec![
+            quote(1, 98, 100),
+            trade(1, 99),
+            quote(2, 97, 99),
+            trade(2, 98),
+        ]);
         assert_eq!(
             scan_triggers(&mut source, &[scan(Side::Buy, 100, 0)], 2, 10).drained,
-            1
+            2
         );
     }
     #[test]

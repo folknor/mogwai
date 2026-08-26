@@ -1624,7 +1624,7 @@ fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::Instrument
 ///
 /// See [`refuse_unknown_subtable_keys`] for why the list exists, and
 /// `the_generator_key_list_is_exhaustive` for what stops it drifting.
-const GENERATOR_KEYS: [&str; 16] = [
+const GENERATOR_KEYS: [&str; 18] = [
     "symbol",
     "modal_tick",
     "price_decimals",
@@ -1639,6 +1639,8 @@ const GENERATOR_KEYS: [&str; 16] = [
     "vol_scalar",
     "quoted_width",
     "top_sizes",
+    "depth_levels",
+    "depth_growth",
     "trade_displacement_ticks",
     "arrival",
 ];
@@ -1690,6 +1692,8 @@ fn refuse_unknown_subtable_keys(instrument: &toml::Table) -> anyhow::Result<()> 
 /// optional `provenance` tag every one of them carries.
 const QUOTED_WIDTH_KEYS: [&str; 2] = ["ticks", "provenance"];
 const TOP_SIZES_KEYS: [&str; 3] = ["bid", "ask", "provenance"];
+const DEPTH_LEVELS_KEYS: [&str; 2] = ["levels", "provenance"];
+const DEPTH_GROWTH_KEYS: [&str; 2] = ["growth", "provenance"];
 const TRADE_DISPLACEMENT_KEYS: [&str; 2] = ["ticks", "provenance"];
 
 /// The keys each `ArrivalConfig` family accepts, beside its own `family` tag.
@@ -1714,6 +1718,8 @@ fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result
     for (name, known) in [
         ("quoted_width", &QUOTED_WIDTH_KEYS[..]),
         ("top_sizes", &TOP_SIZES_KEYS[..]),
+        ("depth_levels", &DEPTH_LEVELS_KEYS[..]),
+        ("depth_growth", &DEPTH_GROWTH_KEYS[..]),
         ("trade_displacement_ticks", &TRADE_DISPLACEMENT_KEYS[..]),
     ] {
         let Some(seam) = generator.get(name).and_then(toml::Value::as_table) else {
@@ -2503,10 +2509,12 @@ mod tests {
             vol_scalar: _,
             quoted_width: _,
             top_sizes: _,
+            depth_levels: _,
+            depth_growth: _,
             trade_displacement_ticks: _,
             arrival: _,
         } = sample;
-        assert_eq!(GENERATOR_KEYS.len(), 16);
+        assert_eq!(GENERATOR_KEYS.len(), 18);
     }
 
     /// The anchor for `SESSION_KEYS`, on the same terms.
@@ -2529,6 +2537,8 @@ mod tests {
         for (seam, good, bad) in [
             ("quoted_width", "ticks", "tikcs"),
             ("top_sizes", "bid", "bidd"),
+            ("depth_levels", "levels", "levles"),
+            ("depth_growth", "growth", "gorwth"),
             ("trade_displacement_ticks", "ticks", "tick"),
         ] {
             let (mut instrument, _) = effective_preset("MNQ").unwrap();
