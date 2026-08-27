@@ -188,20 +188,61 @@ spec is deleted.
   than as a venue that refuses to fill anything.
 
 - **A forced close crosses a book the venue invents rather than the one it
-  read.** `Engine::mark` is handed marks and nothing else, so the three
-  liquidation sites build their reading with `MarketReading::forced_close`: a
-  one-level book quoted `liquidation_band_ticks` away from the mark on each
-  side. That is adverse or equal to every price the retired uniform draw could
-  have produced, and deterministic, so it is not a fill the venue manufactured
-  in its own favour - but it is not the book at the mark instant either, and
-  every other taking path now crosses the real one.
+  read.** `Engine::mark` is handed marks and nothing else, so a venue-originated
+  close builds its reading with `MarketReading::forced_close`: a one-level book
+  quoted `liquidation_band_ticks` away from the mark on each side. That is
+  adverse or equal to every price the retired uniform draw could have produced,
+  and deterministic, so it is not a fill the venue manufactured in its own
+  favour - but it is not the book at the mark instant either, and every other
+  taking path now crosses the real one.
 
-  Closing it means giving `mark` a reading per symbol the way the submit path
-  gets one, which is a venue-side plumb rather than an engine change: the
-  sweeper already reads marks per river at the same instant, so the book read
-  would ride along with them. Left open deliberately - the order-path spec
-  scoped itself to the arrival and trigger paths, and this is the one taking
-  path it did not reach.
+  **The entry said "the three liquidation sites", and that was wrong. Corrected
+  2026-08-27: only two of the three are liquidations.** `apply_margin_breaches`
+  and `liquidate_all` liquidate at a mark taken in the current pass, on a river
+  a boat is reading. The third, `close_at_mark`, has exactly one caller -
+  `retire_off_river` - and retirement is a different event: it closes a position
+  at whatever mark that position last carried, on a river nobody is reading,
+  which is the whole reason it is being retired.
+
+  **That half is now settled and needs no ruling: retirement keeps the invented
+  book.** There is often no boat over the river to read a book from, and the
+  mark is not this instant's, so crossing a book read at `ts` would fill against
+  a price unrelated to the mark being closed at - worse than inventing one,
+  not better. Recorded at `close_at_mark`, whose own doc had gone stale claiming
+  the two breach paths used it.
+
+  **Landed 2026-08-27, inert:** the engine seam. `last_readings` beside
+  `last_marks`, `observe_books` for a caller that has a tape, and
+  `close_reading` consulted by the two liquidation sites with `forced_close` as
+  the fallback. Nothing calls `observe_books` yet, so no fill has moved.
+
+  **The open question, and it is a ruling rather than a task.** Should a breach
+  liquidation cross the real book at all? `forced_close`'s own reasoning says
+  no: a forced close is the one moment a venue is least likely to do better than
+  its worst advertised slippage, so the pessimism is the point. A real ladder
+  carries a vol-derived band that at a calm instant is often tighter than
+  `liquidation_band_ticks`, so crossing it would make liquidations fill better
+  than they do now, and a forward test would report them costing less than the
+  venue advertises as its worst case. Three coherent answers: cross the real
+  book unconditionally, and `liquidation_band_ticks` becomes fallback-only;
+  cross the real book but never fill better than `mark` plus or minus the band,
+  keeping the guarantee and still fixing the invented-book complaint; or rule
+  the invented book correct because liquidation should be pessimistic, and close
+  this entry as ruled rather than owed. Nobody has decided, and the entry
+  assumed the first without arguing against the second.
+
+  **Only if a real-book answer wins:** how the venue supplies it. A reading is a
+  book at the instant plus a vol band whose walk spans `VOL_WINDOW_NS`;
+  `MarketReadingCache::read` already composes exactly that, memoized per
+  sweep-interval bucket, and each boat carries one for its own river. Eager
+  means building a reading per marked symbol per pass - cheap where the boat's
+  cache is warm, a fresh walk for symbols off its river, paid every pass for an
+  event that almost never fires. Lazy means the engine asking only when it is
+  about to liquidate - free on the ordinary path, but it hands a river-reading
+  callback to a crate that deliberately holds no tape. The scope is smaller than
+  it looks now that retirement is out: the symbols in play are ones the account
+  holds a position in on a river being swept, so the cache is warm for them.
+  Worth measuring before choosing rather than arguing.
 
 ## Tape research v2
 
@@ -469,9 +510,24 @@ instrument class is not a finding and does not need re-reporting.
   `docs/adapter-lifecycle.md`). Closing it properly is a cross-repository
   question: either nautilus grows a stated-limit form of the type, or the
   adapter would need a limit it cannot invent - it has no reading to price one
-  from, and guessing would name the number the venue exists to own. No adapter
-  test submits a `MarketToLimit` today, which is how the gap stayed invisible; a
-  test pinning the refusal's reason would at least make it loud.
+  from, and guessing would name the number the venue exists to own.
+
+  The pin this entry asked for already exists, and the ask is withdrawn
+  2026-08-27. `unsupported_init_shapes_are_refused_before_submitted` in
+  `adapter_smoke.rs` builds a market-to-limit exactly as nautilus' factory does
+  - order type set, price and both trigger fields cleared - submits it, and
+  requires the error to name both "malformed for MOGWAI" and "MarketToLimit
+  order must carry a price", then asserts no execution event was emitted, which
+  is the before-any-event half of the claim. It landed in `e908ee1` on
+  2026-08-26, and the entry was not updated to notice.
+
+  Worth knowing why it stayed invisible to a reader who looked: `adapter_smoke`
+  is one of the four socket-backed binaries that plain `brokkr check` does not
+  run, so the pin is real but only executes under `brokkr check --gate`. A
+  search of test names would have found it; a green check never mentions it.
+
+  What remains open is only the cross-repository question above, which no test
+  in this tree can close.
 
 - **Price funding per instant in the ledger.** `apply_funding` currently charges
   `N * rate(pass-end mark, pass-end index)` for a span crossing `N` funding
@@ -487,17 +543,50 @@ instrument class is not a finding and does not need re-reporting.
   and `last_px` together and bails with a warning before `Position::apply`. So
   the arm is swallowed in silence and exercises nothing.
 
-  Owner reports, unverified, that an upstream fix has landed for the next
-  nautilus release. That changes the calculus rather than settling it, so the
-  action is to re-verify at the next pin bump and decide then:
+  **The recheck is done, 2026-08-27, against the pinned source rather than a
+  memory of it** - `research/nautilus_trader` now sits on master at `648970c`,
+  the "Release Rust crates 0.62.0" commit, which is exactly what
+  `mogwai-adapter` links. Two findings.
 
-  - Keeping the shared id models a retransmitting venue and makes the arm a test
-    of the consumer's deduplication. If nautilus now surfaces the duplicate
-    rather than swallowing it, this becomes the right answer and needs no change.
-  - Minting a fresh `trade_id` per emitted fill models a phantom execution, which
-    a correct consumer books twice - the divergence the arm's own doc describes,
-    "doubles the wire event, not the truth". Minting shifts every subsequent
-    venue trade id, so it owes a re-bless of the exact-equality transcripts.
+  The owner's report was accurate and is now fulfilled. It was written while
+  this workspace built against 0.61, and "the next release" meant 0.62 - which
+  is what we pin today, so the fix the report promised is in the tree we link.
+  It is `f9594dc962`, "Improve execution engine duplicate fill handling",
+  authored by the owner upstream, contained in master alongside `f13115f2df`,
+  "Fix v2 startup reconciliation fill replay". There is nothing on `develop`
+  touching this that master does not already have. The entry's "unverified"
+  qualifier is retired: verified, and it landed.
+
+  But the fix runs the other way from what this entry hoped, which is the part
+  that changes the decision. It did not make nautilus surface the duplicate; it
+  strengthened the swallowing. That commit
+  introduced `is_duplicate_fill` as a trait default and added a second,
+  independent gate beside it - `position_contains_trade_id`, which refuses a
+  fill whose trade id the position already carries even when the order check
+  passes. Both bail before `Position::apply`.
+
+  So the first option is settled false and is struck:
+
+  - ~~Keeping the shared id becomes right if nautilus surfaces the duplicate.~~
+    It does not surface it, at the pin or on `develop`. Keeping the id leaves
+    the arm inert against every nautilus host, and green venue-side tests go on
+    certifying nothing about the consumer.
+  - Minting a fresh `trade_id` per emitted fill models a phantom execution,
+    which a correct consumer books twice - the divergence the arm's own doc
+    describes, "doubles the wire event, not the truth". Minting shifts every
+    subsequent venue trade id, so it owes a re-bless of the exact-equality
+    transcripts. This is now the only option that makes the arm exercise
+    anything through a nautilus host.
+
+  The decision is therefore live rather than deferred, and it is the owner's:
+  buy a working divergence at the cost of a transcript re-bless, or keep an arm
+  that is honest about a retransmitting venue and inert against the only
+  consumer we have.
+
+  One correction to the entry's own wording while here: "swallowed in silence"
+  overstates it. `validate_fill_for_order` emits a `log::warn!` naming the
+  client order id and the trade id. It is silent on the event path, which is
+  what matters, but a host operator reading logs does see it.
 
   Both readings are recorded at the emission site in `mogwai-engine`'s
   `commit_fill`.
@@ -539,19 +628,20 @@ instrument class is not a finding and does not need re-reporting.
 
 ## Documentation
 
-- **`reference/architecture.md` is about 1,400 lines with two headings.** It does
-  roughly four jobs - the venue's runtime shape and account model; accounts,
-  risk, instruments and valuation; clocks, boats, delivery and faults; the
-  generator and fingerprint - plus a workspace section at the end. Its
-  contradictions have all sat where one job's old text survived another's
-  landing. `docs/havoc.md` was patched rather than rewritten and wants the same
-  treatment eventually.
+- **`reference/architecture.md` wants splitting; step one is done.** The entry
+  used to open "about 1,400 lines with two headings" and that is stale,
+  corrected 2026-08-27: the headings landed in `0ab8c4a` on 2026-08-26, and the
+  file is now about 1,700 lines under roughly forty of them. It still does the
+  same four jobs - the venue's runtime shape and account model; accounts, risk,
+  instruments and valuation; clocks, boats, delivery and faults; the generator
+  and fingerprint - plus a workspace section at the end, and its contradictions
+  have all sat where one job's old text survived another's landing.
+  `docs/havoc.md` was patched rather than rewritten and wants the same treatment
+  eventually.
 
-  Do it in two steps, and not in one. First add real headings in place: no text
-  moves, no citations break, and it turns an unnavigable wall into something a
-  reader can enter in the middle. That is also the precondition for the split,
-  since a document with no seams cannot be cut along them. Only then split into
-  separate files with the boundaries visible.
+  What remains is step two: split into separate files with the boundaries
+  visible. The seams the split needs now exist, which was the whole point of
+  doing it in two steps.
 
   The blast radius for step two: 17 files cite `architecture.md`, and two of them
   are prose-scanning tests (`live_fact_prose.rs`, `tape_version_prose.rs`) that
@@ -586,6 +676,13 @@ Read the source from `research/nautilus_trader`; build against the pinned
 crates.io release. Each of these names what the other side would have to ship,
 which is what makes it a writable patch rather than a grievance.
 
+All five were re-verified 2026-08-27 against the pin rather than against
+memory. That was worth doing for a reason this section should keep in view:
+the checkout used to sit on `develop`, which is neither what we link nor what
+this section claims to describe, and a maintainer may reshape or reject what we
+file, so an entry here can go stale without anyone touching this repository.
+Four still stand. One had closed and is struck below.
+
 - **`ExecutionEventEmitter` cannot share its sender**, so this adapter can only
   refuse rather than heal. The emitter derives `Clone` and owns
   `sender: Option<UnboundedSender<ExecutionEvent>>` by value, installed once from
@@ -598,6 +695,12 @@ which is what makes it a writable patch rather than a grievance.
   The PR: an emitter holding its sender behind a shared cell, or resolving it per
   send from a process-wide rather than thread-local slot, so a clone taken before
   `set_sender` still emits.
+
+  Still open at the pin: `live/src/execution/emitter.rs` holds
+  `sender: Option<UnboundedSender<ExecutionEvent>>` by value on a `Clone` type,
+  unchanged. Upstream now documents the intended pattern - "call `set_sender` in
+  the adapter's `start()`" - which is guidance rather than a fix, since a clone
+  taken before that call still freezes with no sender.
 
 - **No channel for a declared feed gap.** `VenueMessage::FeedLagged` carries
   `skipped` and `sim_now_ns` and the adapter has nowhere to put it. No
@@ -617,6 +720,13 @@ which is what makes it a writable patch rather than a grievance.
   error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
   reconcile-and-distrust-the-window signal.
 
+  Still open at the pin: `DataEvent` carries `Response`, `Data`, `Instrument`,
+  `FundingRate`, `InstrumentStatus`, `OptionGreeks` and a `defi`-gated variant,
+  and none of them means a hole in the stream - the enumeration in
+  `client/data.rs`'s gap comment matches the pinned source exactly. There is a
+  new `SystemEvent::SocketState` beside it, and it does not help: it reports the
+  socket changing state, and this gap happens while the socket never breaks.
+
 - **No registration signal at the account cache insertion boundary.**
   `await_account_registered` polls every 10 ms until nautilus's runner has
   consumed the forwarded account event and inserted the row, with a 5 s wall
@@ -624,6 +734,10 @@ which is what makes it a writable patch rather than a grievance.
   when the adapter forwards the event would be too early, because forwarding only
   queues it. The PR: a signal at the cache insertion boundary. No adapter-side
   latch can substitute.
+
+  Still open at the pin: `Cache::add_account` writes the database, inserts into
+  `accounts` and indexes `venue_account`, then returns. There is no notify, no
+  watch and no subscriber hook on that path, so a waiter has nothing to sleep on.
 
   The connection half of this is already closed and should not be re-filed:
   `wait_connected` sleeps on an adapter-owned notification with a 250 ms backstop
@@ -633,10 +747,17 @@ which is what makes it a writable patch rather than a grievance.
   with one publisher and no fallback was trading five hundred cheap wakeups for a
   wedge.
 
-- **The Rust trait default for mass status does not compose** the way the Python
-  base does. Queued in the maintainer's PR tracker. Not a substitute for our own
-  reconciliation guard: mogwai overrides the method, so this protects the next
-  adapter author rather than this repo.
+- ~~**The Rust trait default for mass status does not compose** the way the
+  Python base does.~~ **Closed upstream, verified at the pin 2026-08-27.**
+  `ExecutionClient::generate_mass_status` in `common/src/clients/execution.rs`
+  now carries a default that builds the three granular commands and composes
+  their generators under `futures::try_join!`, with tests pinning both the
+  composition and the error propagation. It ships with a stated caveat rather
+  than silently: the default reads the realtime atomic clock, so a client on a
+  mocked or backtest clock must still override to compose with its own. That
+  does not reach us - mogwai overrides the method anyway, which is why this
+  entry always said it protects the next adapter author rather than this repo.
+  Nothing to file, nothing to wait for.
 
 - **Tape sparsity has no attribution channel.** An empty historical window is
   correct behaviour here - the fitted ACD arrival process is persistent and
@@ -647,10 +768,38 @@ which is what makes it a writable patch rather than a grievance.
 
 ## Owed by us to broadarrow: one message, unsent
 
-Nobody has written it. Seven breaking changes now - the 2026-08-26 landings
-added three - and several entries below are stale in their favour. This is a
-message to write, not code to change, and per the owner it lives here until
-it is delivered.
+The framing here was wrong and is corrected 2026-08-27. "Nobody has written it"
+was false: broadarrow's `reference/mogwai.md` tracks this repository's landings
+by commit and date, and spot-checking it found `OrderExpired`, the USD equity
+default with its `[balances]` currency edge, and the per-account divergence
+scope all already recorded there - the last one dated and cited to `50e5c2d`.
+They consume this tree continuously through the synced snapshot and through
+direct exchanges, so most of what accumulated here as undelivered news had in
+fact been delivered, and the section was bookkeeping debt rather than a backlog.
+
+Worse, an entry was not merely stale but false - the paired adapter configs,
+below, announce a breaking change that does not exist in this tree. So the
+standing rule for this section: an entry is verified against the code before it
+is sent, not just written down when a change is planned. A consumer restructuring
+a call site against a boundary we never built pays for our bookkeeping, and this
+list is read as authoritative precisely because it is written by the side that
+made the changes.
+
+What remains genuinely undelivered, per the same check, is small. Their doc has
+no trace of the divergence request envelope, which the entry below now explains
+does not bite them anyway.
+
+One caveat on the method, which they supplied and which weakens some of the
+conclusions below. Several entries are marked delivered on the evidence that
+their `reference/mogwai.md` already records the fact. That doc is cited from
+their code the way ours is, but they audited it in the same pass and found
+three stale entries, one of which had inverted a capability outright. So "it is
+in their doc" establishes that somebody wrote it down, not that it is currently
+true there. Where an entry below rests on their prose rather than on our code,
+the delivery claim is only as good as the paragraph it read, and the paragraphs
+read for this audit were detailed and current rather than skeletal - which is
+weak evidence and should be treated as such. A compiler probe settles a public
+surface; nothing settles a semantic claim except one of us re-reading the code.
 
 - **The default shape moved to USD cash equity, 2026-08-26.** An unconfigured
   venue now resolves every unmatched symbol through a new NVDA preset - cash
@@ -658,34 +807,83 @@ it is delivered.
   The sharp edge: BTCUSDT is funding-barred out of the box, since it settles
   USDT and the default account holds none. Any of their scenarios that spin a
   transient venue with no `[balances]` and trade BTCUSDT will be refused at
-  bind as unfunded; the fix on their side is one `[balances]` line. Their
-  `reference/mogwai.md` "unfundable venue" prose is doubly stale now.
+  bind as unfunded; the fix on their side is one `[balances]` line.
+
+  Verified landed: `DEFAULT_PRESET` is `NVDA` and the default balance table is
+  a single 1,000,000 USD entry. But the rider this entry used to carry - that
+  their `reference/mogwai.md` prose was "doubly stale" - was false and is
+  withdrawn. Their doc already describes these semantics precisely, including
+  that boot validates only the shapes the config names, that an unfundable
+  currency is merely recorded for the shipped presets so a BTCUSDT-only
+  operator is not barred over an unfunded USD, and that the refusal lands at
+  bind or at the history poll naming the currency to add. They meet it at the
+  materializing poll and fail worker boot with our own text. Nothing here is
+  news to them.
 - **Market-taking fills cross a book now, 2026-08-26.** Slippage is the
   arithmetic consequence of walking displayed depth, not a draw: fills land
   at or beyond the quoted touch, never inside the spread, and a market order
   bigger than displayed depth partially fills and cancels the remainder with
   reason "insufficient displayed depth". A scenario asserting exact fill
   prices or assuming a market order always fills whole will read differently.
-  Until book calibration lands, non-MNQ presets display placeholder depth
-  (one size increment per level), so large market orders against those books
-  mostly cancel - size orders to the touch or fund MNQ.
+  What differs between presets is the touch size and not the ladder, and the
+  earlier wording here had that wrong: the ladder is a placeholder everywhere.
+  MNQ declares eight levels with flat growth, both stamped `uncalibrated` in
+  its own preset, over a fitted touch of 3 by 3. Every other shape takes the
+  default ladder over an uncalibrated touch of one size increment. So MNQ
+  displays more depth than the rest, but no preset displays a calibrated book,
+  and "fund MNQ" is a way to get a bigger placeholder rather than a real one.
+  Until the calibration lands, size market orders to the touch on any preset.
 - **Policed accounts are refused at boarding for unreachable currency,
   2026-08-26.** An account policed in currency X may bind only shapes
   settling in X; the bind is refused as a 400 with a named reason before the
   socket upgrade, not at order time. Their runs use unpoliced defaults today,
   so this bites only when they adopt policy presets - but the refusal text is
   new surface their error handling will meet first.
-- **The account surface moved.** They set no `account_type`, inherit
-  `MOGWAI-001`, POST no account, and have no handling for a run that ends by
-  liquidation. Their orchestrator runs the shared shape, so 50 subagents
-  inheriting `MOGWAI-001` would take each other's ledger in turn; the id belongs
-  in their per-subagent account TOMLs. The account-id contract is in
-  `docs/config.md`. That break is designed, but designed-to-break only works if
-  the other side is told it is coming.
+- **The account surface moved - and the collision warning in this entry was
+  already wrong, corrected 2026-08-27.** It claimed they inherit `MOGWAI-001`,
+  so fifty subagents would take each other's ledger in turn. They do not. Their
+  `reference/mogwai.md` states that both client configs carry the worker's own
+  account id and that broadarrow deliberately does not let the adapter default
+  through, precisely because our default validates cleanly now and so no longer
+  fails loudly for a consumer that forgot. They also track that the id selects a
+  ledger on the wire as of 2026-08-18, and that it is the third thing both legs
+  must agree on beside the run seed and the symbol. The warning was aimed at a
+  hazard they had already closed, and by their own account they closed it
+  before we wrote it down.
+
+  What still stands: they set no `account_type` - the exec config leaves it at
+  `Cash`, and a futures run wants otherwise - they POST no account, which they
+  confirm and own as their work, and they have no handling for a run that ends
+  by liquidation. The account-id contract is in `docs/config.md`.
 - **`OrderExpired` replaced `OrderCanceled` for expiries**, with a terminal
-  `Expired` status. Exhaustive matching stops compiling; loose matching stops
-  seeing `Day` and `Gtd` orders end at all, which is the dangerous reading.
-- **`POST /control/divergence` changed request shape.** What they must send now
+  `Expired` status. Verified landed here - the frame and the `Expired` status
+  both exist in `mogwai-protocol`. Already delivered: their `notes/todo.md`
+  records it as a distinct wire frame, deliberately not a flagged
+  `OrderCanceled`, and correctly notes they have no exposure because broadarrow
+  places good-till-cancel only, so it goes live the day anything of theirs
+  emits a `Day` order. They also named the dangerous reading themselves - an
+  expiry read as a cancel is a resting order the bridge believes it still has.
+  Nothing owed.
+- **`POST /control/divergence` changed request shape - and this is not a break
+  for them, corrected 2026-08-27.** The entry below stands as a wire fact and
+  was wrong about who it bites. `ship_venue_havoc` in the adapter's exec client
+  is the sole carrier: it serializes the `Divergence`, lifts the `type` tag out
+  and rebuilds the `kind` and `args` envelope itself, so a consumer handing a
+  `HavocSpec` to the client config never constructs that body and cannot send
+  a stale one. broadarrow is exactly that consumer. What the change bites is a
+  hand-written caller, which for them is one unwritten owed run - the poll-heal
+  repro, which POSTs a `CancelOpenOrderSilently` by hand and will need the new
+  shape from its first line, including the JSON `error` and `status` bodies in
+  place of bare text, and the ack's shed `evicted` divergence, which is the
+  thing a heal assertion actually wants to read.
+
+  Also worth sending, because they reasoned from it: the `Divergence` enum
+  still being `serde(tag = "type")` in the synced snapshot is not evidence that
+  the snapshot is behind. That tag is the internal Rust representation and it
+  did not change; the envelope is built at the adapter's HTTP boundary from it.
+  They inferred a stale sibling from a tag that was never going to move.
+
+  What they must send when hand-writing one:
   is `{"kind": "<Tag>", "args": {<the tag's fields>}}`, with the optional
   `account` and `symbol` staying at the top level beside `kind`. Unknown
   top-level fields are refused rather than ignored, so the old
@@ -697,9 +895,31 @@ it is delivered.
   used to be a bare text body. Their poll-heal end-to-end test drives this plane
   directly, so it is the run most likely to notice.
 - **The adapter's data and execution configs are constructed as a validated
-  pair.** Their two helpers construct the two public configs independently and
-  will stop compiling. See the adapter section above for why the pair boundary
-  exists.
+  pair - not landed, and this entry was false, corrected 2026-08-27.** There is
+  no pair type in `mogwai-adapter/src/config.rs`, no paired constructor, and
+  `factories.rs` still downcasts `MogwaiDataClientConfig` and
+  `MogwaiExecClientConfig` independently. The entry announced a breaking change
+  that does not exist, which is worse than announcing nothing: it invites a
+  consumer to restructure a call site against a boundary that is not there.
+  broadarrow reported the two configs had not reached them and were right;
+  their `applied_data_config` and `applied_exec_config` in
+  `run-prep/src/venue.rs` are the shape that would break, and they will break
+  when it lands, which they have accepted. Keep it as owed work, never as
+  delivered news, until a pair type actually exists.
+
+  The reason it was catchable at all: their crates take `mogwai-adapter` and
+  `mogwai-protocol` as unconditional path dependencies on this working tree, so
+  their `brokkr check` compiles against whatever is on disk here. That makes
+  their green build a live probe of our public surface, and it is why they
+  could say with confidence that the pairing had not landed.
+
+  The probe runs both ways, and they have offered it explicitly: we may ask
+  them to run a `brokkr check` whenever we want to know whether a change of
+  ours has actually landed downstream. That is a compiler answering the
+  question instead of two documents agreeing with each other, and it is the
+  cheapest verification either side has. It sees exactly what a compiler sees -
+  a moved public surface - and nothing about semantics that still compile,
+  which is the half that needs prose.
 
 - **"Unattributed means everyone" is a declared class now, not a fallthrough**,
   and their note asking us to press for it is stale on both halves. Their entry

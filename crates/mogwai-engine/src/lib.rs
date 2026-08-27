@@ -488,8 +488,12 @@ impl MarketReading {
     /// on `0 ..= band_ticks`; the cap is now taken outright, which is adverse
     /// or equal to every price that draw could have produced and needs no rng.
     ///
-    /// Owed rather than final: the venue can read a real book at the mark
-    /// instant and does not hand one to `mark`. Recorded in `notes/todo.md`.
+    /// The fallback rather than the rule, since 2026-08-27. A caller with a
+    /// tape under it hands the real book to `observe_books` before the mark, and
+    /// `close_reading` prefers it, so a forced close crosses the same book every
+    /// other taking path crosses. This invented one is what remains for a caller
+    /// holding no tape - the engine's own tests, and any path that marks from a
+    /// price alone - where refusing to liquidate would be the worse answer.
     #[must_use]
     pub fn forced_close(mark: Decimal, ts_ns: u64, band_ticks: u32, increment: Decimal) -> Self {
         let mut reading = Self::flat(mark, ts_ns, band_ticks);
@@ -717,6 +721,18 @@ pub struct Engine {
     /// marked from its own river, and a valuation summing them is stale by the
     /// mark cadence rather than wrong.
     last_marks: HashMap<Symbol, Decimal>,
+    /// The book behind each mark in `last_marks`, when the caller could read one.
+    ///
+    /// Filled by the same `mark_over` call that fills `last_marks`, from the same
+    /// instant, so a reading here is the book at the price beside it rather than
+    /// a separately-aged one. A venue-originated close consults it and crosses
+    /// the real book, which is what every other taking path does; absent an
+    /// entry it falls back to `MarketReading::forced_close`, because an engine
+    /// with no tape under it must still be able to liquidate.
+    ///
+    /// Keyed by symbol for the same reason and with the same caveat as
+    /// `last_marks` above: a mark names an instrument, not a river.
+    last_readings: HashMap<Symbol, MarketReading>,
     liquidation_seq: u64,
     warned: Warned,
     fill_seed: u64,
@@ -1112,6 +1128,49 @@ impl Engine {
         self.mark_over(marks, &[], ts)
     }
 
+    /// Record the book behind each mark, for the venue-originated closes a mark
+    /// may trigger.
+    ///
+    /// Separate from `mark_over` rather than a parameter on it because the two
+    /// have different populations: every caller has marks, and only a caller
+    /// with a tape under it can read a book. Threading an always-empty slice
+    /// through the engine's own tests and through `settle` would have made the
+    /// absence look like a decision at each of them instead of the default it
+    /// is. Call this before the mark that may liquidate; a symbol with no entry
+    /// keeps the pessimistic invented book.
+    ///
+    /// Stale entries are overwritten rather than accumulated per instant: the
+    /// only consumer is a close happening inside the pass that just recorded
+    /// them, so a reading outliving its pass would be read by nothing.
+    pub fn observe_books(&mut self, readings: &[(Symbol, MarketReading)]) {
+        for (symbol, reading) in readings {
+            self.last_readings.insert(Symbol::clone(symbol), *reading);
+        }
+    }
+
+    /// The book a liquidation at `symbol` should cross.
+    ///
+    /// The real one when the pass that marked this symbol could read it, which
+    /// is what makes a liquidation cross the same book every other taking path
+    /// crosses. Otherwise the invented one - deliberately pessimistic, quoted
+    /// the configured band away from the mark on both sides - which is the only
+    /// honest answer for an engine holding no tape.
+    ///
+    /// The two liquidation sites only, and deliberately not off-river
+    /// retirement: this assumes `mark` was taken in the pass that recorded the
+    /// reading, which holds for a breach and does not hold for a position
+    /// carrying a stale mark on a river nobody reads. See `close_at_mark`.
+    fn close_reading(&self, symbol: &Symbol, mark: Decimal, ts: u64) -> MarketReading {
+        self.last_readings.get(symbol).copied().unwrap_or_else(|| {
+            MarketReading::forced_close(
+                mark,
+                ts,
+                self.liquidation_band_ticks,
+                self.instruments[symbol].price_increment,
+            )
+        })
+    }
+
     /// As `mark`, told what the tape's high and low were over the span this mark
     /// closes.
     ///
@@ -1452,12 +1511,7 @@ impl Engine {
                 // venue acting on its own account, not a leg of anybody's plan.
                 link: None,
             };
-            let reading = MarketReading::forced_close(
-                mark,
-                ts,
-                self.liquidation_band_ticks,
-                self.instruments[&order.symbol].price_increment,
-            );
+            let reading = self.close_reading(&order.symbol, mark, ts);
             events.extend(self.on_submit_from(order, ts, Some(reading), false, &[], None));
             originated += 1;
         }
@@ -1531,12 +1585,7 @@ impl Engine {
                 // venue acting on its own account, not a leg of anybody's plan.
                 link: None,
             };
-            let reading = MarketReading::forced_close(
-                mark,
-                ts,
-                self.liquidation_band_ticks,
-                self.instruments[&order.symbol].price_increment,
-            );
+            let reading = self.close_reading(&order.symbol, mark, ts);
             events.extend(self.on_submit_from(order, ts, Some(reading), false, &[], None));
             originated += 1;
         }
@@ -1727,8 +1776,17 @@ impl Engine {
         rebased
     }
 
-    /// One venue-originated reduce-only close at the mark, the shape both the
-    /// margin breach and the risk breach use.
+    /// One venue-originated reduce-only close at a position's last mark, for
+    /// off-river retirement.
+    ///
+    /// The doc here used to say this was "the shape both the margin breach and
+    /// the risk breach use". It is not, and had not been for some time:
+    /// `apply_margin_breaches` and `liquidate_all` build the same order shape
+    /// inline, and `retire_off_river` is this function's only caller. The
+    /// distinction is load-bearing rather than tidy - those two liquidate at a
+    /// mark taken this pass, on a river a boat is reading, while this one closes
+    /// at whatever mark the position last carried on a river nobody reads. That
+    /// is why the reading below is the invented book and not `close_reading`.
     fn close_at_mark(
         &mut self,
         symbol: &Symbol,
@@ -1759,6 +1817,14 @@ impl Engine {
             post_only: false,
             link: None,
         };
+        // The invented book, deliberately, and not `close_reading`. Retirement
+        // is not a liquidation: the position is on a river nobody is reading -
+        // which is the whole reason it is being retired - so there is often no
+        // boat over it and no book to read. Worse, `mark` here is the position's
+        // last mark rather than this instant's, so crossing a book read at `ts`
+        // would fill against a price unrelated to the mark being closed at. A
+        // pessimistic band around the mark it actually holds is the coherent
+        // answer, and the only one available.
         let reading = MarketReading::forced_close(
             mark,
             ts,
@@ -2089,6 +2155,7 @@ impl Engine {
             trade_seq: 0,
             position_seq: 0,
             last_marks: HashMap::new(),
+            last_readings: HashMap::new(),
             liquidation_seq: 0,
             warned: Warned::default(),
             fill_seed: config.fill_seed,

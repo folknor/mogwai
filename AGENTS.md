@@ -231,6 +231,30 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
   read-only reference, never a build input; `members = ["crates/*"]` already
   excludes it, so no workspace `exclude` is needed.
 
+**Never assert a consequence for the other side of that boundary without
+reading their tree.** Learned expensively on 2026-08-27, symmetrically, and
+both repositories record it. A list of breaking changes owed to broadarrow was
+audited entry by entry: every claim about this repository's own code held up,
+and most claims about what those changes did to broadarrow did not. One warned
+them of a ledger collision they had already closed - and closed precisely
+because a change of ours had made their old guard stop firing. One announced a
+breaking boundary this tree never built. One called their documentation stale
+where it was current. Their side made the mirror-image errors in the same pass,
+inferring our snapshot was stale from a serde tag that could never move, and
+carrying prose that had inverted one of our capabilities and denied a gate that
+exists.
+
+The direction of the failure is the lesson: confident about the far side of the
+boundary, without looking, while the other tree was readable the whole time.
+`research/broadarrow` is that tree. Read it before writing what a change does to
+them. Where the question is whether a public surface has actually landed, do not
+write prose at all - their crates take `mogwai-adapter` and `mogwai-protocol` as
+unconditional path dependencies on this working tree, so their `brokkr check` is
+a live measurement of what is on our disk and ours is the mirror of it. Ask for
+the probe. A compiler settles a moved surface; only re-reading the code settles
+a semantic change that still compiles, and that second kind is the only thing a
+message between the two repositories needs to carry.
+
 Every implementation spec that references these APIs states both paths: the
 implementer reads from `research/` and builds against the pinned release. The
 two are kept in sync, so what you read in `research/` is what compiles.
