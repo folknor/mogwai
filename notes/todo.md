@@ -187,63 +187,6 @@ spec is deleted.
   call site. Recorded here so the next reader meets it as a known state rather
   than as a venue that refuses to fill anything.
 
-- **A forced close crosses a book the venue invents rather than the one it
-  read.** `Engine::mark` is handed marks and nothing else, so a venue-originated
-  close builds its reading with `MarketReading::forced_close`: a one-level book
-  quoted `liquidation_band_ticks` away from the mark on each side. That is
-  adverse or equal to every price the retired uniform draw could have produced,
-  and deterministic, so it is not a fill the venue manufactured in its own
-  favour - but it is not the book at the mark instant either, and every other
-  taking path now crosses the real one.
-
-  **The entry said "the three liquidation sites", and that was wrong. Corrected
-  2026-08-27: only two of the three are liquidations.** `apply_margin_breaches`
-  and `liquidate_all` liquidate at a mark taken in the current pass, on a river
-  a boat is reading. The third, `close_at_mark`, has exactly one caller -
-  `retire_off_river` - and retirement is a different event: it closes a position
-  at whatever mark that position last carried, on a river nobody is reading,
-  which is the whole reason it is being retired.
-
-  **That half is now settled and needs no ruling: retirement keeps the invented
-  book.** There is often no boat over the river to read a book from, and the
-  mark is not this instant's, so crossing a book read at `ts` would fill against
-  a price unrelated to the mark being closed at - worse than inventing one,
-  not better. Recorded at `close_at_mark`, whose own doc had gone stale claiming
-  the two breach paths used it.
-
-  **Landed 2026-08-27, inert:** the engine seam. `last_readings` beside
-  `last_marks`, `observe_books` for a caller that has a tape, and
-  `close_reading` consulted by the two liquidation sites with `forced_close` as
-  the fallback. Nothing calls `observe_books` yet, so no fill has moved.
-
-  **The open question, and it is a ruling rather than a task.** Should a breach
-  liquidation cross the real book at all? `forced_close`'s own reasoning says
-  no: a forced close is the one moment a venue is least likely to do better than
-  its worst advertised slippage, so the pessimism is the point. A real ladder
-  carries a vol-derived band that at a calm instant is often tighter than
-  `liquidation_band_ticks`, so crossing it would make liquidations fill better
-  than they do now, and a forward test would report them costing less than the
-  venue advertises as its worst case. Three coherent answers: cross the real
-  book unconditionally, and `liquidation_band_ticks` becomes fallback-only;
-  cross the real book but never fill better than `mark` plus or minus the band,
-  keeping the guarantee and still fixing the invented-book complaint; or rule
-  the invented book correct because liquidation should be pessimistic, and close
-  this entry as ruled rather than owed. Nobody has decided, and the entry
-  assumed the first without arguing against the second.
-
-  **Only if a real-book answer wins:** how the venue supplies it. A reading is a
-  book at the instant plus a vol band whose walk spans `VOL_WINDOW_NS`;
-  `MarketReadingCache::read` already composes exactly that, memoized per
-  sweep-interval bucket, and each boat carries one for its own river. Eager
-  means building a reading per marked symbol per pass - cheap where the boat's
-  cache is warm, a fresh walk for symbols off its river, paid every pass for an
-  event that almost never fires. Lazy means the engine asking only when it is
-  about to liquidate - free on the ordinary path, but it hands a river-reading
-  callback to a crate that deliberately holds no tape. The scope is smaller than
-  it looks now that retirement is out: the symbols in play are ones the account
-  holds a position in on a river being swept, so the cache is warm for them.
-  Worth measuring before choosing rather than arguing.
-
 ## Tape research v2
 
 Several parked items are waiting on one thing: what tape research v2 turns out

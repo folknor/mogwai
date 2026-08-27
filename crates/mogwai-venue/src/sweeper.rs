@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mogwai_engine::{PendingScan, ScanResult};
+use mogwai_engine::{MarketReading, PendingScan, ScanResult};
 use mogwai_protocol::{AdmissionSubject, VenueMessage};
 
 use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
@@ -39,6 +39,12 @@ pub(crate) struct FillSweep {
     pub(crate) run: Arc<Run>,
     pub(crate) rivers: Arc<Rivers>,
     pub(crate) interval_ms: u64,
+    /// The fill-band knobs, threaded here so a pass can compose the same
+    /// `MarketReading` the submit path composes: a venue-originated close
+    /// crosses the book read beside its mark, and that reading is built by the
+    /// boat's own cache under these parameters.
+    pub(crate) fill_band_vol_mult: f64,
+    pub(crate) fill_band_max_ticks: u32,
 }
 
 /// Three phases per pass, and the split is load-bearing: the tape walk costs a
@@ -353,14 +359,55 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let rivers = Arc::clone(&sweep.rivers);
                 let unpaced = boat_key.speed_micros() == 0;
                 let span_river = boat_key.river().clone();
+                let boat_for_read = Arc::clone(&boat);
+                let read_symbol = symbol.clone();
+                let mult = sweep.fill_band_vol_mult;
+                let max_ticks = sweep.fill_band_max_ticks;
+                let interval_ms = sweep.interval_ms;
                 let reads = run_blocking(move || {
-                    let marks = read_marks(&symbols, &settlements, to_ns, &rivers)?;
+                    let (marks, settlement_marks) =
+                        read_marks(&symbols, &settlements, to_ns, &rivers)?;
+                    // The book beside each mark, composed by the boat's own
+                    // cache exactly as the submit path composes it, so a breach
+                    // this pass originates crosses the same book every other
+                    // taking path crosses. Only this boat's own symbol gets
+                    // one: an index mark belongs to another river, whose own
+                    // boat records its pair - handing it this boat's reading
+                    // would pair a mark with a book from the wrong water. A
+                    // settlement strikes its own instant, so its reading is
+                    // read at that instant rather than at the pass end.
+                    let reading_at = |ts: u64| {
+                        boat_for_read.market_readings.read(
+                            ts,
+                            &rivers,
+                            mult,
+                            max_ticks,
+                            interval_ms,
+                            Some(&boat_for_read.vol_window),
+                        )
+                    };
+                    let marks: Vec<_> = marks
+                        .into_iter()
+                        .map(|(mark_symbol, px)| {
+                            let reading = (mark_symbol.as_ref() == read_symbol)
+                                .then(|| reading_at(to_ns))
+                                .flatten();
+                            (mark_symbol, px, reading)
+                        })
+                        .collect();
+                    let settlement_marks: Vec<_> = settlement_marks
+                        .into_iter()
+                        .map(|(mark_symbol, instant, px)| {
+                            let reading = reading_at(instant);
+                            (mark_symbol, instant, px, reading)
+                        })
+                        .collect();
                     let span = if unpaced {
                         fills::price_span(&span_river, last_swept_ns, to_ns, &rivers)?
                     } else {
                         None
                     };
-                    Some((marks, span))
+                    Some(((marks, settlement_marks), span))
                 });
                 let reads = tokio::select! {
                     reads = reads => reads.flatten(),
@@ -493,9 +540,27 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
     })
 }
 
-type MarkReads = (
+/// The pass's marks and settlement prices as `read_marks` yields them, before
+/// the book read beside each is attached.
+type PlainMarkReads = (
     Vec<(mogwai_protocol::Symbol, rust_decimal::Decimal)>,
     Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
+);
+
+/// The pass's marks and settlement prices, each paired with the book read at
+/// its own instant where the boat could read one.
+type MarkReads = (
+    Vec<(
+        mogwai_protocol::Symbol,
+        rust_decimal::Decimal,
+        Option<MarketReading>,
+    )>,
+    Vec<(
+        mogwai_protocol::Symbol,
+        u64,
+        rust_decimal::Decimal,
+        Option<MarketReading>,
+    )>,
 );
 
 /// Every tape price one sweep pass needs: the futures marks at `to_ns` and the
@@ -521,7 +586,7 @@ fn read_marks(
     settlements: &[(mogwai_protocol::Symbol, u64)],
     to_ns: u64,
     rivers: &Rivers,
-) -> Option<MarkReads> {
+) -> Option<PlainMarkReads> {
     // A mark names an instrument, not a river, and this is where that becomes a
     // problem the fork has to answer. These symbols come from the ledger - a
     // position is aggregated per instrument - so nothing here carries the river
@@ -624,11 +689,21 @@ fn apply_engine_pass(
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
     to_ns: u64,
 ) -> (Vec<VenueMessage>, usize, usize) {
+    // No tape under these callers, so no readings either: every pair is
+    // invalidated, which is the same statement `Engine::mark` makes.
+    let settlement_marks = settlement_marks
+        .into_iter()
+        .map(|(symbol, instant, px)| (symbol, instant, px, None))
+        .collect();
+    let marks: Vec<_> = marks
+        .iter()
+        .map(|(symbol, px)| (mogwai_protocol::Symbol::clone(symbol), *px, None))
+        .collect();
     apply_engine_pass_on_clock(
         engine,
         results,
         settlement_marks,
-        marks,
+        &marks,
         // No tape under these callers, so no span: the trail follows the mark,
         // which is the pre-extremes behaviour.
         &[],
@@ -652,8 +727,17 @@ fn apply_engine_pass(
 fn apply_engine_pass_on_clock(
     engine: &mut mogwai_engine::Engine,
     results: &[ScanResult],
-    settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
-    marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
+    settlement_marks: Vec<(
+        mogwai_protocol::Symbol,
+        u64,
+        rust_decimal::Decimal,
+        Option<MarketReading>,
+    )>,
+    marks: &[(
+        mogwai_protocol::Symbol,
+        rust_decimal::Decimal,
+        Option<MarketReading>,
+    )],
     extremes: &[(
         mogwai_protocol::Symbol,
         rust_decimal::Decimal,
@@ -666,8 +750,8 @@ fn apply_engine_pass_on_clock(
 ) -> (Vec<VenueMessage>, usize, usize) {
     let (mut events, emitted) = engine.apply_scans_on_clock(results, to_ns, sim);
     let mut originated = 0;
-    for (symbol, instant, px) in settlement_marks {
-        let settled = engine.settle(&[(symbol, px)], instant);
+    for (symbol, instant, px, reading) in settlement_marks {
+        let settled = engine.settle_read(&[(symbol, px, reading)], instant);
         originated += settled.originated_orders;
         events.extend(settled.events);
     }
@@ -675,7 +759,7 @@ fn apply_engine_pass_on_clock(
     // pass's single snapshot reports the freed cash rather than reporting it one
     // pass late.
     let settled_cash = engine.release_settled_cash(to_ns);
-    let marked = engine.mark_over(marks, extremes, to_ns);
+    let marked = engine.mark_over_read(marks, extremes, to_ns);
     // Time-driven expiry, which has nothing to do with triggers: a Gtd limit
     // nothing ever approached must still stop resting at its instant, and a Day
     // order must stop resting when its session closes whether or not the tape
@@ -2082,7 +2166,7 @@ mod tests {
             &mut engine,
             &[],
             Vec::new(),
-            &[("BTCUSDT.P".into(), Decimal::from(60_000))],
+            &[("BTCUSDT.P".into(), Decimal::from(60_000), None)],
             &[],
             FUNDING - 1,
             FUNDING,

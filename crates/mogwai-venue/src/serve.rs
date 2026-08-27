@@ -307,6 +307,8 @@ async fn serve_async(
         run: Arc::clone(&run),
         rivers: Arc::clone(&rivers),
         interval_ms: cfg.fill_sweep_interval_ms,
+        fill_band_vol_mult: cfg.fill_band_vol_mult,
+        fill_band_max_ticks: cfg.fill_band_max_ticks,
     });
     // The TTL reaper. A frozen account is resumable state with no lifecycle of
     // its own, so without this a long-lived shared exchange accumulates one

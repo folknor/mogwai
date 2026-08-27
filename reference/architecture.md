@@ -321,8 +321,10 @@ programmes number in the hundreds and change their terms without notice, so the
 shipped set is illustrative rather than authoritative.
 
 A breach flattens - cancel every resting order, then close every position as
-reduce-only IOC market orders at the mark, judged against the configured
-liquidation band - and then locks. A terminating breach on a venue serving one
+reduce-only IOC market orders at the mark, each crossing its position's last
+marked market state (the book the sweep read beside that mark), with the
+configured liquidation band as the fallback book where no pair was recorded -
+and then locks. A terminating breach on a venue serving one
 account ends the run, since its only account is dead and there is nothing left
 to serve; on a shared exchange it does not, because one subagent breaching must
 not take down the batch. Enforcement without the flatten would be a

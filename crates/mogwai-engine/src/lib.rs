@@ -489,11 +489,12 @@ impl MarketReading {
     /// or equal to every price that draw could have produced and needs no rng.
     ///
     /// The fallback rather than the rule, since 2026-08-27. A caller with a
-    /// tape under it hands the real book to `observe_books` before the mark, and
-    /// `close_reading` prefers it, so a forced close crosses the same book every
-    /// other taking path crosses. This invented one is what remains for a caller
-    /// holding no tape - the engine's own tests, and any path that marks from a
-    /// price alone - where refusing to liquidate would be the worse answer.
+    /// tape under it hands the real book in beside its mark (`mark_over_read`,
+    /// `settle_read`), and `close_reading` prefers that recorded pair, so a
+    /// forced close crosses the same book every other taking path crosses. This
+    /// invented one is what remains for a caller holding no tape - the engine's
+    /// own tests, and any path that marks from a price alone - where refusing
+    /// to liquidate would be the worse answer.
     #[must_use]
     pub fn forced_close(mark: Decimal, ts_ns: u64, band_ticks: u32, increment: Decimal) -> Self {
         let mut reading = Self::flat(mark, ts_ns, band_ticks);
@@ -723,12 +724,20 @@ pub struct Engine {
     last_marks: HashMap<Symbol, Decimal>,
     /// The book behind each mark in `last_marks`, when the caller could read one.
     ///
-    /// Filled by the same `mark_over` call that fills `last_marks`, from the same
-    /// instant, so a reading here is the book at the price beside it rather than
-    /// a separately-aged one. A venue-originated close consults it and crosses
-    /// the real book, which is what every other taking path does; absent an
-    /// entry it falls back to `MarketReading::forced_close`, because an engine
-    /// with no tape under it must still be able to liquidate.
+    /// The invariant is mechanical, not documentary: the only writers are
+    /// `mark_over_read` and `settle_read`, which record or invalidate a
+    /// symbol's entry in the same call that writes its mark, so an entry here
+    /// is always the book read at the instant the mark beside it was taken. A
+    /// caller that marks without a reading (`mark`, `mark_over`, `settle`)
+    /// invalidates the pair for every symbol it marks rather than leaving an
+    /// older book under a newer price. Entries persist per symbol across
+    /// passes: an account seated on several boats has each symbol's pair
+    /// written by that symbol's own boat, so a cross-river flatten closes each
+    /// position against its own last marked market state - exactly as stale as
+    /// the mark it closes at, never staler. A venue-originated close consults
+    /// it through `close_reading`; absent an entry it falls back to
+    /// `MarketReading::forced_close`, because an engine with no tape under it
+    /// must still be able to liquidate.
     ///
     /// Keyed by symbol for the same reason and with the same caveat as
     /// `last_marks` above: a mark names an instrument, not a river.
@@ -1128,38 +1137,58 @@ impl Engine {
         self.mark_over(marks, &[], ts)
     }
 
-    /// Record the book behind each mark, for the venue-originated closes a mark
-    /// may trigger.
+    /// As `mark_over_read` with no readings: every marked symbol's book pair is
+    /// invalidated, which is the honest record of a mark taken with no book
+    /// beside it. The engine's own tests and any caller marking from a price
+    /// alone come through here.
+    pub fn mark_over(
+        &mut self,
+        marks: &[(Symbol, Decimal)],
+        extremes: &[(Symbol, Decimal, Decimal)],
+        ts: u64,
+    ) -> MarkOutcome {
+        let unread: Vec<_> = marks
+            .iter()
+            .map(|(symbol, mark)| (Symbol::clone(symbol), *mark, None))
+            .collect();
+        self.mark_over_read(&unread, extremes, ts)
+    }
+
+    /// Record or invalidate the book pair each mark travels with.
     ///
-    /// Separate from `mark_over` rather than a parameter on it because the two
-    /// have different populations: every caller has marks, and only a caller
-    /// with a tape under it can read a book. Threading an always-empty slice
-    /// through the engine's own tests and through `settle` would have made the
-    /// absence look like a decision at each of them instead of the default it
-    /// is. Call this before the mark that may liquidate; a symbol with no entry
-    /// keeps the pessimistic invented book.
-    ///
-    /// Stale entries are overwritten rather than accumulated per instant: the
-    /// only consumer is a close happening inside the pass that just recorded
-    /// them, so a reading outliving its pass would be read by nothing.
-    pub fn observe_books(&mut self, readings: &[(Symbol, MarketReading)]) {
-        for (symbol, reading) in readings {
-            self.last_readings.insert(Symbol::clone(symbol), *reading);
+    /// The one writer of `last_readings`, shared by `mark_over_read` and
+    /// `settle_read`, which is what makes the pair invariant mechanical: a
+    /// reading can only enter beside the mark taken at its own instant, and a
+    /// mark without one removes whatever older book the symbol carried rather
+    /// than leaving it under a newer price.
+    fn record_book_pairs(&mut self, marks: &[(Symbol, Decimal, Option<MarketReading>)]) {
+        for (symbol, _, reading) in marks {
+            match reading {
+                Some(reading) => {
+                    self.last_readings.insert(Symbol::clone(symbol), *reading);
+                }
+                None => {
+                    self.last_readings.remove(symbol);
+                }
+            }
         }
     }
 
     /// The book a liquidation at `symbol` should cross.
     ///
-    /// The real one when the pass that marked this symbol could read it, which
-    /// is what makes a liquidation cross the same book every other taking path
-    /// crosses. Otherwise the invented one - deliberately pessimistic, quoted
-    /// the configured band away from the mark on both sides - which is the only
-    /// honest answer for an engine holding no tape.
+    /// The recorded pair when one exists: the book read at the instant the
+    /// symbol's current mark was taken, which is what makes a liquidation
+    /// cross the same book every other taking path crosses - for a breach in
+    /// the marking pass that is this instant's book, and for a cross-river
+    /// flatten it is the position's own last marked market state, exactly as
+    /// stale as the `mark_px` the close books at. Otherwise the invented one -
+    /// deliberately pessimistic, quoted the configured band away from the mark
+    /// on both sides - which is the only honest answer for an engine holding
+    /// no tape.
     ///
     /// The two liquidation sites only, and deliberately not off-river
-    /// retirement: this assumes `mark` was taken in the pass that recorded the
-    /// reading, which holds for a breach and does not hold for a position
-    /// carrying a stale mark on a river nobody reads. See `close_at_mark`.
+    /// retirement: retirement closes at a mark on a river nobody reads, where
+    /// the pair was invalidated or never recorded. See `close_at_mark`.
     fn close_reading(&self, symbol: &Symbol, mark: Decimal, ts: u64) -> MarketReading {
         self.last_readings.get(symbol).copied().unwrap_or_else(|| {
             MarketReading::forced_close(
@@ -1172,7 +1201,7 @@ impl Engine {
     }
 
     /// As `mark`, told what the tape's high and low were over the span this mark
-    /// closes.
+    /// closes, and handed the book each mark was read beside.
     ///
     /// The mark itself is still the span's closing price - that is what a
     /// position is worth now, and nothing about the extremes changes it. What
@@ -1181,12 +1210,23 @@ impl Engine {
     /// even though the price came back. Passing an empty slice is the
     /// pre-extremes behaviour and is what every caller with no tape under it
     /// does.
-    pub fn mark_over(
+    ///
+    /// Each mark carries the `MarketReading` taken at its own instant, or
+    /// `None` where the caller could not read one; the pair is recorded or
+    /// invalidated before any breach this call originates, so a liquidation
+    /// inside it crosses the book read at the mark it fires on.
+    pub fn mark_over_read(
         &mut self,
-        marks: &[(Symbol, Decimal)],
+        marks: &[(Symbol, Decimal, Option<MarketReading>)],
         extremes: &[(Symbol, Decimal, Decimal)],
         ts: u64,
     ) -> MarkOutcome {
+        self.record_book_pairs(marks);
+        let marks: Vec<(Symbol, Decimal)> = marks
+            .iter()
+            .map(|(symbol, mark, _)| (Symbol::clone(symbol), *mark))
+            .collect();
+        let marks = &marks[..];
         let mut moved = false;
         // Recorded for every class, before the futures-only position update
         // below. A spot pair posts no margin and holds no marked position, so
@@ -1524,9 +1564,10 @@ impl Engine {
     /// This is what enforcing an account policy does on breach: a strategy that
     /// would have been liquidated must actually be liquidated, or the forward
     /// claim is worth nothing. It is the same close the margin ledger performs
-    /// under `MarginBreachAction::Liquidate` - reduce-only IOC market orders at the
-    /// mark, judged against the configured liquidation band - applied to the
-    /// whole book instead of to one breached symbol.
+    /// under `MarginBreachAction::Liquidate` - reduce-only IOC market orders at
+    /// the mark, each crossing its position's last marked market state through
+    /// `close_reading`, with the configured liquidation band as the fallback
+    /// book - applied to the whole book instead of to one breached symbol.
     ///
     /// Resting orders go first. A flatten that left them would leave the
     /// account able to re-open the position it was just closed out of, through
@@ -2013,6 +2054,32 @@ impl Engine {
     /// under a case this guard makes unreachable from here, rather than the
     /// policy it was before.
     pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
+        let unread: Vec<_> = marks
+            .iter()
+            .map(|(symbol, mark)| (Symbol::clone(symbol), *mark, None))
+            .collect();
+        self.settle_read(&unread, ts)
+    }
+
+    /// As `settle`, handed the book each settlement price was read beside.
+    ///
+    /// Settlement is not sweep-granular: it strikes its own instant, writes the
+    /// settlement price into the position, and judges margin breaches at that
+    /// instant - so a breach it originates must cross the book read at the
+    /// settlement instant, not the pass-end book a later `mark_over_read` will
+    /// record. The pair is recorded or invalidated exactly as in
+    /// `mark_over_read`, through the same writer.
+    pub fn settle_read(
+        &mut self,
+        marks: &[(Symbol, Decimal, Option<MarketReading>)],
+        ts: u64,
+    ) -> MarkOutcome {
+        self.record_book_pairs(marks);
+        let marks: Vec<(Symbol, Decimal)> = marks
+            .iter()
+            .map(|(symbol, mark, _)| (Symbol::clone(symbol), *mark))
+            .collect();
+        let marks = &marks[..];
         let mut settled = false;
         for (symbol, settle_px) in marks {
             let Some(def) = self.instruments.get(symbol) else {
@@ -4393,6 +4460,116 @@ mod tests {
                 .any(|(symbol, _)| symbol.as_ref() == "MNQ")
         );
         assert_eq!(outcome.originated_orders, 1);
+    }
+
+    /// A one-level book quoted around `mark`, for driving the pair seam: a
+    /// liquidating sell that crosses it fills at `bid`, which no band
+    /// arithmetic produces from these fixtures' marks.
+    fn book_at(mark: i64, bid: i64, ask: i64, ts: u64) -> MarketReading {
+        let mut reading = MarketReading::flat(Decimal::from(mark), ts, 0);
+        reading.bid_px = Decimal::from(bid);
+        reading.ask_px = Decimal::from(ask);
+        reading
+    }
+
+    fn liquidation_px(events: &[VenueMessage], prefix: &str) -> Decimal {
+        events
+            .iter()
+            .find_map(|event| match event {
+                VenueMessage::OrderFilled(fill) if fill.client_order_id.starts_with(prefix) => {
+                    Some(fill.last_px)
+                }
+                _ => None,
+            })
+            .expect("the breach produces a fill")
+    }
+
+    #[test]
+    fn a_breach_liquidation_crosses_the_book_recorded_with_its_mark() {
+        let mut engine = futures_engine(3000, MarginBreachAction::Liquidate);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        let outcome = engine.mark_over_read(
+            &[(
+                "MNQ".into(),
+                Decimal::from(20_000),
+                Some(book_at(20_000, 19_995, 20_005, 2)),
+            )],
+            &[],
+            2,
+        );
+        // The recorded pair, not the invented band book: the liquidating sell
+        // crosses the bid the pass actually read beside its mark.
+        assert_eq!(
+            liquidation_px(&outcome.events, "LQ-"),
+            Decimal::from(19_995)
+        );
+    }
+
+    #[test]
+    fn marking_without_a_reading_invalidates_the_recorded_pair() {
+        let mut engine = futures_engine(3000, MarginBreachAction::Liquidate);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        // A pair recorded at a healthy mark...
+        engine.mark_over_read(
+            &[(
+                "MNQ".into(),
+                Decimal::from(21_000),
+                Some(book_at(21_000, 20_995, 21_005, 2)),
+            )],
+            &[],
+            2,
+        );
+        // ...must not survive a later mark taken with no book beside it. The
+        // breach falls back to the invented band book: 200 ticks of 0.25 below
+        // the 20,000 mark.
+        let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 3);
+        assert_eq!(
+            liquidation_px(&outcome.events, "LQ-"),
+            Decimal::from(19_950)
+        );
+    }
+
+    #[test]
+    fn a_settlement_breach_crosses_the_settlement_instant_book() {
+        let mut engine = futures_engine(3000, MarginBreachAction::Liquidate);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        // Settlement realizes the loss into cash and judges margin at its own
+        // instant, so the book it crosses is the one read at that instant.
+        let outcome = engine.settle_read(
+            &[(
+                "MNQ".into(),
+                Decimal::from(20_000),
+                Some(book_at(20_000, 19_990, 20_010, 3)),
+            )],
+            3,
+        );
+        assert_eq!(
+            liquidation_px(&outcome.events, "LQ-"),
+            Decimal::from(19_990)
+        );
+    }
+
+    #[test]
+    fn a_risk_flatten_crosses_the_positions_own_recorded_pair() {
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        // The pair recorded by an earlier, healthy pass survives per symbol, so
+        // an account-policy flatten fired later closes the position against its
+        // own last marked market state rather than an invented book.
+        engine.mark_over_read(
+            &[(
+                "MNQ".into(),
+                Decimal::from(21_000),
+                Some(book_at(21_000, 20_995, 21_005, 2)),
+            )],
+            &[],
+            2,
+        );
+        let outcome = engine.liquidate_all(5);
+        assert_eq!(
+            liquidation_px(&outcome.events, "RISK-"),
+            Decimal::from(20_995)
+        );
     }
 
     #[test]
