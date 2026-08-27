@@ -548,15 +548,22 @@ ledger.
 - `Perpetual` is a future that pays funding between long and short at an
   interval. With no expiry to converge at, funding is the only thing tying it to
   spot, so a perpetual without it reports P and L that is wrong by construction.
-  Funding is paid on notional at the mark, on instants that sit on multiples of
-  the interval from the unix epoch - a property of the clock, so the schedule
-  cannot depend on when a run booted or how the sweep passes were cut. The
-  configured `funding_rate` is the zero-premium interest. When the class names
-  an `index_symbol` and that symbol already has a last mark, the live rate is
-  `clamp(interest + (mark - index) / index, +/- funding_clamp)`. No index mark
-  means a zero premium: reading an index never spends a river nobody asked for,
-  so a perp-only venue keeps the configured rate. An instant is still honoured
-  on the sweep pass that crosses it rather than at the instant itself.
+  Funding is paid on notional at the mark standing at each instant, on instants
+  that sit on multiples of the interval from the unix epoch - a property of the
+  clock, so the schedule cannot depend on when a run booted or how the sweep
+  passes were cut. The configured `funding_rate` is the zero-premium interest.
+  When the class names an `index_symbol` and that symbol's river is
+  materialized, the live rate at an instant is
+  `clamp(interest + (mark - index) / index, +/- funding_clamp)`, both prices
+  read at that instant. No index mark means a zero premium: reading an index
+  never spends a river nobody asked for, so a perp-only venue keeps the
+  configured rate. An instant is still honoured on the sweep pass that crosses
+  it, but it is priced at its own instant, through the same enumerator and the
+  same rate rule the published `FundingRate` frames use - so the cash the
+  ledger moves reconciles with the frames on the wire. The sweep scopes
+  funding to the swept boat's own symbol, exactly as it scopes marks and
+  settlements, which is what keeps an account seated on several boats from
+  being charged one instant once per boat.
 - `Inverse` is coin-margined: quoted in one currency, settled in another. Value
   is `multiplier * qty / price` rather than `multiplier * qty * price`, so P and
   L is non-linear and a long is not the mirror of a short. `InstrumentDef`

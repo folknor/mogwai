@@ -472,13 +472,6 @@ instrument class is not a finding and does not need re-reporting.
   What remains open is only the cross-repository question above, which no test
   in this tree can close.
 
-- **Price funding per instant in the ledger.** `apply_funding` currently charges
-  `N * rate(pass-end mark, pass-end index)` for a span crossing `N` funding
-  instants. On a multi-instant sweep with a moving mark, the cash charged can
-  match no instant's actual price. The ledger is the approximating side, not
-  the publisher. Closing this means walking the instants and supplying the
-  engine with marks for each instant, which it does not currently receive.
-
 - **`DuplicateNextFill` may certify nothing against a nautilus host - recheck at
   the next pin.** At nautilus 0.62.0, `commit_fill` emits `fill.clone()` with the
   `trade_id` included, and `ExecutionEngine::validate_fill_for_order` calls

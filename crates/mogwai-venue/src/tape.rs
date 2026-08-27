@@ -264,15 +264,18 @@ impl Tape {
 
 /// The funding instants the half-open span `(from_ns, to_ns]` crosses, in order.
 ///
-/// The lifted twin of `mogwai_engine`'s private `funding_instants`, which
-/// answers the same question as a count rather than as the instants themselves.
-/// The two must agree on which instants exist or the ledger charges a schedule
-/// the tape does not publish, so `funding_instants_match_the_engines_counter`
-/// ties this enumerator to that counter over a table of spans.
+/// The one enumerator, shared by the publisher below and by the sweeper's
+/// funding-observation walk: the ledger charges exactly the instants the tape
+/// publishes because both sides ask this function, not because two copies of
+/// the arithmetic happen to agree.
 ///
 /// Instants sit on multiples of `interval_ns` from the unix epoch. A zero
 /// `interval_ns` and an empty or reversed span both yield nothing.
-fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> impl Iterator<Item = u64> {
+pub(crate) fn funding_instants(
+    from_ns: u64,
+    to_ns: u64,
+    interval_ns: u64,
+) -> impl Iterator<Item = u64> {
     // An empty inclusive range, spelled so the zero-interval division never
     // happens rather than guarded twice.
     let (start, end) = if interval_ns == 0 || to_ns <= from_ns {
@@ -493,38 +496,30 @@ mod snapshot_tests {
         assert!(snapshot.ts_event <= trade.ts_event);
     }
 
-    /// The tie test the lifted enumerator owes the engine's private counter.
-    ///
-    /// Two clocks that must never disagree about which instants exist: the
-    /// ledger charges by the count, the tape publishes the instants. Restating
-    /// the engine's formula here would test nothing about the engine, so the
-    /// count comes from `mogwai_engine::funding_instants_crossed`, which is
-    /// that private counter and nothing else.
+    /// The one enumerator's semantics, pinned by explicit expectation. The
+    /// ledger's funding observations and the published frames both come
+    /// through this function, so this table is the schedule contract for both.
     #[test]
-    fn funding_instants_match_the_engines_counter() {
-        let cases = [
+    fn funding_instants_enumerate_the_half_open_span() {
+        let cases: [(u64, u64, u64, &[u64]); 9] = [
             // Zero interval, a span crossing none, a span crossing exactly one,
             // both ends on instants, an abutting span, a span crossing many,
             // and an empty span.
-            (0, 10, 0),
-            (0, 9, 10),
-            (0, 10, 10),
-            (10, 20, 10),
-            (20, 30, 10),
-            (9, 95, 10),
-            (10, 10, 10),
-            (95, 9, 10),
-            (0, u64::MAX, u64::MAX),
+            (0, 10, 0, &[]),
+            (0, 9, 10, &[]),
+            (0, 10, 10, &[10]),
+            (10, 20, 10, &[20]),
+            (20, 30, 10, &[30]),
+            (9, 95, 10, &[10, 20, 30, 40, 50, 60, 70, 80, 90]),
+            (10, 10, 10, &[]),
+            (95, 9, 10, &[]),
+            (0, u64::MAX, u64::MAX, &[u64::MAX]),
         ];
-        for (from, to, interval) in cases {
+        for (from, to, interval, expected) in cases {
             let actual: Vec<_> = funding_instants(from, to, interval).collect();
-            let counted = mogwai_engine::funding_instants_crossed(from, to, interval);
             assert_eq!(
-                actual.len() as u64,
-                counted,
-                "the tape publishes {} instants over ({from}, {to}] at {interval} \
-                 while the ledger charges {counted}",
-                actual.len()
+                actual, expected,
+                "the instants over ({from}, {to}] at {interval}"
             );
             for instant in &actual {
                 assert!(
@@ -802,19 +797,19 @@ mod funding_emission_tests {
         );
     }
 
-    /// The divergence pin. The ledger charges `N * rate(pass-end mark, pass-end
-    /// index)` for a span crossing `N` instants; the publisher prices each
-    /// instant at the mark standing at that instant. This test exists so that a
-    /// later reader cannot quietly "fix" the two into agreement.
+    /// The reconciliation pin, replacing the old divergence pin. The ledger's
+    /// per-instant funding observations and the published frames price the
+    /// same instants through the same enumerator and the same rate rule, so
+    /// what an `apply_funding` walk over these observations charges is exactly
+    /// the sum the published rates state.
     ///
-    /// It needs a materialized index, and that is a fact about the divergence
-    /// rather than about the fixture: with no index the premium is zero at
-    /// every mark, so the rate does not depend on the mark and the two sides
-    /// cannot disagree however far the mark travels. The divergence exists only
-    /// where a premium does. The moving mark is asserted to actually move the
-    /// published rate, so a flat mark fails here rather than passing vacuously.
+    /// It needs a materialized index because that is where the old divergence
+    /// lived: with no index the premium is zero at every mark, so the rate
+    /// does not depend on the mark and the two sides could not disagree. The
+    /// moving mark is asserted to actually move the published rate, so a flat
+    /// mark fails here rather than passing vacuously.
     #[test]
-    fn published_rates_do_not_reconstruct_the_charged_cash() {
+    fn published_rates_reconstruct_the_charged_rates() {
         let terms = terms_over(INDEX_INTERVAL, Some(INDEX_SYMBOL));
         let rivers = materialized_index_rivers();
         let pass_end = INDEX_INTERVAL * 2 + 1;
@@ -841,20 +836,19 @@ mod funding_emission_tests {
             rates[0].1, rates[1].1,
             "the mark moved between the instants, so the published rates must too"
         );
-        let published_sum: Decimal = rates.iter().map(|(_, rate)| *rate).sum();
-        // What `apply_funding` would charge over the same span: the count of
-        // crossed instants, from the engine's own counter, times one rate taken
-        // at the pass-end mark and the pass-end index.
-        let charged = Decimal::from(mogwai_engine::funding_instants_crossed(
-            0,
-            pass_end,
-            INDEX_INTERVAL,
-        )) * terms.rate(Decimal::from(400), index_at(&rivers, pass_end));
-        assert_ne!(
-            published_sum, charged,
-            "a moving mark must make the published rates and the charged cash disagree, \
-             or this test has stopped pinning the divergence"
-        );
+        // The ledger side of the same instants: one observation per published
+        // instant, priced by the same standing-mark rule the publisher used.
+        // The marks standing at the two instants are the trades before them.
+        for (published_rate, (instant, mark)) in rates
+            .iter()
+            .zip([(INDEX_INTERVAL, 100_i64), (INDEX_INTERVAL * 2, 200_i64)])
+        {
+            let charged = terms.rate(Decimal::from(mark), index_at(&rivers, instant));
+            assert_eq!(
+                published_rate.1, charged,
+                "the rate the ledger charges at {instant} is the rate the tape published"
+            );
+        }
     }
 
     #[test]

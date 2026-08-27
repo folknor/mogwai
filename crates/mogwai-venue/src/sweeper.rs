@@ -307,6 +307,31 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                             .iter()
                             .any(|existing| existing == index)
                     });
+                // This boat's own funding schedule: the perpetual interval or
+                // the forex rollover minute, whichever the class carries. Like
+                // the marks and settlements above, funding is scoped to the
+                // boat's own symbol - an account seated on several boats used
+                // to have `apply_funding` walk its whole instrument set once
+                // per boat over overlapping spans, charging one instant once
+                // per boat that crossed it.
+                let funding_terms = sweep
+                    .rivers
+                    .resolve_profile(&symbol)
+                    .ok()
+                    .and_then(|profile| profile.def.class.funding())
+                    .filter(|terms| terms.interval_ns != 0);
+                let rollover_minute =
+                    sweep
+                        .rivers
+                        .resolve_profile(&symbol)
+                        .ok()
+                        .and_then(|profile| match &profile.def.class {
+                            mogwai_protocol::InstrumentClass::Forex {
+                                rollover_minute_utc,
+                                ..
+                            } => Some(*rollover_minute_utc),
+                            _ => None,
+                        });
                 let symbols: Vec<_> = mark_symbols
                     .iter()
                     .filter(|candidate| {
@@ -402,12 +427,66 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                             (mark_symbol, instant, px, reading)
                         })
                         .collect();
+                    // One funding observation per instant this span crossed,
+                    // priced at the instant's standing marks - the same
+                    // enumerator and the same rate inputs the publisher uses,
+                    // so the cash the ledger moves reconciles with the
+                    // `FundingRate` frames on the wire. An instant before the
+                    // river's first trade has no standing mark; the publisher
+                    // skips it and so does the charge. A failed read is
+                    // different: the instant is a non-repeatable obligation
+                    // like a settlement, so the whole pass is abandoned and
+                    // the watermark holds.
+                    let boat_key_for_read = boat_for_read.key();
+                    let river = boat_key_for_read.river();
+                    let mut owed_instants: Vec<u64> = Vec::new();
+                    if let Some(terms) = &funding_terms {
+                        owed_instants.extend(crate::tape::funding_instants(
+                            last_swept_ns,
+                            to_ns,
+                            terms.interval_ns,
+                        ));
+                    }
+                    if let Some(minute) = rollover_minute {
+                        owed_instants.extend(daily_instants(last_swept_ns, to_ns, minute));
+                    }
+                    let index_key = index
+                        .as_ref()
+                        .and_then(|name| rivers.key_for_symbol(name).ok());
+                    let mut funding = Vec::new();
+                    for instant in owed_instants {
+                        let mark = match rivers.last_trade_at_or_before(river, instant) {
+                            Ok(Some(px)) => px,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                tracing::warn!(
+                                    symbol = %read_symbol,
+                                    instant,
+                                    %error,
+                                    "abandoning the pass: a funding instant's mark could not be read",
+                                );
+                                return None;
+                            }
+                        };
+                        // The index at the instant, by the publisher's own
+                        // rule: unmaterialized or unreadable means a zero
+                        // premium, never a stalled pass.
+                        let index_mark = index_key
+                            .as_ref()
+                            .and_then(|key| fills::read_last(key, instant, &rivers));
+                        funding.push(mogwai_engine::FundingObservation {
+                            symbol: mogwai_protocol::Symbol::from(read_symbol.as_str()),
+                            instant_ns: instant,
+                            mark,
+                            index_mark,
+                        });
+                    }
                     let span = if unpaced {
                         fills::price_span(&span_river, last_swept_ns, to_ns, &rivers)?
                     } else {
                         None
                     };
-                    Some(((marks, settlement_marks), span))
+                    Some(((marks, settlement_marks, funding), span))
                 });
                 let reads = tokio::select! {
                     reads = reads => reads.flatten(),
@@ -416,7 +495,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let frontier = frontier_after(last_swept_ns, to_ns, reads.is_some());
                 boat.last_swept_ns
                     .store(frontier, std::sync::atomic::Ordering::Release);
-                let Some(((marks, settlement_marks), span)) =
+                let Some(((marks, settlement_marks, funding), span)) =
                     commit_pass(reads, &boat.extremes, unpaced)
                 else {
                     // The reading task died, or one of this span's settlement
@@ -460,7 +539,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         settlement_marks.clone(),
                         &marks,
                         &extremes,
-                        last_swept_ns,
+                        &funding,
                         to_ns,
                         session_closed.as_deref(),
                         boat.sim,
@@ -548,7 +627,8 @@ type PlainMarkReads = (
 );
 
 /// The pass's marks and settlement prices, each paired with the book read at
-/// its own instant where the boat could read one.
+/// its own instant where the boat could read one, plus the funding
+/// observations for the instants the span crossed.
 type MarkReads = (
     Vec<(
         mogwai_protocol::Symbol,
@@ -561,6 +641,7 @@ type MarkReads = (
         rust_decimal::Decimal,
         Option<MarketReading>,
     )>,
+    Vec<mogwai_engine::FundingObservation>,
 );
 
 /// Every tape price one sweep pass needs: the futures marks at `to_ns` and the
@@ -614,6 +695,32 @@ fn read_marks(
         })
         .collect();
     Some((marks, settlement_marks?))
+}
+
+/// The forex rollover instants the half-open span `(from_ns, to_ns]` crosses,
+/// in order: one per UTC day, at `minute_utc` minutes past midnight.
+///
+/// The daily twin of `tape::funding_instants`, for the class that pays a swap
+/// at a wall-clock minute rather than at epoch-aligned interval multiples. A
+/// minute outside the day and an empty or reversed span both yield nothing.
+fn daily_instants(from_ns: u64, to_ns: u64, minute_utc: u32) -> impl Iterator<Item = u64> {
+    const DAY_NS: u64 = 86_400_000_000_000;
+    let offset = u64::from(minute_utc).saturating_mul(60_000_000_000);
+    // Instants at or before `instant`, counting the k-th instant as
+    // `offset + k * DAY_NS`.
+    let through = move |instant: u64| {
+        if instant >= offset {
+            (instant - offset) / DAY_NS + 1
+        } else {
+            0
+        }
+    };
+    let (start, end) = if to_ns <= from_ns || offset >= DAY_NS {
+        (1, 0)
+    } else {
+        (through(from_ns) + 1, through(to_ns))
+    };
+    (start..=end).map(move |ordinal| offset + (ordinal - 1) * DAY_NS)
 }
 
 /// Where the settlement frontier stands after a pass.
@@ -707,9 +814,9 @@ fn apply_engine_pass(
         // No tape under these callers, so no span: the trail follows the mark,
         // which is the pre-extremes behaviour.
         &[],
-        // No funding span and no session close: these callers are the unit
-        // tests, which drive settlement and marking rather than the clock.
-        to_ns,
+        // No funding observations and no session close: these callers are the
+        // unit tests, which drive settlement and marking rather than the clock.
+        &[],
         to_ns,
         None,
         mogwai_protocol::SimClock {
@@ -722,7 +829,7 @@ fn apply_engine_pass(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "one pass over one ledger needs every one of these: the scans, the settlement and mark prices, the swept span for funding, the session close for expiry, and the clock to stamp with"
+    reason = "one pass over one ledger needs every one of these: the scans, the settlement and mark prices, the funding observations, the session close for expiry, and the clock to stamp with"
 )]
 fn apply_engine_pass_on_clock(
     engine: &mut mogwai_engine::Engine,
@@ -743,7 +850,7 @@ fn apply_engine_pass_on_clock(
         rust_decimal::Decimal,
         rust_decimal::Decimal,
     )],
-    from_ns: u64,
+    funding: &[mogwai_engine::FundingObservation],
     to_ns: u64,
     session_closed: Option<&str>,
     sim: mogwai_protocol::SimClock,
@@ -765,10 +872,11 @@ fn apply_engine_pass_on_clock(
     // order must stop resting when its session closes whether or not the tape
     // came near it.
     events.extend(engine.expire_orders(to_ns, session_closed, to_ns));
-    // Marked first, then funded: funding is paid on notional at the mark, so
-    // paying before the mark moved would charge this interval at the last
-    // interval's price.
-    let funded = engine.apply_funding(from_ns, to_ns, to_ns);
+    // Funding is priced by the observations themselves - each instant carries
+    // the standing mark the venue read at it - so its ordering against the
+    // mark no longer decides a price; it stays after the mark so the pass's
+    // one snapshot reports both.
+    let funded = engine.apply_funding(funding, to_ns);
     events.extend(funded.events);
     originated += marked.originated_orders;
     events.extend(marked.events);
@@ -1526,16 +1634,24 @@ mod tests {
 
         // The next pass re-sweeps the same interval, and must still find the
         // spike the tape actually printed in it.
-        let (_reads, span) = commit_pass(Some(((Vec::new(), Vec::new()), None)), &extremes, false)
-            .expect("the reading succeeded");
+        let (_reads, span) = commit_pass(
+            Some(((Vec::new(), Vec::new(), Vec::new()), None)),
+            &extremes,
+            false,
+        )
+        .expect("the reading succeeded");
         let span = span.expect("the tape printed in this interval");
         assert_eq!(span.high_px, rust_decimal::Decimal::from(140));
         assert_eq!(span.low_px, rust_decimal::Decimal::from(90));
 
         // And a committed pass does consume it, so the next span starts from
         // its own prints rather than re-ratcheting a peak already spent.
-        let (_reads, span) = commit_pass(Some(((Vec::new(), Vec::new()), None)), &extremes, false)
-            .expect("the reading succeeded");
+        let (_reads, span) = commit_pass(
+            Some(((Vec::new(), Vec::new(), Vec::new()), None)),
+            &extremes,
+            false,
+        )
+        .expect("the reading succeeded");
         assert!(span.is_none(), "a committed pass consumes the span");
     }
 
@@ -2158,6 +2274,32 @@ mod tests {
         );
     }
 
+    /// The daily enumerator's semantics, pinned the same way as the interval
+    /// one in `tape.rs`: explicit expected instants over a table of spans.
+    #[test]
+    fn daily_instants_enumerate_the_half_open_span() {
+        const DAY_NS: u64 = 86_400_000_000_000;
+        let offset = 1_320 * 60_000_000_000_u64;
+        let cases: [(u64, u64, u32, Vec<u64>); 6] = [
+            (offset - 1, offset + 1, 1_320, vec![offset]),
+            (offset, offset + DAY_NS, 1_320, vec![offset + DAY_NS]),
+            (0, offset - 1, 1_320, vec![]),
+            (
+                offset - 1,
+                offset + DAY_NS,
+                1_320,
+                vec![offset, offset + DAY_NS],
+            ),
+            // A reversed span and a minute outside the day both yield nothing.
+            (offset + 1, offset, 1_320, vec![]),
+            (0, 10 * DAY_NS, 1_441, vec![]),
+        ];
+        for (from, to, minute, expected) in cases {
+            let actual: Vec<_> = daily_instants(from, to, minute).collect();
+            assert_eq!(actual, expected, "instants over ({from}, {to}] at {minute}");
+        }
+    }
+
     #[test]
     fn a_pass_snapshot_is_taken_after_its_funding_payment() {
         const FUNDING: u64 = 8 * 3_600 * 1_000_000_000;
@@ -2168,7 +2310,12 @@ mod tests {
             Vec::new(),
             &[("BTCUSDT.P".into(), Decimal::from(60_000), None)],
             &[],
-            FUNDING - 1,
+            &[mogwai_engine::FundingObservation {
+                symbol: "BTCUSDT.P".into(),
+                instant_ns: FUNDING,
+                mark: Decimal::from(60_000),
+                index_mark: None,
+            }],
             FUNDING,
             None,
             mogwai_protocol::SimClock::identity(),
@@ -2191,7 +2338,7 @@ mod tests {
         extremes.record(&mut writer, Decimal::from(999), 999);
         let bounded = crate::extremes::PriceSpan::of(Decimal::from(100), 5);
         let (_, span) = commit_pass(
-            Some(((Vec::new(), Vec::new()), Some(bounded))),
+            Some(((Vec::new(), Vec::new(), Vec::new()), Some(bounded))),
             &extremes,
             true,
         )

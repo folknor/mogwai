@@ -88,47 +88,23 @@ pub enum Resting {
     Held,
 }
 
-/// How many funding instants the half-open span `from_ns .. to_ns` crossed.
+/// One funding or rollover instant the venue's sweep crossed, priced at that
+/// instant's standing marks.
 ///
-/// Instants sit on multiples of `interval_ns` from the unix epoch, which is the
-/// convention every venue publishing an eight-hour cycle follows and makes the
-/// schedule a property of the clock rather than of when a run happened to boot.
-/// Half-open with `from_ns` exclusive, so a span abutting the previous one funds
-/// each instant exactly once however the sweep passes are cut.
-/// The counter above, for the one caller outside this crate that must agree
-/// with it: `mogwai-venue`'s tape thread enumerates the instants themselves in
-/// order to publish a rate at each, and a lifted copy of this arithmetic is
-/// free to drift from it silently - both halves green, neither checking the
-/// other. The venue's `funding_instants_match_the_engines_counter` ties the two
-/// through this function. It is not a general-purpose API and nothing else
-/// should call it; the schedule a consumer sees is the published frame.
-#[doc(hidden)]
-#[must_use]
-pub fn funding_instants_crossed(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
-    funding_instants(from_ns, to_ns, interval_ns)
-}
-
-fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
-    if interval_ns == 0 || to_ns <= from_ns {
-        return 0;
-    }
-    (to_ns / interval_ns).saturating_sub(from_ns / interval_ns)
-}
-
-fn daily_instants(from_ns: u64, to_ns: u64, minute_utc: u32) -> u64 {
-    const DAY_NS: u64 = 86_400_000_000_000;
-    let offset = u64::from(minute_utc).saturating_mul(60_000_000_000);
-    if to_ns <= from_ns || offset >= DAY_NS {
-        return 0;
-    }
-    let through = |instant: u64| {
-        if instant >= offset {
-            (instant - offset) / DAY_NS + 1
-        } else {
-            0
-        }
-    };
-    through(to_ns).saturating_sub(through(from_ns))
+/// The engine enumerates no instants and reads no tape: which instants a span
+/// crossed is a property of the tape clock, owned by the venue beside the
+/// funding publisher's own enumerator so the ledger's charges and the
+/// published `FundingRate` frames price the same instants the same way.
+/// `mark` is the symbol's standing trade mark at the instant; `index_mark` is
+/// the funding index's, where the class names one and its river is
+/// materialized - absent, the premium is zero, exactly as the publisher
+/// prices it.
+#[derive(Debug, Clone)]
+pub struct FundingObservation {
+    pub symbol: Symbol,
+    pub instant_ns: u64,
+    pub mark: Decimal,
+    pub index_mark: Option<Decimal>,
 }
 
 /// A resting order tracked by the venue.
@@ -1875,101 +1851,98 @@ impl Engine {
         self.on_submit_from(order, ts, Some(reading), false, &[], None)
     }
 
-    /// Exchange funding on every perpetual position, for each funding instant
-    /// the span `from_ns .. to_ns` crossed.
+    /// Exchange funding on every observed instant: one entry per funding or
+    /// rollover instant the caller's swept span crossed, priced at that
+    /// instant's standing mark and index.
     ///
     /// A perpetual has no expiry to converge at, so funding is the only thing
     /// tying it to spot: the long pays the short a fraction of notional at a
     /// fixed interval, or the reverse when the rate is negative. A strategy
     /// holding a perp across funding instants has a real cash flow, so a venue
     /// without this reports P and L that is wrong by construction rather than by
-    /// approximation.
+    /// approximation. A forex position pays its configured side's daily swap at
+    /// its rollover instant through the same walk.
     ///
-    /// Paid on notional at the mark, not at entry: funding is a payment on what
-    /// the position is worth now, which is why a position that has moved against
-    /// its holder pays less as it shrinks.
+    /// Paid on notional at the instant's mark, not at entry and not at the pass
+    /// end: each observation carries the standing mark the venue read at that
+    /// instant, so the cash charged reconciles with the published `FundingRate`
+    /// frames, which price the same instants the same way. The engine
+    /// enumerates nothing - which instants a span crossed is a property of the
+    /// tape clock, owned by the venue beside the publisher's own enumerator, so
+    /// the two cannot drift. It also scopes nothing: the caller supplies
+    /// observations for the river its pass swept, which is what keeps an
+    /// account seated on several boats from being charged one instant once per
+    /// boat.
     ///
-    /// The span is half-open, `from_ns` exclusive and `to_ns` inclusive, matching
-    /// the settlement walk - so an instant is funded exactly once however the
-    /// sweep passes are cut.
-    ///
-    /// A multi-instant span is charged as the number of crossed instants times
-    /// one rate at the pass-end mark and index. Funding data frames instead
-    /// price each instant at its standing mark, so they are market prices, not
-    /// receipts, and cannot be used to reconcile the resulting balance change.
-    pub fn apply_funding(&mut self, from_ns: u64, to_ns: u64, ts: u64) -> MarkOutcome {
+    /// One application per `(symbol, instant)` is an engine invariant, not a
+    /// trust in the caller: a duplicate observation is skipped with a warning,
+    /// and is a caller defect asserted on in debug builds.
+    pub fn apply_funding(&mut self, observations: &[FundingObservation], ts: u64) -> MarkOutcome {
         let mut paid = false;
-        let symbols: Vec<Symbol> = self.instruments.keys().cloned().collect();
-        for symbol in symbols {
-            let Some(def) = self.instruments.get(&symbol) else {
+        let mut applied: HashSet<(Symbol, u64)> = HashSet::new();
+        for observation in observations {
+            if !applied.insert((Symbol::clone(&observation.symbol), observation.instant_ns)) {
+                debug_assert!(
+                    false,
+                    "duplicate funding observation for {} at {}",
+                    observation.symbol, observation.instant_ns
+                );
+                tracing::warn!(
+                    symbol = %observation.symbol,
+                    instant = observation.instant_ns,
+                    "skipping a duplicate funding observation",
+                );
+                continue;
+            }
+            let Some(def) = self.instruments.get(&observation.symbol) else {
                 continue;
             };
             if let mogwai_protocol::InstrumentClass::Forex {
-                rollover_minute_utc,
                 swap_long,
                 swap_short,
                 ..
             } = &def.class
             {
-                let instants = daily_instants(from_ns, to_ns, *rollover_minute_utc);
-                if instants != 0 {
-                    let currency = def.class.settlement_currency().to_owned();
-                    let mut owed = Decimal::ZERO;
-                    for position in self
-                        .account
-                        .positions
-                        .iter()
-                        .filter(|((position_symbol, _), _)| *position_symbol == symbol)
-                        .map(|(_, position)| position)
-                    {
-                        if position.qty.is_zero() {
-                            continue;
-                        }
-                        // Absolute notional, unlike the perpetual funding walk
-                        // below. There the sign of the payment comes from the
-                        // position, because one rate has to debit a long and
-                        // credit a short. Here the side has already chosen the
-                        // rate, so a signed notional would apply the sign
-                        // twice: a short on a negative `swap_short` would be
-                        // paid the carry it owes.
-                        let Some(notional) = def.notional(position.qty.abs(), position.mark_px)
-                        else {
-                            continue;
-                        };
-                        let rate = if position.qty.is_sign_positive() {
-                            *swap_long
-                        } else {
-                            *swap_short
-                        };
-                        if let Some(payment) = notional
-                            .checked_mul(rate)
-                            .and_then(|per| per.checked_mul(Decimal::from(instants)))
-                        {
-                            owed = owed.saturating_add(payment);
-                        }
+                let currency = def.class.settlement_currency().to_owned();
+                let mut owed = Decimal::ZERO;
+                for position in self
+                    .account
+                    .positions
+                    .iter()
+                    .filter(|((position_symbol, _), _)| *position_symbol == observation.symbol)
+                    .map(|(_, position)| position)
+                {
+                    if position.qty.is_zero() {
+                        continue;
                     }
-                    if !owed.is_zero() {
-                        let total = self.account.balances.entry(currency).or_default();
-                        *total = total.saturating_add(owed);
-                        paid = true;
+                    // Absolute notional, unlike the perpetual walk below. There
+                    // the sign of the payment comes from the position, because
+                    // one rate has to debit a long and credit a short. Here the
+                    // side has already chosen the rate, so a signed notional
+                    // would apply the sign twice: a short on a negative
+                    // `swap_short` would be paid the carry it owes.
+                    let Some(notional) = def.notional(position.qty.abs(), observation.mark) else {
+                        continue;
+                    };
+                    let rate = if position.qty.is_sign_positive() {
+                        *swap_long
+                    } else {
+                        *swap_short
+                    };
+                    if let Some(payment) = notional.checked_mul(rate) {
+                        owed = owed.saturating_add(payment);
                     }
+                }
+                if !owed.is_zero() {
+                    let total = self.account.balances.entry(currency).or_default();
+                    *total = total.saturating_add(owed);
+                    paid = true;
                 }
                 continue;
             }
             let Some(terms) = def.class.funding() else {
                 continue;
             };
-            if terms.interval_ns == 0 {
-                continue;
-            }
-            let instants = funding_instants(from_ns, to_ns, terms.interval_ns);
-            if instants == 0 {
-                continue;
-            }
-            let index = terms
-                .index_symbol
-                .as_ref()
-                .and_then(|index| self.last_marks.get(index.as_str()).copied());
             let currency = def.class.settlement_currency().to_owned();
             let def = def.clone();
             let mut owed = Decimal::ZERO;
@@ -1977,24 +1950,22 @@ impl Engine {
                 .account
                 .positions
                 .iter()
-                .filter(|((position_symbol, _), _)| *position_symbol == symbol)
+                .filter(|((position_symbol, _), _)| *position_symbol == observation.symbol)
                 .map(|(_, position)| position)
             {
                 if position.qty.is_zero() {
                     continue;
                 }
-                let Some(notional) = def.notional(position.qty, position.mark_px) else {
+                let Some(notional) = def.notional(position.qty, observation.mark) else {
                     continue;
                 };
-                // The rate is computed at this mark against the index, if any.
-                // A long pays a positive rate, so the sign follows the
-                // position: the same amount debits a long and credits a short,
-                // which is what makes funding a transfer rather than a fee.
-                let rate = terms.rate(position.mark_px, index);
-                let Some(payment) = notional
-                    .checked_mul(rate)
-                    .and_then(|per| per.checked_mul(Decimal::from(instants)))
-                else {
+                // The rate is computed at the instant's mark against the
+                // instant's index, if any. A long pays a positive rate, so the
+                // sign follows the position: the same amount debits a long and
+                // credits a short, which is what makes funding a transfer
+                // rather than a fee.
+                let rate = terms.rate(observation.mark, observation.index_mark);
+                let Some(payment) = notional.checked_mul(rate) else {
                     continue;
                 };
                 owed = owed.saturating_sub(payment);
@@ -9570,6 +9541,15 @@ mod tests {
 
     const EIGHT_HOURS_NS: u64 = 8 * 3_600 * 1_000_000_000;
 
+    fn funding_obs(symbol: &str, instant: u64, mark: Decimal) -> FundingObservation {
+        FundingObservation {
+            symbol: symbol.into(),
+            instant_ns: instant,
+            mark,
+            index_mark: None,
+        }
+    }
+
     fn perpetual(rate: Decimal) -> InstrumentDef {
         perpetual_against(rate, None, Decimal::ZERO)
     }
@@ -9648,7 +9628,10 @@ mod tests {
         e.mark(&[("EURUSD".into(), Decimal::new(120_000, 5))], 2);
         let before = *e.account.balances.get("USD").expect("funded");
         let boundary = 1_320 * 60_000_000_000_u64;
-        e.apply_funding(boundary - 1, boundary + 1, 3);
+        e.apply_funding(
+            &[funding_obs("EURUSD", boundary, Decimal::new(120_000, 5))],
+            3,
+        );
         let after = *e.account.balances.get("USD").expect("funded");
         assert_eq!(after - before, Decimal::new(12, 2));
     }
@@ -9689,7 +9672,10 @@ mod tests {
         e.mark(&[("EURUSD".into(), Decimal::new(120_000, 5))], 2);
         let before = *e.account.balances.get("USD").expect("funded");
         let boundary = 1_320 * 60_000_000_000_u64;
-        e.apply_funding(boundary - 1, boundary + 1, 3);
+        e.apply_funding(
+            &[funding_obs("EURUSD", boundary, Decimal::new(120_000, 5))],
+            3,
+        );
         let after = *e.account.balances.get("USD").expect("funded");
         assert_eq!(
             after - before,
@@ -9734,7 +9720,14 @@ mod tests {
 
         // One instant crossed: 10 contracts at 60,000 is 600,000 of notional,
         // and one basis point of that is 60.
-        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        e.apply_funding(
+            &[funding_obs(
+                "BTCUSDT.P",
+                EIGHT_HOURS_NS,
+                Decimal::from(60_000),
+            )],
+            3,
+        );
         let after = *e.account.balances.get("USDT").expect("funded");
         assert_eq!(
             before - after,
@@ -9774,7 +9767,14 @@ mod tests {
         );
         e.mark(&[("BTCUSDT.P".into(), Decimal::from(50_000))], 2);
         let before = *e.account.balances.get("USDT").expect("funded");
-        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        e.apply_funding(
+            &[funding_obs(
+                "BTCUSDT.P",
+                EIGHT_HOURS_NS,
+                Decimal::from(50_000),
+            )],
+            3,
+        );
         assert!(
             *e.account.balances.get("USDT").expect("funded") > before,
             "a negative rate pays the long rather than charging it"
@@ -9835,7 +9835,14 @@ mod tests {
             );
             e.mark(&[("BTCUSDT.P".into(), Decimal::from(mark))], 2);
             let before = *e.account.balances.get("USDT").expect("funded");
-            e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+            e.apply_funding(
+                &[funding_obs(
+                    "BTCUSDT.P",
+                    EIGHT_HOURS_NS,
+                    Decimal::from(mark),
+                )],
+                3,
+            );
             let after = *e.account.balances.get("USDT").expect("funded");
             assert_eq!(
                 after - before,
@@ -9845,21 +9852,50 @@ mod tests {
         }
     }
 
-    /// A span crossing no instant funds nothing, and a span crossing two funds
-    /// twice. The schedule is a property of the clock, so it cannot depend on
-    /// how the sweep passes were cut.
+    /// One application per symbol and instant is the engine's own invariant,
+    /// not a trust in the caller's vector: a venue bug that supplies the same
+    /// instant twice must not charge twice. The double-boat defect this guards
+    /// the other side of was exactly that shape - one account seated on two
+    /// boats had this walk run once per boat over overlapping spans.
     #[test]
-    fn funding_instants_are_counted_once_per_interval_crossed() {
-        assert_eq!(funding_instants(0, EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS), 0);
-        assert_eq!(funding_instants(0, EIGHT_HOURS_NS, EIGHT_HOURS_NS), 1);
-        assert_eq!(
-            funding_instants(EIGHT_HOURS_NS, 3 * EIGHT_HOURS_NS, EIGHT_HOURS_NS),
-            2
+    fn a_duplicate_funding_observation_charges_once() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![perpetual(Decimal::new(1, 4))],
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: MarginBreachAction::Refuse,
+                basis: MarginBasis::PerContract,
+            },
         );
-        // Abutting spans never double-count: the left edge is exclusive.
-        let first = funding_instants(0, EIGHT_HOURS_NS, EIGHT_HOURS_NS);
-        let second = funding_instants(EIGHT_HOURS_NS, 2 * EIGHT_HOURS_NS, EIGHT_HOURS_NS);
-        assert_eq!(first + second, 2);
+        e.process_stamped(
+            Command::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT.P",
+                10,
+                Some(Decimal::from(50_000)),
+            )),
+            1,
+        );
+        e.mark(&[("BTCUSDT.P".into(), Decimal::from(60_000))], 2);
+        let before = *e.account.balances.get("USDT").expect("funded");
+        let observation = funding_obs("BTCUSDT.P", EIGHT_HOURS_NS, Decimal::from(60_000));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            e.apply_funding(&[observation.clone(), observation], 3);
+        }));
+        // Debug builds assert on the caller defect; the release behaviour the
+        // assertion documents is a single charge either way.
+        if result.is_ok() {
+            let after = *e.account.balances.get("USDT").expect("funded");
+            assert_eq!(before - after, Decimal::from(60), "charged exactly once");
+        }
     }
 
     /// A mark above the index makes the long pay more than the configured
@@ -9904,7 +9940,13 @@ mod tests {
             2,
         );
         let before = *e.account.balances.get("USDT").expect("funded");
-        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        e.apply_funding(
+            &[FundingObservation {
+                index_mark: Some(Decimal::from(60_000)),
+                ..funding_obs("BTCUSDT.P", EIGHT_HOURS_NS, Decimal::from(60_600))
+            }],
+            3,
+        );
         let after = *e.account.balances.get("USDT").expect("funded");
         // 10 contracts at 60,600 is 606,000 of notional; 1 percent premium is
         // 6,060. Interest is zero, so that is the whole payment.
@@ -9946,7 +9988,14 @@ mod tests {
         );
         e.mark(&[("BTCUSDT.P".into(), Decimal::from(60_000))], 2);
         let before = *e.account.balances.get("USDT").expect("funded");
-        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        e.apply_funding(
+            &[funding_obs(
+                "BTCUSDT.P",
+                EIGHT_HOURS_NS,
+                Decimal::from(60_000),
+            )],
+            3,
+        );
         let after = *e.account.balances.get("USDT").expect("funded");
         assert_eq!(
             before - after,
