@@ -2290,12 +2290,20 @@ impl Engine {
             // skipping" and bails before the event reaches `Position::apply`,
             // which would otherwise panic on a repeated trade id.
             //
-            // So against nautilus the arm is inert, and green venue-side tests
-            // certify nothing about the consumer. Keeping the id models a
-            // retransmitting venue and tests consumer deduplication, which
-            // nautilus passes silently. Minting a fresh id would instead model
-            // a phantom execution that a correct consumer books twice, and
-            // would shift every later venue trade id. Those are different lies.
+            // So against nautilus the arm is inert on the event path, and that
+            // was ruled the correct state on 2026-08-27, closing the choice the
+            // backlog carried: the shared id stays. Keeping it models a
+            // retransmitting venue - the divergence real venues actually
+            // produce - and nautilus silently deduplicating it is the consumer
+            // surviving the divergence, the good outcome rather than a vacuous
+            // one: the venue emits the duplicate, the adapter forwards both
+            // frames (pinned in `havoc.rs`), and the host books once. Minting
+            // a fresh id would instead model a phantom execution that a
+            // correct consumer is right to book twice - a different venue lie,
+            // one that punishes correct consumers and shifts every later trade
+            // id. If a corrupt-fill-stream divergence is ever wanted, it is a
+            // separately named arm with its own contract, never this one
+            // repurposed.
             out.push(VenueMessage::OrderFilled(fill.clone()));
         }
         out.push(VenueMessage::OrderFilled(fill));

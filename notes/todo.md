@@ -62,11 +62,7 @@ what unblocks what.
    the crossing moved no tape byte. The calibration landing does owe one,
    because its preset constants move generated quote bytes.
 2. **The adapter and consumer surface**: a test pinning the `MarketToLimit`
-   refusal makes that gap loud, and `DuplicateNextFill` waits on the next pin.
-   The unsent broadarrow
-   message is pulled out of this ranking entirely: write it immediately, it
-   costs an hour and every week it waits their scenarios run against a wire
-   shape that 422s.
+   refusal makes that gap loud.
 
 Excluded as tape-gated: the segment-sampler gate, the composed-river
 checkpoint chain behind it, and the whole tape-research-v2 cluster. The
@@ -313,44 +309,6 @@ instrument class is not a finding and does not need re-reporting.
 
 ## Venue and protocol
 
-- **`RunComplete` reports slightly less than the declared duration, and nothing
-  on the wire lets a consumer tell.** The deadline is judged on the venue clock
-  while `ws.rs` re-derives every announcement on the receiving socket's boat
-  clock, so the announcement trails by the placement gap times `speed`. Both
-  halves are deliberate and stated in `reference/clock.md`. `RunComplete` carries
-  only `sim_now_ns` and `elapsed_ns`, and the variant's own doc states the
-  consequence: `elapsed_ns` is the span that boat covered, not the run's declared
-  duration.
-
-  What is open is whether a consumer should be able to distinguish "the run
-  served its whole duration and my boat was placed late" from "the run was cut
-  short". Nobody has asked for the distinction.
-
-  Two shapes if it is ever wanted, with their costs. A new field on `RunComplete`
-  carrying the venue's own elapsed beside the socket's: cheap, but an old decoder
-  ignores it and commits the same false transition, which is the reasoning the
-  `PassengerDurationComplete` landing already recorded for preferring a new tag.
-  A second tag the way that landing took: fails loudly on an old decoder, but
-  costs every consumer a third terminal frame to classify on top of `RunComplete`
-  and `PassengerDurationComplete`. The status quo misleads nobody who reads the
-  variant doc, only somebody who assumes.
-
-  Adjacent and previously untracked: `RunComplete` is also emitted on the
-  already-complete-at-boarding path, where `elapsed_ns` measures from the boat
-  epoch, so a passenger boarding a finished run reports the boat's whole span as
-  its own elapsed. The variant doc calls this intended.
-
-- Refusal texts spell their bounds out instead of naming the constant.
-  Half of the original finding is closed: `messages::validate_wire_symbol` now
-  says bytes and a test pins the refusal text against `MAX_SYMBOL_LEN`, so moving
-  the constant fails loudly. What is left is cosmetic: the bound is still spelled
-  `32` inline on the refusal a client sees at the venue's front door, and four
-  divergence texts in the same module have the shape too - count at the
-  production sites, since the module's tests carry the same strings as expected
-  values. Both refusals return `&'static str`, so fixing means changing the
-  return type or reaching for a `const` formatter, which is why neither was fixed
-  in passing.
-
 - **One residual divergence between the boat implementation and the glossary's
   Boat entry.** The two concrete divergences the cold review raised landed on
   2026-08-27: the owner discriminator left the boat key, so identical named
@@ -377,15 +335,6 @@ instrument class is not a finding and does not need re-reporting.
   ruling, because by then the tape has already produced the print and aborting
   the serving path over it is the one thing no venue does. Open only as a
   known-covered case.
-
-- **`Balance.locked` conflates three things** - order holds, maintenance
-  collateral and unsettled credits - in one wire number with opposite remedies.
-  An order hold frees on cancel, maintenance collateral frees on closing the
-  position, an unsettled credit frees when it settles, and a consumer watching
-  `locked` rise cannot tell which happened or what would release it. Two scopes
-  recommend a split; `Account::unsettled`'s doc in `mogwai-engine` argues the
-  conflation is fine. Owner has said this gets resolved; the ruling on what to do
-  is still owed.
 
 ## Adapter
 
@@ -446,61 +395,6 @@ instrument class is not a finding and does not need re-reporting.
 
   What remains open is only the cross-repository question above, which no test
   in this tree can close.
-
-- **`DuplicateNextFill` may certify nothing against a nautilus host - recheck at
-  the next pin.** At nautilus 0.62.0, `commit_fill` emits `fill.clone()` with the
-  `trade_id` included, and `ExecutionEngine::validate_fill_for_order` calls
-  `Order::is_duplicate_fill`, which matches `trade_id`, `order_side`, `last_qty`
-  and `last_px` together and bails with a warning before `Position::apply`. So
-  the arm is swallowed in silence and exercises nothing.
-
-  **The recheck is done, 2026-08-27, against the pinned source rather than a
-  memory of it** - `research/nautilus_trader` now sits on master at `648970c`,
-  the "Release Rust crates 0.62.0" commit, which is exactly what
-  `mogwai-adapter` links. Two findings.
-
-  The owner's report was accurate and is now fulfilled. It was written while
-  this workspace built against 0.61, and "the next release" meant 0.62 - which
-  is what we pin today, so the fix the report promised is in the tree we link.
-  It is `f9594dc962`, "Improve execution engine duplicate fill handling",
-  authored by the owner upstream, contained in master alongside `f13115f2df`,
-  "Fix v2 startup reconciliation fill replay". There is nothing on `develop`
-  touching this that master does not already have. The entry's "unverified"
-  qualifier is retired: verified, and it landed.
-
-  But the fix runs the other way from what this entry hoped, which is the part
-  that changes the decision. It did not make nautilus surface the duplicate; it
-  strengthened the swallowing. That commit
-  introduced `is_duplicate_fill` as a trait default and added a second,
-  independent gate beside it - `position_contains_trade_id`, which refuses a
-  fill whose trade id the position already carries even when the order check
-  passes. Both bail before `Position::apply`.
-
-  So the first option is settled false and is struck:
-
-  - ~~Keeping the shared id becomes right if nautilus surfaces the duplicate.~~
-    It does not surface it, at the pin or on `develop`. Keeping the id leaves
-    the arm inert against every nautilus host, and green venue-side tests go on
-    certifying nothing about the consumer.
-  - Minting a fresh `trade_id` per emitted fill models a phantom execution,
-    which a correct consumer books twice - the divergence the arm's own doc
-    describes, "doubles the wire event, not the truth". Minting shifts every
-    subsequent venue trade id, so it owes a re-bless of the exact-equality
-    transcripts. This is now the only option that makes the arm exercise
-    anything through a nautilus host.
-
-  The decision is therefore live rather than deferred, and it is the owner's:
-  buy a working divergence at the cost of a transcript re-bless, or keep an arm
-  that is honest about a retransmitting venue and inert against the only
-  consumer we have.
-
-  One correction to the entry's own wording while here: "swallowed in silence"
-  overstates it. `validate_fill_for_order` emits a `log::warn!` naming the
-  client order id and the trade id. It is silent on the event path, which is
-  what matters, but a host operator reading logs does see it.
-
-  Both readings are recorded at the emission site in `mogwai-engine`'s
-  `commit_fill`.
 
 - `HavocSpec.data` was resolved and needs no entry: `config.rs`'s
   `validate_havoc` refuses the field outright with a named error telling the
