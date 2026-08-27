@@ -1081,9 +1081,9 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// upstream fails to build here until it is mirrored.
 ///
 /// The `deny` reaches this table's own keys only, because `generator` and
-/// `session` deserialize into `GeneratorScalars` / `SessionProfile`, types
-/// shared with the committed fingerprint JSON parse and so deliberately
-/// permissive. `configured_from_table` covers those two sub-tables instead, by
+/// `session` deserialize into `PartialGeneratorScalars` / `SessionProfile`,
+/// deliberately permissive shapes (the latter shared with the committed
+/// fingerprint JSON parse). `configured_from_table` covers those two sub-tables instead, by
 /// checking their raw TOML keys against `GENERATOR_KEYS` / `SESSION_KEYS`
 /// before this struct is built - so a typo inside either one is refused by name
 /// rather than defaulting the knob it meant. Every construction of a
@@ -1101,10 +1101,151 @@ pub struct ConfiguredInstrument {
     pub(crate) size_increment: Decimal,
     pub(crate) margin: Option<ConfiguredMargin>,
     pub(crate) fees: Option<ConfiguredFees>,
-    pub(crate) generator: Option<mogwai_data::GeneratorScalars>,
+    pub(crate) generator: Option<PartialGeneratorScalars>,
     #[serde(default = "default_session_profile")]
     pub(crate) session: mogwai_data::SessionProfile,
     pub(crate) calendar: Option<mogwai_data::SessionCalendar>,
+}
+
+/// The `[instrument.generator]` table as an operator or preset states it:
+/// every knob optional, overlaid on the definition-aware baseline
+/// `profile_from_configured` builds from the fingerprint medians.
+///
+/// This is what lets a preset state the one scalar it actually knows - the
+/// NVDA default's `start_price` - without transcribing a whole fitted
+/// generator it has no fit for. A full table overlays every field, which is
+/// exactly the old all-or-nothing form; an absent table is the pure baseline.
+/// Unknown keys are refused by `refuse_unknown_subtable_keys` against
+/// `GENERATOR_KEYS` before this deserializes, so the permissive shape here
+/// swallows no typo.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct PartialGeneratorScalars {
+    pub(crate) symbol: Option<String>,
+    pub(crate) modal_tick: Option<Decimal>,
+    pub(crate) price_decimals: Option<u32>,
+    pub(crate) mean_event_duration_s: Option<f64>,
+    pub(crate) children_mean: Option<f64>,
+    pub(crate) children_single_frac: Option<f64>,
+    pub(crate) levels_mean: Option<f64>,
+    pub(crate) size_round_frac: Option<f64>,
+    pub(crate) start_price: Option<Decimal>,
+    pub(crate) latent_size_median: Option<Decimal>,
+    pub(crate) size_log_sigma: Option<f64>,
+    pub(crate) vol_scalar: Option<f64>,
+    pub(crate) quoted_width: Option<mogwai_data::QuotedWidth>,
+    pub(crate) top_sizes: Option<mogwai_data::TopOfBookSizes>,
+    pub(crate) depth_levels: Option<mogwai_data::DepthLevels>,
+    pub(crate) depth_growth: Option<mogwai_data::DepthGrowth>,
+    pub(crate) trade_displacement_ticks: Option<mogwai_data::TradeDisplacement>,
+    pub(crate) arrival: Option<mogwai_data::ArrivalConfig>,
+}
+
+impl PartialGeneratorScalars {
+    /// Every stated knob onto the baseline. The exhaustive destructure - no
+    /// `..` - is what keeps this from drifting: a field added to either side
+    /// fails to compile here until it is carried across.
+    fn overlay(&self, scalars: &mut mogwai_data::GeneratorScalars) {
+        let Self {
+            symbol,
+            modal_tick,
+            price_decimals,
+            mean_event_duration_s,
+            children_mean,
+            children_single_frac,
+            levels_mean,
+            size_round_frac,
+            start_price,
+            latent_size_median,
+            size_log_sigma,
+            vol_scalar,
+            quoted_width,
+            top_sizes,
+            depth_levels,
+            depth_growth,
+            trade_displacement_ticks,
+            arrival,
+        } = self;
+        // The definition owns the symbol; a stated one is accepted for
+        // compatibility with full tables and ignored.
+        let _ = symbol;
+        if let Some(value) = modal_tick {
+            scalars.modal_tick = *value;
+        }
+        if let Some(value) = price_decimals {
+            scalars.price_decimals = *value;
+        }
+        if let Some(value) = mean_event_duration_s {
+            scalars.mean_event_duration_s = *value;
+        }
+        if let Some(value) = children_mean {
+            scalars.children_mean = *value;
+        }
+        if let Some(value) = children_single_frac {
+            scalars.children_single_frac = *value;
+        }
+        if let Some(value) = levels_mean {
+            scalars.levels_mean = *value;
+        }
+        if let Some(value) = size_round_frac {
+            scalars.size_round_frac = *value;
+        }
+        if let Some(value) = start_price {
+            scalars.start_price = *value;
+        }
+        if let Some(value) = latent_size_median {
+            scalars.latent_size_median = *value;
+        }
+        if let Some(value) = size_log_sigma {
+            scalars.size_log_sigma = *value;
+        }
+        if let Some(value) = vol_scalar {
+            scalars.vol_scalar = *value;
+        }
+        if let Some(value) = quoted_width {
+            scalars.quoted_width = value.clone();
+        }
+        if let Some(value) = top_sizes {
+            scalars.top_sizes = value.clone();
+        }
+        if let Some(value) = depth_levels {
+            scalars.depth_levels = value.clone();
+        }
+        if let Some(value) = depth_growth {
+            scalars.depth_growth = value.clone();
+        }
+        if let Some(value) = trade_displacement_ticks {
+            scalars.trade_displacement_ticks = value.clone();
+        }
+        if let Some(value) = arrival {
+            scalars.arrival = Some(*value);
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<mogwai_data::GeneratorScalars> for PartialGeneratorScalars {
+    fn from(scalars: mogwai_data::GeneratorScalars) -> Self {
+        Self {
+            symbol: Some(scalars.symbol),
+            modal_tick: Some(scalars.modal_tick),
+            price_decimals: Some(scalars.price_decimals),
+            mean_event_duration_s: Some(scalars.mean_event_duration_s),
+            children_mean: Some(scalars.children_mean),
+            children_single_frac: Some(scalars.children_single_frac),
+            levels_mean: Some(scalars.levels_mean),
+            size_round_frac: Some(scalars.size_round_frac),
+            start_price: Some(scalars.start_price),
+            latent_size_median: Some(scalars.latent_size_median),
+            size_log_sigma: Some(scalars.size_log_sigma),
+            vol_scalar: Some(scalars.vol_scalar),
+            quoted_width: Some(scalars.quoted_width),
+            top_sizes: Some(scalars.top_sizes),
+            depth_levels: Some(scalars.depth_levels),
+            depth_growth: Some(scalars.depth_growth),
+            trade_displacement_ticks: Some(scalars.trade_displacement_ticks),
+            arrival: scalars.arrival,
+        }
+    }
 }
 
 fn default_session_profile() -> mogwai_data::SessionProfile {
@@ -1473,21 +1614,26 @@ fn profile_from_configured(
     validate_instrument_def(&def)?;
     validate_instrument_options(configured, &def)?;
 
-    let mut scalars = configured.generator.clone().unwrap_or_else(|| {
-        mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, fp)
-    });
+    // The definition-aware baseline first, then the operator's explicit knobs
+    // over it. The order is load-bearing: the definition-forced values - the
+    // tick grid, the price decimals, the grid-derived top sizes and the equity
+    // latent-size correction - go onto the baseline before the overlay, so a
+    // knob the table explicitly states survives them and is then validated
+    // against the definition below rather than silently overwritten by it.
+    let mut scalars = mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
     scalars.symbol = def.symbol.to_string();
-    if configured.generator.is_none() {
-        scalars.modal_tick = def.price_increment;
-        scalars.price_decimals = u32::from(def.price_precision);
-        let min_size = mogwai_data::SizeGrid::from_def(&def).min_size;
-        scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(min_size);
-        if matches!(def.class, InstrumentClass::Equity { .. }) {
-            // Fingerprint medians are fractional crypto quantities. Equity
-            // definitions require whole shares, so an absent generator starts
-            // at the instrument's minimum tradable share count instead.
-            scalars.latent_size_median = min_size;
-        }
+    scalars.modal_tick = def.price_increment;
+    scalars.price_decimals = u32::from(def.price_precision);
+    let min_size = mogwai_data::SizeGrid::from_def(&def).min_size;
+    scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(min_size);
+    if matches!(def.class, InstrumentClass::Equity { .. }) {
+        // Fingerprint medians are fractional crypto quantities. Equity
+        // definitions require whole shares, so the baseline starts at the
+        // instrument's minimum tradable share count instead.
+        scalars.latent_size_median = min_size;
+    }
+    if let Some(partial) = &configured.generator {
+        partial.overlay(&mut scalars);
     }
     if scalars.modal_tick != def.price_increment {
         anyhow::bail!(
@@ -2308,7 +2454,7 @@ mod tests {
                 basis: MarginBasis::PerContract,
             }),
             fees: None,
-            generator: Some(profile.scalars),
+            generator: Some(profile.scalars.into()),
             session: profile.session,
             calendar: None,
         }
@@ -2326,6 +2472,45 @@ mod tests {
 
         assert_eq!(profile.scalars.top_sizes.bid, Decimal::ONE);
         assert_eq!(profile.scalars.top_sizes.ask, Decimal::ONE);
+    }
+
+    /// The partial table: one stated scalar survives the definition-forced
+    /// baseline, and every other knob is exactly what the absent-generator
+    /// resolution produces.
+    #[test]
+    fn a_partial_generator_table_states_one_scalar_and_defaults_the_rest() {
+        let mut stated = future_configured();
+        stated.generator = Some(PartialGeneratorScalars {
+            start_price: Some(Decimal::from(180)),
+            ..PartialGeneratorScalars::default()
+        });
+        let mut absent = future_configured();
+        absent.generator = None;
+        // Same fixture adjustment as the absent-generator test above: the
+        // repo medians' latent size is a fractional crypto quantity that the
+        // whole-contract grid refuses, and this test is about the overlay,
+        // not that validation.
+        let mut fp = mogwai_data::Fingerprint::from_repo_json();
+        fp.cadence.targets.mean_trade_notional.anchor = 100_000.0;
+        let stated = profile_from_configured(&stated, &fp).unwrap();
+        let absent = profile_from_configured(&absent, &fp).unwrap();
+        assert_eq!(stated.scalars.start_price, Decimal::from(180));
+        let mut expected = absent.scalars.clone();
+        expected.start_price = Decimal::from(180);
+        assert_eq!(
+            format!("{:?}", stated.scalars),
+            format!("{expected:?}"),
+            "only the stated scalar may differ from the baseline"
+        );
+    }
+
+    /// The NVDA default preset states the one scalar it knows: a share costs
+    /// about 180 dollars, not sixty thousand. Everything else stays the
+    /// fingerprint-median shape contract.
+    #[test]
+    fn the_nvda_preset_states_an_equity_price_level() {
+        let profile = profile_from_preset("NVDA").expect("NVDA preset must resolve");
+        assert_eq!(profile.scalars.start_price, Decimal::from(180));
     }
 
     #[test]

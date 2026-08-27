@@ -2756,7 +2756,10 @@ async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
     // touch. Sized to the placeholder deliberately, and the cliff itself is
     // filed in `notes/todo.md` against the calibration brick rather than
     // papered over here.
-    for (side, id, qty) in [("Buy", "MKT-BOOK-BUY", "1"), ("Sell", "MKT-BOOK-SELL", "1")] {
+    for (side, id, qty) in [
+        ("Buy", "MKT-BOOK-BUY", "0.00000004"),
+        ("Sell", "MKT-BOOK-SELL", "0.00000002"),
+    ] {
         let before_ns = drain_last_market_ts(&mut socket).await;
         let submit = format!(
             r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"{side}","order_type":"Market","quantity":"{qty}","time_in_force":"Gtc"}}"#,

@@ -109,13 +109,18 @@ the MNQ knobs while remaining a different river and label from `MNQ`.
   table: its cadence, size distribution and volatility scalar default from the
   committed fingerprint medians with the tick grid and price decimals forced to
   its own definition and uncalibrated top-of-book sizes, so it is a shape
-  contract rather than an NVDA tape. It makes no calendar claim - the default
-  bundle serves every unmatched label, and real cash-equity hours would shut
-  those markets most of the day; an operator wanting real hours writes a
-  `[symbols.NVDA.calendar]` table or registers a preset. No margin table, so
-  the default is a cash account, and `settlement_ns` is zero rather than the
-  real T+1, which is a deliberate deferral until the `Balance.locked` split is
-  ruled.
+  contract rather than an NVDA tape. The one generator scalar it states is
+  `start_price`, declared at 180 dollars, so the default tape's proportions
+  sit at an equity price level rather than the medians' crypto one - a
+  partial `[instrument.generator]` table overlays only what it states and
+  leaves every other knob to the baseline. It makes no calendar claim - the
+  default bundle serves every unmatched label, and real cash-equity hours
+  would shut those markets most of the day; an operator wanting real hours
+  writes a `[symbols.NVDA.calendar]` table or registers a preset. No margin
+  table, so the default is a cash account, and `settlement_ns` is zero
+  deliberately: the default bundle serves unmatched labels across unknown
+  instrument identities, so it makes no settlement claim, exactly as it makes
+  no calendar claim - a symbol wanting T+1 configures it explicitly.
 - **MNQ** - Micro E-mini Nasdaq-100 future. Two dollars per index point,
   whole-contract sizing, the published CME Sunday-evening-through-
   Friday-evening session with the daily maintenance halt and settlement

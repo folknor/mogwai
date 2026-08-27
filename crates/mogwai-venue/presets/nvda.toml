@@ -10,14 +10,15 @@ kind = "equity"
 currency = "USD"
 multiplier = "1"
 
-# No generator and no session table: the scalars default from the committed
+# The generator states the one scalar this preset actually knows: a share
+# costs about 180 dollars. Every other scalar defaults from the committed
 # fingerprint medians with the tick grid, price decimals and top sizes forced
-# to this definition. Those medians are crypto quantities, so the default shape
-# opens near sixty thousand dollars a share - stated here because it is the
-# shape every unmatched symbol wears, and because stating one scalar is not
-# currently expressible: a `[generator]` table is all-or-nothing, and supplying
-# a partial one is a code change to the absent-generator path rather than a
-# preset edit.
+# to this definition, so the default shape keeps the crypto-fitted cadence and
+# size proportions at an equity price level rather than opening near sixty
+# thousand dollars a share. No session table: the default bundle serves every
+# unmatched label and makes no session claim.
+[instrument.generator]
+start_price = "180"
 
 [provenance]
 "symbol" = { kind = "declared", rationale = "the default shape's label" }
@@ -28,3 +29,4 @@ multiplier = "1"
 "class.kind" = { kind = "declared", rationale = "cash equity" }
 "class.currency" = { kind = "declared", rationale = "US listing, USD settled" }
 "class.multiplier" = { kind = "declared", rationale = "one share per contract" }
+"generator.start_price" = { kind = "declared", rationale = "typical large-cap US equity share price level; order-of-magnitude honesty, not a fit" }

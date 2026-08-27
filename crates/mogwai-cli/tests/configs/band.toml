@@ -9,10 +9,24 @@
 # would be a bet on the tape's cadence rather than a gate on this code.
 #
 # One simulated hour of warmup supplies the estimator's 300-second window.
+#
+# BTCUSDT explicitly, not the NVDA default: the banded-limit gate rests its
+# order a fixed 2.01 below the anchor print, an offset calibrated to a price
+# level near sixty thousand. Since the default preset declared its equity
+# start price, the default river opens near 180, where 2.01 is over a hundred
+# basis points and the sweep legitimately needs more sim time than the wall
+# budget to reach it.
 
+symbol = "BTCUSDT"
 speed = 100.0
 seed = 42
 warmup_ns = 3600000000000
 fill_band_vol_mult = 0.005
 fill_band_max_ticks = 200
 fill_sweep_interval_ms = 10
+
+# BTCUSDT settles USDT, which the default USD-only funding does not cover; USD
+# stays funded beside it for any socket that binds another shape.
+[balances]
+USDT = "1000000"
+USD = "1000000"
