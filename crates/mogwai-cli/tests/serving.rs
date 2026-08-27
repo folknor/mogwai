@@ -4758,6 +4758,67 @@ async fn a_leg_joining_a_named_window_late_completes_at_the_window_end() {
     );
 }
 
+/// The other half of the window purity claim, at the delivery boundary: no
+/// market frame stamped at or past `window_end_ns` may cross the socket. The
+/// hull is unbounded - a named window's end stopped being a cursor property
+/// when it left the boat key - so the cutoff lives in the writer, and racing
+/// the completion timer instead would let a frame past the end cross whenever
+/// the timer woke late. A frame outside the window would put wall-clock wakeup
+/// latency into an observable that is defined as a pure function of seed,
+/// config, symbol, start and end.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn no_market_frame_at_or_past_the_window_end_crosses_the_socket() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let start_ns = venue.record.run_start_ns;
+    let end_ns = start_ns + 3_000_000_000_u64;
+    let url = format!(
+        "{}&callsign=cut&account=WINDOW-CUT&window_start_ns={start_ns}&window_end_ns={end_ns}",
+        venue.ws_url_for(&venue.symbol),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("the named window boards");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    let mut market_frames = 0_u64;
+    let mut completed = false;
+    loop {
+        let Ok(next) = tokio::time::timeout_at(deadline, socket.next()).await else {
+            panic!("the window never completed inside the wall budget");
+        };
+        let Some(Ok(message)) = next else { break };
+        match message {
+            Message::Text(text) => match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::Trade(trade)) => {
+                    market_frames += 1;
+                    assert!(
+                        trade.ts_event < end_ns,
+                        "a trade stamped {} crossed a window ending at {end_ns}",
+                        trade.ts_event
+                    );
+                }
+                Ok(VenueMessage::Quote(quote)) => {
+                    market_frames += 1;
+                    assert!(
+                        quote.ts_event < end_ns,
+                        "a quote stamped {} crossed a window ending at {end_ns}",
+                        quote.ts_event
+                    );
+                }
+                Ok(VenueMessage::PassengerDurationComplete { .. }) => completed = true,
+                _ => {}
+            },
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    assert!(completed, "the passenger announced its window completion");
+    assert!(
+        market_frames > 0,
+        "the window delivered market data before its end, or this pinned nothing"
+    );
+}
+
 /// One ledger, one clock per river, over the wire. The epoch half: an account
 /// already riding a named window cannot open a second socket on the same river
 /// from a different placement, because its one book would then be swept and

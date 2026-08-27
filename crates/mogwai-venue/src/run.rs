@@ -2456,7 +2456,7 @@ pub(crate) mod tests {
                 crate::registry::Seat {
                     river: key.river().clone(),
                     speed_micros: key.speed_micros(),
-                    bounds: key.bounds(),
+                    start_ns: key.placement_start_ns(),
                 },
                 resetting,
                 observed,
@@ -2843,7 +2843,9 @@ pub(crate) mod tests {
                 .as_ref()
                 .map_or_else(|| run.rivers.test_key("BTCUSDT"), |key| key.river().clone()),
             speed_micros: crate::boatyard::quantize_speed(speed).expect("a legal speed"),
-            bounds: ride.as_ref().and_then(crate::boatyard::BoatKey::bounds),
+            start_ns: ride
+                .as_ref()
+                .and_then(crate::boatyard::BoatKey::placement_start_ns),
         };
         let mut reservation = run
             .reserve_admission(
@@ -2907,7 +2909,7 @@ pub(crate) mod tests {
                 crate::registry::Seat {
                     river: key.river().clone(),
                     speed_micros: crate::boatyard::quantize_speed(3.0).unwrap(),
-                    bounds: key.bounds(),
+                    start_ns: key.placement_start_ns(),
                 },
                 false,
                 run.ledger_incarnation(&account),

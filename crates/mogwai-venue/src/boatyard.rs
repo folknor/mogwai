@@ -28,7 +28,6 @@
 //! get different rivers. A view change rides the passenger and leaves the river
 //! shareable.
 
-use mogwai_data::{TickEvent, TickFault, TickSource};
 use mogwai_protocol::SimClock;
 use std::{
     collections::HashMap,
@@ -54,14 +53,21 @@ pub(crate) struct BoatKey {
     placement: Placement,
 }
 
+/// Where a boat's clock is anchored: the run's shared origin, or a named
+/// window's own start.
+///
+/// Only the start, deliberately. The window's end is the passenger's - each
+/// passenger cuts its own delivery off and completes at its own end, exactly
+/// as a passenger duration works - and an owner discriminator used to sit
+/// here too, splitting identical placements into per-consumer hulls. Both
+/// were semantics on a cache: the glossary's Boat entry says passengers
+/// asking for the same river and the same speed share one boat, and a hull
+/// is shareable by anyone whose clock it is, because the tape is exogenous
+/// and broadcast frames carry no passenger identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Placement {
     Shared,
-    Named {
-        start_ns: u64,
-        end_ns: u64,
-        owner: Arc<str>,
-    },
+    Named { start_ns: u64 },
 }
 
 /// The one quantization. Boarding and looking a cadence up both go through
@@ -92,20 +98,11 @@ impl BoatKey {
     }
 
     #[cfg(test)]
-    pub(crate) fn named(
-        river: RiverKey,
-        speed: f64,
-        start_ns: u64,
-        end_ns: u64,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn named(river: RiverKey, speed: f64, start_ns: u64) -> anyhow::Result<Self> {
         Ok(Self {
             river,
             speed_micros: quantize_speed(speed)?,
-            placement: Placement::Named {
-                start_ns,
-                end_ns,
-                owner: Arc::from("test"),
-            },
+            placement: Placement::Named { start_ns },
         })
     }
 
@@ -118,8 +115,6 @@ impl BoatKey {
                 .as_ref()
                 .map_or(Placement::Shared, |window| Placement::Named {
                     start_ns: window.start_ns,
-                    end_ns: window.end_ns,
-                    owner: Arc::clone(&req.window_owner),
                 }),
         })
     }
@@ -142,28 +137,18 @@ impl BoatKey {
     pub(crate) fn origin_ns(&self, shared_origin_ns: u64) -> u64 {
         match self.placement {
             Placement::Shared => shared_origin_ns,
-            Placement::Named { start_ns, .. } => start_ns,
+            Placement::Named { start_ns } => start_ns,
         }
     }
 
-    pub(crate) fn window_end_ns(&self) -> Option<u64> {
+    /// The placement epoch this boat's clock is anchored on, as admission
+    /// compares it. The start alone is the epoch: a clock is its rate and its
+    /// epoch, and the window's end never enters the clock - it is the
+    /// passenger's own delivery cutoff, exactly as a duration is.
+    pub(crate) fn placement_start_ns(&self) -> Option<u64> {
         match self.placement {
             Placement::Shared => None,
-            Placement::Named { end_ns, .. } => Some(end_ns),
-        }
-    }
-
-    /// The placement coordinates this boat's clock is anchored on, as admission
-    /// compares them. The owner is deliberately not in here: it decides which
-    /// requests share one hull, which is a cache question with no semantics,
-    /// while the bounds decide what epoch the sim clock runs from, which is what
-    /// a ledger cannot hold two of.
-    pub(crate) fn bounds(&self) -> Option<(u64, u64)> {
-        match self.placement {
-            Placement::Shared => None,
-            Placement::Named {
-                start_ns, end_ns, ..
-            } => Some((start_ns, end_ns)),
+            Placement::Named { start_ns } => Some(start_ns),
         }
     }
 }
@@ -254,7 +239,6 @@ pub(crate) struct BoardRequest {
     pub(crate) river: RiverKey,
     pub(crate) speed: f64,
     pub(crate) window: Option<mogwai_protocol::control::TapeWindow>,
-    pub(crate) window_owner: Arc<str>,
 }
 impl BoardRequest {
     #[cfg(test)]
@@ -263,12 +247,11 @@ impl BoardRequest {
             river,
             speed,
             window: None,
-            window_owner: Arc::from("shared"),
         }
     }
 
     #[cfg(test)]
-    fn named(river: RiverKey, owner: &str, start_ns: u64, end_ns: u64) -> Self {
+    fn named(river: RiverKey, start_ns: u64, end_ns: u64) -> Self {
         Self {
             river,
             speed: 1.0,
@@ -277,7 +260,6 @@ impl BoardRequest {
                 end_ns,
                 data_origin_ns: start_ns.saturating_sub(400),
             }),
-            window_owner: Arc::from(owner),
         }
     }
 }
@@ -289,23 +271,6 @@ pub(crate) enum BoardRefusal {
 pub(crate) struct Ticket {
     yard: Arc<Boatyard>,
     boat: Arc<Boat>,
-}
-
-struct WindowCursor {
-    inner: Box<dyn TickSource + Send>,
-    end_ns: u64,
-}
-
-impl TickSource for WindowCursor {
-    fn next_tick(&mut self) -> Option<TickEvent> {
-        self.inner
-            .next_tick()
-            .filter(|event| event.ts_event() < self.end_ns)
-    }
-
-    fn fault(&self) -> Option<TickFault> {
-        self.inner.fault()
-    }
 }
 
 impl Boatyard {
@@ -406,13 +371,10 @@ impl Boatyard {
                     None
                 }
             };
-            let cursor: Box<dyn TickSource + Send> = match key.window_end_ns() {
-                Some(end_ns) => Box::new(WindowCursor {
-                    inner: cursor,
-                    end_ns,
-                }),
-                None => cursor,
-            };
+            // The hull is unbounded even for a named placement: a window's end
+            // is each passenger's own delivery cutoff, enforced where frames
+            // cross the socket, and the hull winds down when the last such
+            // passenger closes and drops its ticket.
             let sim = crate::config::delivery_clock(origin_ns, now_ns(), speed);
             let extremes = Arc::new(crate::extremes::PriceExtremes::default());
             let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(origin_ns));
@@ -737,43 +699,49 @@ mod tests {
         assert!(Arc::ptr_eq(one.boat(), two.boat()));
     }
 
+    /// The glossary's Boat sentence, over named windows: passengers asking for
+    /// the same river and the same speed share one boat, whoever they are. An
+    /// owner discriminator used to split identical placements into
+    /// per-consumer hulls; a hull is a cache and carries no identity, so a
+    /// second account replicating the same window reads the same cursor. A
+    /// different end shares too, because the end is the passenger's own
+    /// cutoff, not part of the clock the hull carries.
     #[tokio::test]
-    async fn named_windows_share_only_inside_one_owner_and_start_at_their_bound() {
+    async fn named_windows_share_across_owners_and_start_at_their_bound() {
         let (yard, river) = yard();
         let start_ns = 2_000_000_000;
         let end_ns = start_ns + 1_000_000_000;
         let first = yard
-            .board(&BoardRequest::named(
-                river.clone(),
-                "account-a:callsign",
-                start_ns,
-                end_ns,
-            ))
+            .board(&BoardRequest::named(river.clone(), start_ns, end_ns))
             .await
             .unwrap();
         let paired_leg = yard
-            .board(&BoardRequest::named(
-                river.clone(),
-                "account-a:callsign",
-                start_ns,
-                end_ns,
-            ))
+            .board(&BoardRequest::named(river.clone(), start_ns, end_ns))
             .await
             .unwrap();
         let replication = yard
             .board(&BoardRequest::named(
-                river,
-                "account-b:callsign",
+                river.clone(),
                 start_ns,
-                end_ns,
+                end_ns + 500_000_000,
             ))
             .await
             .unwrap();
+        let elsewhere = yard
+            .board(&BoardRequest::named(river, start_ns + 1, end_ns))
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(first.boat(), paired_leg.boat()));
-        assert!(!Arc::ptr_eq(first.boat(), replication.boat()));
+        assert!(
+            Arc::ptr_eq(first.boat(), replication.boat()),
+            "a later end is the same clock, so it is the same hull"
+        );
+        assert!(
+            !Arc::ptr_eq(first.boat(), elsewhere.boat()),
+            "a different start is a different clock epoch, so it is a second hull"
+        );
         assert_eq!(first.boat().sim.sim_epoch_ns, start_ns);
-        assert_eq!(replication.boat().sim.sim_epoch_ns, start_ns);
-        assert_eq!(first.boat().key().window_end_ns(), Some(end_ns));
+        assert_eq!(first.boat().key().placement_start_ns(), Some(start_ns));
     }
 
     #[tokio::test]

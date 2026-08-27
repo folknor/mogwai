@@ -132,23 +132,26 @@ use crate::source::RiverKey;
 /// Comparing cadence across rivers here would refuse a working topology to
 /// paper over neither of those.
 ///
-/// The seat carries the placement bounds for the same reason it carries the
+/// The seat carries the placement start for the same reason it carries the
 /// speed, and the two are one rule rather than two. What a ledger cannot hold
 /// two of is a clock, and a clock on one river is its epoch and its rate
-/// together: the speed is the rate, and a named window's `[start, end)` is the
-/// epoch, because a named placement anchors its boat's sim clock at the
-/// window's start instead of the run's origin. Admitting a second speed and
-/// admitting a second epoch both end with one book swept and commanded from two
-/// simulated nows. `None` is the run's shared placement, and is one value like
-/// any other - a shared and a named ride of one river disagree just as surely as
-/// two named ones with different bounds.
+/// together: the speed is the rate, and a named window's start is the epoch,
+/// because a named placement anchors its boat's sim clock at the window's
+/// start instead of the run's origin. Admitting a second speed and admitting a
+/// second epoch both end with one book swept and commanded from two simulated
+/// nows. The window's end is deliberately not here: it never enters the
+/// clock - it is each passenger's own delivery cutoff, exactly as a duration
+/// is - so two named rides sharing a start and differing on the end are one
+/// clock and coexist. `None` is the run's shared placement, and is one value
+/// like any other - a shared and a named ride of one river disagree just as
+/// surely as two named ones with different starts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Seat {
     pub(crate) river: RiverKey,
     pub(crate) speed_micros: u64,
-    /// `None` for the run's shared placement; `Some((start, end))` for a named
-    /// tape window.
-    pub(crate) bounds: Option<(u64, u64)>,
+    /// `None` for the run's shared placement; `Some(start)` for a named tape
+    /// window's placement epoch.
+    pub(crate) start_ns: Option<u64>,
 }
 
 impl Seat {
@@ -444,14 +447,14 @@ impl ConnectionRegistry {
                 conn.ride.as_ref().filter(|ride| {
                     *ride.river() == seat.river
                         && (ride.speed_micros() != seat.speed_micros
-                            || ride.bounds() != seat.bounds)
+                            || ride.placement_start_ns() != seat.start_ns)
                 })
             })
         {
             let held = Seat {
                 river: sitting.river().clone(),
                 speed_micros: sitting.speed_micros(),
-                bounds: sitting.bounds(),
+                start_ns: sitting.placement_start_ns(),
             };
             return Err(if held.speed_micros == seat.speed_micros {
                 AdmissionRefusal::PlacementConflict(held)
@@ -821,7 +824,7 @@ mod tests {
         Seat {
             river: RiverKey::synthetic(1),
             speed_micros: 1_000_000,
-            bounds: None,
+            start_ns: None,
         }
     }
 
@@ -829,15 +832,15 @@ mod tests {
         Seat {
             river: RiverKey::synthetic(1),
             speed_micros,
-            bounds: None,
+            start_ns: None,
         }
     }
 
-    fn seat_in(bounds: (u64, u64)) -> Seat {
+    fn seat_starting(start_ns: u64) -> Seat {
         Seat {
             river: RiverKey::synthetic(1),
             speed_micros: 1_000_000,
-            bounds: Some(bounds),
+            start_ns: Some(start_ns),
         }
     }
 
@@ -919,13 +922,13 @@ mod tests {
         let elsewhere = Seat {
             river: RiverKey::synthetic(2),
             speed_micros: 2_000_000,
-            bounds: None,
+            start_ns: None,
         };
         assert!(registry.reserve("A", elsewhere, false, 1).is_ok());
     }
 
-    fn named_ride(start_ns: u64, end_ns: u64) -> BoatKey {
-        BoatKey::named(RiverKey::synthetic(1), 1.0, start_ns, end_ns).expect("a legal speed")
+    fn named_ride(start_ns: u64) -> BoatKey {
+        BoatKey::named(RiverKey::synthetic(1), 1.0, start_ns).expect("a legal speed")
     }
 
     /// The epoch half of the one-clock-per-ledger rule, and the property this
@@ -933,20 +936,21 @@ mod tests {
     /// refused even though both sides agree on the cadence. Without it the seat
     /// compares only river and speed, both reservations pass, and one ledger is
     /// swept and commanded from two boats whose sim clocks start at different
-    /// instants.
+    /// instants. The window's end is deliberately absent from the comparison:
+    /// it is each passenger's own delivery cutoff, so ends never conflict.
     #[test]
     fn a_second_placement_on_one_river_is_refused_at_one_cadence() {
         let registry = ConnectionRegistry::new();
         let mut first = registry
-            .reserve("A", seat_in((1_000, 2_000)), false, 1)
+            .reserve("A", seat_starting(1_000), false, 1)
             .unwrap();
-        drop(registry.commit(&mut first, None, Some(named_ride(1_000, 2_000)), true));
-        // A different named window, same river, same speed.
+        drop(registry.commit(&mut first, None, Some(named_ride(1_000)), true));
+        // A different named window start, same river, same speed.
         assert!(
             matches!(
-                registry.reserve("A", seat_in((1_500, 2_500)), false, 1),
+                registry.reserve("A", seat_starting(1_500), false, 1),
                 Err(AdmissionRefusal::PlacementConflict(held))
-                    if held == seat_in((1_000, 2_000))
+                    if held == seat_starting(1_000)
             ),
             "a second named window on one ledger's river must be refused"
         );
@@ -956,15 +960,15 @@ mod tests {
             matches!(
                 registry.reserve("A", seat(), false, 1),
                 Err(AdmissionRefusal::PlacementConflict(held))
-                    if held == seat_in((1_000, 2_000))
+                    if held == seat_starting(1_000)
             ),
             "an unnamed ride of a named river must be refused"
         );
-        // Identical bounds are one clock, which is the paired-leg shape and must
-        // still be admitted.
+        // An identical start is one clock, which is the paired-leg shape and
+        // must still be admitted - whatever end each passenger carries.
         assert!(
             registry
-                .reserve("A", seat_in((1_000, 2_000)), false, 1)
+                .reserve("A", seat_starting(1_000), false, 1)
                 .is_ok()
         );
     }
@@ -976,13 +980,13 @@ mod tests {
     fn a_differing_speed_still_reads_as_a_cadence_conflict() {
         let registry = ConnectionRegistry::new();
         let mut first = registry
-            .reserve("A", seat_in((1_000, 2_000)), false, 1)
+            .reserve("A", seat_starting(1_000), false, 1)
             .unwrap();
-        drop(registry.commit(&mut first, None, Some(named_ride(1_000, 2_000)), true));
+        drop(registry.commit(&mut first, None, Some(named_ride(1_000)), true));
         let faster = Seat {
             river: RiverKey::synthetic(1),
             speed_micros: 2_000_000,
-            bounds: None,
+            start_ns: None,
         };
         assert!(matches!(
             registry.reserve("A", faster, false, 1),

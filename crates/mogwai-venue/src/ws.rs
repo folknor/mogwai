@@ -504,7 +504,7 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
     let seat = crate::registry::Seat {
         river: river.clone(),
         speed_micros,
-        bounds: window.map(|window| (window.start_ns, window.end_ns)),
+        start_ns: window.map(|window| window.start_ns),
     };
     let mut reservation = match state.run.reserve_admission(
         account_id.as_str(),
@@ -541,7 +541,7 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
             // Named only as shared or named, never with the sitting bounds:
             // an account's placement is its own business and this body is
             // read by whoever presents the id.
-            let held_placement = if held.bounds.is_some() {
+            let held_placement = if held.start_ns.is_some() {
                 "a named tape window"
             } else {
                 "the run's shared placement"
@@ -568,19 +568,6 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
                 .into_response());
         }
     };
-    let window_owner: Arc<str> = match (window, query.callsign.as_deref()) {
-        (Some(_), Some(callsign)) => Arc::from(format!("{}:{callsign}", account_id.as_str())),
-        (Some(_), None) => {
-            static NEXT_UNNAMED_WINDOW: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(1);
-            Arc::from(format!(
-                "{}:#{}",
-                account_id.as_str(),
-                NEXT_UNNAMED_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ))
-        }
-        (None, _) => Arc::from("shared"),
-    };
     let ticket = match state
         .run
         .boatyard
@@ -588,7 +575,6 @@ async fn admit(state: AppState, query: SocketQuery) -> Result<Passenger, Respons
             river,
             speed,
             window,
-            window_owner,
         })
         .await
     {
@@ -823,6 +809,10 @@ struct QueuedCommand {
 /// a consumer has no use for a second page before it has taken the first.
 const HISTORY_PAGES_IN_FLIGHT: usize = 1;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one connection's dispatch needs its whole seat: the state, the lanes, the boat, the account, the page permit and the passenger's own window end"
+)]
 async fn dispatch_command(
     cmd: Command,
     state: &AppState,
@@ -831,6 +821,7 @@ async fn dispatch_command(
     boat: &Arc<crate::boatyard::Boat>,
     account_state: &Arc<crate::run::Account>,
     history_permits: &Arc<tokio::sync::Semaphore>,
+    window_end_ns: Option<u64>,
 ) {
     // Intercepted before the order path, and spawned rather than awaited. This
     // dispatcher is sequential per connection, which is what stops a cancel
@@ -839,7 +830,7 @@ async fn dispatch_command(
     // reconciliation query and heartbeat behind it. The connection would then
     // fill its command queue and close for what is really history contention.
     if let Command::QueryHistory { .. } = cmd {
-        spawn_history_page(cmd, state, lanes, boat, history_permits);
+        spawn_history_page(cmd, state, lanes, boat, history_permits, window_end_ns);
         return;
     }
     let class = CommandClass::of(&cmd);
@@ -907,6 +898,7 @@ fn spawn_history_page(
     lanes: &ExecLanes,
     boat: &Arc<crate::boatyard::Boat>,
     history_permits: &Arc<tokio::sync::Semaphore>,
+    window_end_ns: Option<u64>,
 ) {
     let Command::QueryHistory {
         request_id,
@@ -963,13 +955,16 @@ fn spawn_history_page(
     // passenger's observable, which is the wall-clock input the window exists
     // to remove. No look-ahead opens: history stays at or behind the boat's
     // own delivery frontier either way.
+    // The passenger's own window end, not a bound on the hull: the boat key
+    // carries only the placement start now, and the end travels with the
+    // passenger exactly as a duration does.
     let mut present = sim_now_ns(boat.sim);
-    match boat.key().window_end_ns() {
+    match window_end_ns {
         Some(end_ns) => present = present.min(end_ns.saturating_sub(1)),
         None => present = present.min(state.run_now()),
     }
     let run_start_ns = boat.key().origin_ns(state.run.started_ns);
-    let data_origin_ns = if boat.key().window_end_ns().is_some() {
+    let data_origin_ns = if window_end_ns.is_some() {
         run_start_ns.saturating_sub(state.run.warmup_ns)
     } else {
         state.run.data_origin_ns()
@@ -1125,6 +1120,7 @@ fn spawn_command_dispatcher(
     symbol: mogwai_protocol::Symbol,
     boat: Arc<crate::boatyard::Boat>,
     account_state: Arc<crate::run::Account>,
+    window_end_ns: Option<u64>,
 ) -> tokio::task::JoinHandle<()> {
     // Per connection, minted here so it lives exactly as long as the dispatcher
     // that hands pages out.
@@ -1152,6 +1148,7 @@ fn spawn_command_dispatcher(
                 &boat,
                 &account_state,
                 &history_permits,
+                window_end_ns,
             )
             .await;
             drop(queued.global_slot);
@@ -1233,6 +1230,10 @@ pub(crate) fn spawn_exec_pump(
 /// Their relative order was never a guarantee - the two producers raced on one
 /// channel - and separate execution and market streams are what a real venue
 /// gives a consumer anyway.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the writer owns the socket's whole outbound truth: both lanes, the tape, the snapshots, the account's havoc windows, the clock and the passenger's own window end"
+)]
 async fn run_writer(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
@@ -1241,6 +1242,7 @@ async fn run_writer(
     snapshots: Vec<TapeFrame>,
     account_state: Arc<crate::run::Account>,
     sim: mogwai_protocol::SimClock,
+    window_end_ns: Option<u64>,
 ) {
     let mut writer = Writer {
         account_state,
@@ -1254,7 +1256,18 @@ async fn run_writer(
     let mut priority_open = true;
     let mut held_open = true;
     let mut tape_open = true;
+    // This passenger's own delivery cutoff. The hull is unbounded - a named
+    // window's end stopped being a cursor property when the end left the boat
+    // key - so the writer, the one place that knows what actually crossed the
+    // socket, is where a frame at or past the end is refused. Enforced here
+    // rather than by racing the completion timer: the timer produces the
+    // terminal frame, but nothing about its wakeup order stops a market frame
+    // stamped past the end from crossing first.
+    let past_end = |frame: &TapeFrame| window_end_ns.is_some_and(|end_ns| frame.ts_event >= end_ns);
     for frame in snapshots {
+        if past_end(&frame) {
+            continue;
+        }
         if writer.write_market(&mut sink, frame).await.is_err() {
             return;
         }
@@ -1294,6 +1307,20 @@ async fn run_writer(
                 }
             }
             WriterEvent::Tape(Ok(frame)) => {
+                // The first frame at or past this passenger's window end closes
+                // its market intake outright, mirroring the wound-down-boat arm
+                // below: the socket may still owe execution output and its
+                // terminal frame, but no market frame outside the window may
+                // cross - a named run is a pure function of seed, config,
+                // symbol, start and end, and a frame past the end would put
+                // the timer's wakeup latency into that observable.
+                if past_end(&frame) {
+                    tape_open = false;
+                    if writer.settle_pending(&mut sink).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
                 if writer.write_market(&mut sink, frame).await.is_err() {
                     return;
                 }
@@ -1531,6 +1558,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         Arc::clone(&passenger.symbol),
         Arc::clone(passenger.ticket.boat()),
         Arc::clone(&passenger.account_state),
+        passenger.window.map(|window| window.end_ns),
     );
     // This connection's own boat, and its own cursor on that boat's ring: a busy
     // river cannot lag a passenger subscribed to a quiet one, and loss here is a
@@ -1544,6 +1572,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         snapshot,
         Arc::clone(&passenger.account_state),
         boat_sim,
+        passenger.window.map(|window| window.end_ns),
     ));
     // Venue-originated execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for

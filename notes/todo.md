@@ -351,26 +351,22 @@ instrument class is not a finding and does not need re-reporting.
   return type or reaching for a `const` formatter, which is why neither was fixed
   in passing.
 
-- **Two places the boat implementation diverges from what the glossary says a
-  boat is.** Raised by round 7's cold review, and recorded here in the correct
-  direction: the glossary states the end state, so where these differ the code
-  owes the change and the glossary entry is not stale.
-
-  - The Boat entry says "passengers asking for the same river and the same speed
-    share one boat". Two accounts dealt identical bounds now get two boats. They
-    read byte-identical water from the same instant, so nothing observable
-    distinguishes them, but the boatyard is no longer satisfying the sentence.
-  - The Boat entry says "a boat is an implementation cache with no semantics of
-    its own". A named boat's end bound is the passenger's completion, which is a
-    semantic the hull now carries - and the Passenger entry already says a
-    passenger holds its own declared duration, so the bound belongs to the
-    passenger.
-
-  Ruled 2026-08-26: placement does not earn a glossary entry, and these two are
-  not urgent. The analysis behind the window itself is settled and correct - a
-  named window is a placement and not a river, provably, because the window never
-  enters `RiverKey`, so seed derivation, tape origin and the generated value at
-  any instant are the same either way.
+- **One residual divergence between the boat implementation and the glossary's
+  Boat entry.** The two concrete divergences the cold review raised landed on
+  2026-08-27: the owner discriminator left the boat key, so identical named
+  placements share one hull across accounts, and the window end moved to the
+  passenger - the hull runs unbounded and each passenger's writer cuts its own
+  delivery at its own `window_end_ns`, exactly as a duration works. What
+  remains is the literal reading of "passengers asking for the same river and
+  the same speed share one boat": named windows at different starts still
+  place separate hulls, because the boat carries one `SimClock` anchored at
+  its placement start. Satisfying the sentence outright means a hull that
+  caches and publishes river data while each passenger owns its clock
+  projection, delivery frontier, history cutoff and completion - a larger
+  clock/view refactor, sketched in the 2026-08-27 spar, and not urgent by the
+  2026-08-26 ruling. The analysis behind the window itself is settled: a named
+  window is a placement and not a river, provably, because the window never
+  enters `RiverKey`.
 
 ## Engine
 

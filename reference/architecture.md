@@ -924,22 +924,27 @@ A boat's per-river state is:
 The memo belongs here because its bucket is a function of the boat's clock and
 the walk it saves is a walk of this river only.
 A passenger owns an uncloneable ticket for one websocket connection. An
-unnamed passenger places or joins a boat at the run's fixed origin. A named
-window places a private boat at its stated start, except that the data and
-execution legs presenting one account and callsign share that placement. Two
-accounts dealt identical bounds therefore read separate cursors over
-byte-identical water from the same start. Speed is quantized to micro-multiples
-in the sharing key. Duration is passenger-local and is therefore not in that
-key. An unserved speed is a second cursor on the same water, not a refusal:
-speed mutates no generated value. One ledger still carries one clock per river,
-and a clock is its rate and its epoch together. Two sockets on the default
-account may ride two rivers, but on a river that account is already riding, a
-second speed is refused as a cadence conflict and a second placement - a
-different named window, or the run's shared origin against a named one - is
-refused as a placement conflict, because either would be two clocks judging one
-book. Admission decides both from the seat, before any boat is placed, so the
-check compares exactly what the boatyard keys on minus the owner that decides
-hull sharing. The account counts its passengers per boat, and the
+unnamed passenger places or joins a boat at the run's fixed origin; a named
+window places or joins one at its stated start. The sharing key is the river,
+the quantized speed and the placement start, and nothing else: whoever asks
+for the same water at the same cadence from the same epoch shares one hull,
+because a boat is a cache with no identity of its own - the tape is exogenous
+and broadcast frames carry no passenger. Two accounts replicating one window
+therefore read one cursor. Speed is quantized to micro-multiples in that key.
+Duration is passenger-local and is not in the key, and neither is a named
+window's end: the end is each passenger's own delivery cutoff, enforced by
+the writer that owns its socket, exactly as a duration is - the hull runs
+unbounded and winds down when its last ticket drops. An unserved speed is a
+second cursor on the same water, not a refusal: speed mutates no generated
+value. One ledger still carries one clock per river, and a clock is its rate
+and its epoch together. Two sockets on the default account may ride two
+rivers, but on a river that account is already riding, a second speed is
+refused as a cadence conflict and a second placement epoch - a named window
+at a different start, or the run's shared origin against a named one - is
+refused as a placement conflict, because either would be two clocks judging
+one book. Two named rides sharing a start and differing on the end are one
+clock and coexist. Admission decides both from the seat, before any boat is
+placed, comparing exactly what the boatyard keys on. The account counts its passengers per boat, and the
 count falls when a passenger ends rather than when the account freezes: an
 account riding two rivers never freezes on losing one socket, and a boat key
 carries no connection identity, so a ride left behind would be
@@ -1399,8 +1404,9 @@ socket's own `duration_ms`, simulated milliseconds measured on its boat's clock
 from its boarding instant, so passengers with different durations still share
 one boat and each closes at its own deadline while the boat winds down only
 when the last of them leaves. A named window replaces that passenger duration:
-its boat clock starts at `window_start_ns`, stops publishing at
-`window_end_ns`, and announces the same passenger-scoped completion with the
+its boat clock starts at `window_start_ns`, each passenger's delivery is cut
+off by its own writer at its own `window_end_ns` - the hull itself is
+unbounded - and it announces the same passenger-scoped completion with the
 declared span `end - start`. The deadline is absolute where a duration is
 relative. A socket joining a placement its paired leg already opened waits only
 `window_end_ns - sim_now`, so both legs end at the window's end and neither
