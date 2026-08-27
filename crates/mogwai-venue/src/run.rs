@@ -2189,18 +2189,36 @@ pub(crate) enum Audience<'a> {
     /// order; delivery falls back to everyone, which is the conservative
     /// direction of the failure rather than the intended path.
     Order(&'a mogwai_protocol::VenueOrderId),
-    /// Order-scoped, but the venue never recognized the order, so there is no
-    /// id to resolve an owner from: a submit rejection, or a modify/cancel
-    /// rejection naming an unknown id. Goes to everyone - right rather than
-    /// merely conservative, because the only connection that could care is the
-    /// one that asked, and it is in that set.
-    Unattributable,
     /// Belongs to the connection that issued the request - a query reply, an
     /// admission refusal, a protocol error - which the swept-delivery path
     /// cannot know. These frames are delivered on the issuing lane at the
-    /// point of refusal or reply and MUST NOT enter a swept batch; delivery
+    /// point of refusal or reply and must not enter a swept batch; delivery
     /// drops one that does, loudly, because broadcasting it would leak one
     /// consumer's orders, fills or refusals to every other.
+    ///
+    /// An order-scoped frame the venue never recognized lands here too: a
+    /// submit rejection, or a modify/cancel rejection naming an unknown id.
+    /// There is no id to resolve an owner from, and this used to be a class of
+    /// its own that broadcast to everyone - defended as right rather than
+    /// merely conservative, because the only connection that could care is the
+    /// one that asked and it is in that set. That answers delivery and not
+    /// invisibility, which passengers are owed: the frame echoes a stranger's
+    /// `client_order_id` to every bound lane, and an account learning that
+    /// another exists is the thing `reference/north-star.md` and the glossary's
+    /// Passenger entry both forbid. Nothing was known to reach swept delivery
+    /// through that arm, which is what made it the same latent shape as the
+    /// `AccountState` broadcast above rather than a live leak.
+    ///
+    /// Collapsed into this arm by owner ruling, 2026-08-27, rather than fixed
+    /// in place: the two classes differed only in what they did on a path
+    /// neither belongs on, and one arm removes that question instead of
+    /// answering it. The concept was already covered twice over - a frame that
+    /// genuinely concerns every connection is [`Audience::Venue`], and a frame
+    /// whose only interested party is the asker is this. If a variant ever
+    /// turns up that is genuinely owned by nobody and genuinely owed to all,
+    /// it gets a new arm named `Everyone`, which says what it does; the old
+    /// name described what the venue failed to know and not who the frame was
+    /// for, and that is why it read as a fallthrough.
     Requester,
 }
 
@@ -2225,11 +2243,16 @@ pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
         M::OrderModifyRejected { venue_order_id, .. }
         | M::OrderCancelRejected { venue_order_id, .. } => match venue_order_id {
             Some(id) => Audience::Order(id),
-            None => Audience::Unattributable,
+            None => Audience::Requester,
         },
         M::OrderFilled(fill) => Audience::Order(&fill.venue_order_id),
-        M::OrderRejected { .. } => Audience::Unattributable,
-        M::AdmissionRejected { .. }
+        // The venue never recognized the order, so there is no id to resolve an
+        // owner from - but the frame echoes the submitting side's own
+        // `client_order_id`, which makes it the asker's and nobody else's.
+        // Sharing the arm below rather than standing apart is the point of the
+        // collapse: these are requester frames, not a class of their own.
+        M::OrderRejected { .. }
+        | M::AdmissionRejected { .. }
         | M::OrderStatusSnapshot(_)
         | M::FillSnapshot(_)
         | M::ProtocolError { .. }
@@ -2529,7 +2552,11 @@ pub(crate) mod tests {
                 reason: "unknown order".to_string(),
                 ts_event: 1,
             }),
-            Audience::Unattributable
+            // The asker's, not everyone's. An id-less cancel rejection echoes
+            // the submitting side's own `client_order_id`, so broadcasting it
+            // tells every other account that this one exists - which is what
+            // the collapse of the old `Unattributable` arm closed.
+            Audience::Requester
         ));
         assert!(matches!(
             audience(&M::OrderRejected {
@@ -2537,7 +2564,7 @@ pub(crate) mod tests {
                 reason: "no".to_string(),
                 ts_event: 1,
             }),
-            Audience::Unattributable
+            Audience::Requester
         ));
         assert!(matches!(
             audience(&M::OrderStatusSnapshot(

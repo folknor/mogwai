@@ -332,5 +332,17 @@ it outlives the note.
 convention at the repository root, and stay there. These folders govern
 documents we chose where to put, not files whose location is dictated.
 
+**A doc line that states a capability moves when the capability moves.** Owed to
+broadarrow, 2026-08-27, who paid for the lesson: our order-list group path had a
+defect that drove a stop-first bracket's stop to zero and cancelled it, leaving
+the position with no exit, and the prose stating the group guarantee read
+identically before the fix and after it. They had cited the stated guarantee as
+though stating it made it true - their error, and they said so - but the
+practical consequence is ours: a consumer re-deriving the behaviour had to read
+the two passes rather than the sentence, which is the opposite of what a
+citable document is for. So when a fix changes what a capability actually does,
+the sentence a consumer would cite for it changes in the same commit, even when
+the old sentence is still arguably true.
+
 In `notes/`, `docs/` and `reference/` alike, avoid citing source line numbers -
 they drift fast.

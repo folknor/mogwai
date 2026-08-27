@@ -279,6 +279,15 @@ lives. The scope is the connection, and that is where the argument would break:
 if a socket ever carried several ledgers, the id becomes a key and this whole
 paragraph is what has to change first.
 
+That change is load-bearing outside this repository, and the dependency is
+named here so a future relaxation cannot be weighed as a local one. broadarrow's
+percent and cash sizers read the account balance off `AccountState` and size
+real orders against it, so under a socket carrying several ledgers the absent
+wire-id check stops being a stamping convention and becomes a capital path: a
+sibling ledger's equity would size a live order. Relaxing one-socket-one-ledger
+therefore owes the re-check in `handle_account_state` in the same change, not
+as a follow-up, and owes the consumer a breaking-change notice regardless.
+
 ## Risk policy, and why the venue enforces it
 
 An account may carry a risk policy, which the venue enforces rather than

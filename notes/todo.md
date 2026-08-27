@@ -701,6 +701,90 @@ it is delivered.
   will stop compiling. See the adapter section above for why the pair boundary
   exists.
 
+- **"Unattributed means everyone" is a declared class now, not a fallthrough**,
+  and their note asking us to press for it is stale on both halves. Their entry
+  reads the residual `b28fee8` recorded and asks for the declared class plus
+  `handle_account_state` re-checking the wire id. The first landed:
+  `mogwai_venue::run::audience` is an exhaustive match over `VenueMessage` with
+  no catch-all, and every frame resolves to a named arm - `Venue`,
+  `Account`, `Order` or `Requester` - each documenting why it routes where it
+  does. The next ledger-owned frame is a compile error rather than a silent
+  broadcast, which is exactly the loudness their note wanted. Their hunter's
+  second half was right too, and it is now closed rather than merely conceded:
+  the declared class was still broadcasting, which the glossary's Passenger
+  entry and `north-star.md` both forbid, so by owner ruling on 2026-08-27 the
+  `Unattributable` arm was collapsed into `Requester` outright rather than
+  repointed. The two differed only in what they did on a path neither belongs
+  on, and one arm removes that question instead of answering it. A submit
+  rejection and an id-less modify or cancel rejection are the asker's, and
+  swept delivery drops one loudly if a producer ever puts it there. If a
+  variant ever turns up genuinely owned by nobody and genuinely owed to all, it
+  gets an arm named `Everyone` - the old name described what the venue failed
+  to know rather than who the frame was for, which is why it read as a
+  fallthrough. No glossary entry, by the same ruling: this is internal delivery
+  taxonomy, not venue vocabulary. They can retire the finding whole.
+  The second is settled the other way, deliberately: `handle_account_state`
+  does not compare the wire id, because a socket names exactly one account on
+  its `/ws?account=` upgrade and only that ledger's state comes down it, so a
+  dropped snapshot can only lose state that was correct - the drop is what the
+  earlier defect was. The configured id is stamped on, and
+  `note_account_label` says once at connect when the two names differ.
+  `reference/architecture.md` carries the argument, including what would have
+  to change first if a socket ever carried several ledgers. Their reply named
+  themselves a stakeholder in that invariant - their percent and cash sizers
+  size real orders off the `AccountState` balance, so a relaxation turns the
+  absent re-check into their capital path rather than a style question. That
+  is now recorded in `reference/architecture.md` beside the invariant, with
+  the re-check named as owed in the same change as any relaxation.
+- **The warmup boot storm is already solved venue-side, and they should not
+  build daemon pacing for correctness.** Their question was whether the gate is
+  cheaper from our side; it was built here on 2026-08-25. Four synthesis slots
+  bound resident memory at the measured ceiling, and behind them sits a
+  128-deep queue with a 30-second bounded wait, so the fifth caller is served
+  late rather than refused. A `503` is reachable only past 128 concurrently
+  queued history requests or a caller that queued and lost the whole deadline,
+  and both carry `Retry-After` and distinct bodies naming which happened. Fifty
+  workers paging sequentially never reach either. Their point about the
+  refusal being invisible is right and sharpens the design rather than
+  changing it: nautilus' historical response types carry no error channel, so
+  a refusal arrives at their strategy as an empty page, which is why the wait
+  exists at all. Pacing spawns stays a throughput optimization for them, not a
+  precondition.
+- **Their reading of `account_ttl_ms` is exactly right**, and the sweeper's own
+  comment states it in the same words: an unattended account is frozen - orders
+  do not rest, positions do not mark, funding does not accrue, and a policy
+  cannot liquidate somebody who is not there. It is a deliberate departure from
+  a real venue. The stated consequence is theirs verbatim: a run spanning a
+  disconnect has a gap in its risk history. Collection at the TTL leaves a
+  clean ledger a boot adoption reads as a flat venue, which is why the setting
+  is published on the readiness record - a restart slower than the TTL can
+  assert on the fact rather than discover it. The default is `0`, meaning never
+  collect, and that default is what a consumer restarting a worker wants.
+
+  A direction caution was sent with this and then withdrawn, and the withdrawal
+  is the part worth keeping. `north-star.md`'s "fire and forget: no restart, no
+  resume" reads at first glance as excluding their restart runs. It does not.
+  It scopes the venue resuming its own run after its own exit - a path is
+  reproduced by a fresh instance with the same seed, never by resumption - and
+  the same sentence's "or the same named window on a shared exchange", plus
+  server mode's durable one-exchange-per-batch shape, contemplate exactly the
+  topology they described. The glossary settles it outright: eviction hands the
+  account over precisely so "a killed worker come back to its own book", and
+  Freeze exists to hold that book "until a passenger returns". A client
+  reconnecting to a still-running venue is designed for, not tolerated. Their
+  three requirements are all met today.
+
+  Three caveats belong with that confirmation, none of which changes the
+  answer. `reset_account_on_reconnect` must stay `false`, its default, or the
+  returning socket gets a fresh ledger from `[balances]`. Retirement on return
+  is per-river: a frozen account that returns keeps what its returning
+  passenger's river holds and loses the rest, which is invisible for their
+  single-instrument workers and bites an account carrying strategies on several
+  symbols. And their restart relies on eviction by a fresh callsign - the
+  adapter mints one per process - which works and is deliberate, but means the
+  venue cannot tell their restarted worker from a stranger, so the standing
+  rule against redialling on eviction is load-bearing for the farm.
+
 In their favour, same message: trailing stops, the full order-type surface
 including `TrailingStopLimit`, order lists and `RejectNextCancel` are all served,
 so their three unrun scenario files can now be written. `translate_trailing_exit`
@@ -735,6 +819,24 @@ price from a `limit_offset`, so they send an offset and not a price.
 - `submit_order_list` is the only route that emits a group frame, so a consumer
   wanting an atomic group by any other route has no API for it. None is owed
   until one is wanted.
+- Feature 3, venue-enforced account policies: blocked on them, not on us, and
+  they have said so. They never `POST /accounts`, so every account they seat is
+  auto-created unpoliced and enforced against nothing; closing it needs an
+  account-file policy knob and a settled `409` story for restarts, both theirs.
+  Nothing is held here for it. What is owed from us when it lands is the breach
+  field on `GET /account`, so their classifier can name a flatten as the stated
+  rule rather than as an unexplained venue move.
+- Equity and inverse refusals are their translate layer's decision, not a gap in
+  our landing, and the same for the leverage refusal - leverage is per-symbol
+  venue config here rather than a client-settable knob, so the trigger to retire
+  their refusal is client-settable leverage appearing, not our margin table.
+  Nothing to build here.
+- Trailing-exit parity against piners' shadow, unexamined on their side. Our
+  trail ratchets off the tape's span extremes rather than a sweep mark, so it is
+  tighter than a mark-based trail and can trigger where one would not; a shadow
+  trailing off marks diverges on exactly the spikes, and it surfaces as a parity
+  mismatch rather than an error. `docs/oms-types.md` now states the basis rather
+  than leaving it to be inferred from "the extreme the tape has reached".
 - Their own repo: the feed-stale message hard-codes the issue-4255 hypothesis
   ("the connection looks healthy...") as fact even when the venue process is
   dead; `reference/mogwai.md` and `ba man mogwai` still describe the venue as

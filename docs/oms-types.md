@@ -43,9 +43,19 @@ The order types the venue serves: Market, Limit, StopMarket, StopLimit,
 TrailingStopMarket, TrailingStopLimit, MarketIfTouched, LimitIfTouched and
 MarketToLimit. That is every order type nautilus expresses; none is refused.
 
+A trailing stop ratchets off the tape's extremes, not off a sweep mark, and the
+difference is worth stating because it is the one a consumer comparing against
+a mark-based trail will meet first. The venue tracks the high and the low the
+tape reached between two passes and ratchets on those, so a spike between
+passes drags the trigger even though no pass ever observed that price as a
+mark. The trail is therefore tighter than a mark-based one and can trigger
+where a mark-based trail would not. This is deliberate - it is what a venue
+watching every print does - but a shadow implementation trailing off marks will
+diverge from it on exactly the spikes, and the divergence reads as a parity
+mismatch rather than as an error.
+
 A `TrailingStopLimit` carries two offsets and no price. `trail_offset` is how
-far its trigger sits from the extreme the tape has reached, as on a
-`TrailingStopMarket`. `limit_offset` is how far its limit sits from that
+far its trigger sits from that extreme, as on a `TrailingStopMarket`. `limit_offset` is how far its limit sits from that
 trigger, on the side the order can fill from - a sell rests at
 `trigger - limit_offset`, a buy at `trigger + limit_offset`. The venue derives
 the limit price from those and re-derives it every time the trigger ratchets and

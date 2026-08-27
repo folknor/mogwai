@@ -794,7 +794,7 @@ fn deliver(
     let routes: Vec<Route> = events
         .iter()
         .map(|event| match crate::run::audience(event) {
-            crate::run::Audience::Venue | crate::run::Audience::Unattributable => Route::Everyone,
+            crate::run::Audience::Venue => Route::Everyone,
             crate::run::Audience::Account(account) => Route::Account(account.as_str().to_owned()),
             // Every order-scoped frame reaching this point is claimed: the
             // dispatcher claims consumer submissions at acceptance, and
@@ -819,6 +819,15 @@ fn deliver(
             // path cannot know, and broadcasting it would leak one consumer's
             // orders, fills or refusals to every other. Dropped loudly - the
             // defect is in whatever put it here, not in delivery.
+            //
+            // Order rejections the venue never recognized route here as of the
+            // 2026-08-27 collapse of the `Unattributable` arm, and they are the
+            // reason the drop is the right half of the trade rather than the
+            // cautious one: such a frame echoes the submitting side's own
+            // `client_order_id`, so a broadcast would tell every account that
+            // another exists. Losing a frame nobody can attribute costs the
+            // asker a rejection it will also see on its own lane; broadcasting
+            // it costs every passenger the invisibility they are owed.
             crate::run::Audience::Requester => {
                 tracing::warn!(
                     ?event,
