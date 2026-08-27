@@ -221,7 +221,7 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
 /// The mismatch is safe by construction for the parity gates: they compare
 /// output over well-formed corpora, where no conversion fails and nothing is
 /// reached. What changes is only the behaviour on input the Python crashes on,
-/// which is the class the refusal contract in `reference/architecture.md`
+/// which is the class the refusal contract in `reference/architecture-workspace.md`
 /// exists to cover.
 fn parse_field_i64(
     parts: &[&str],

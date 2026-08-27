@@ -491,7 +491,7 @@ async fn adapter_submit_drives_live_exec_events() {
 /// `/ws?account=` upgrade, so the account this connection carries is the only
 /// one it can ever see and a label cannot mean it belongs elsewhere. The full
 /// argument, and what would have to change first, is in
-/// `reference/architecture.md`.
+/// `reference/architecture-runtime.md`.
 ///
 /// The label here is deliberately nothing like the configured `MOGWAI-001`.
 #[tokio::test(flavor = "current_thread")]

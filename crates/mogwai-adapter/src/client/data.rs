@@ -1216,7 +1216,7 @@ impl DataClient for MogwaiDataClient {
                 // state, not an error: mogwai's fitted arrival process is
                 // heavy-tailed, and a measured sweep of the default 24h-horizon
                 // tape found stretches of 15+ simulated hours running at 3-10
-                // trades per hour (see reference/architecture.md, "Tape arrival
+                // trades per hour (see reference/architecture-generator.md, "Tape arrival
                 // droughts"). Bars exist only for intervals that contain a
                 // trade, so inside a drought a request for N bars typically
                 // comes back with a handful - non-empty, so nothing downstream

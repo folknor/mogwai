@@ -541,7 +541,7 @@ fn boundary_frame_count(cmd: &Command) -> NonZeroUsize {
 /// and only on this path - the engine-output reservation further down is
 /// reached only through the witness, so it never sees a malformed command at
 /// all. The refusal is not lost, it is deferred: the retry that finds budget
-/// gets it. `reference/architecture.md` states the two admissions apart for
+/// gets it. `reference/architecture-accounts.md` states the two admissions apart for
 /// the same reason.
 #[expect(
     clippy::result_large_err,

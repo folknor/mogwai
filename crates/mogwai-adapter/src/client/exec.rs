@@ -3411,7 +3411,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     // back down it. So there is nothing to be misrouted from on this path, and a dropped
     // snapshot can only lose state that was correct. The configured id is
     // stamped on below, as it always was; `note_account_label` says once at
-    // connect if the two names differ. `reference/architecture.md` carries the
+    // connect if the two names differ. `reference/architecture-runtime.md` carries the
     // argument in full, including what would have to change first if a socket
     // ever carried several ledgers.
     let ts_event = UnixNanos::from(state.ts_event);

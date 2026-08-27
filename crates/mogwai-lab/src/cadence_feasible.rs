@@ -67,7 +67,7 @@ pub fn next_count_capped(
 /// The Python indexes these dictionaries directly, so a missing or
 /// non-numeric field raises `KeyError`/`TypeError` and the command stops.
 /// Substituting a default here would be silent acceptance of malformed input
-/// under the parity contract in `reference/architecture.md` - the class that
+/// under the parity contract in `reference/architecture-workspace.md` - the class that
 /// manufactures an answer instead of refusing.
 fn required(node: &Value, path: &[&str]) -> LabResult<f64> {
     let mut cursor = node;

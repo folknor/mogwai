@@ -215,7 +215,7 @@ const ORDER_TYPE_SITES: &[EnumerationSite] = &[
         closes: ". That is every order type nautilus expresses",
     },
     EnumerationSite {
-        path: "reference/architecture.md",
+        path: "reference/architecture-accounts.md",
         opens: "it is complete in fact and not only in intent: ",
         closes: " are served, which is every order type nautilus expresses",
     },
@@ -251,7 +251,7 @@ struct CountSite {
 /// The documents that state the instrument-class count as a live claim.
 const CLASS_COUNT_SITES: &[CountSite] = &[
     CountSite {
-        path: "reference/architecture.md",
+        path: "reference/architecture-accounts.md",
         before: "The ledger models ",
         after: " instrument classes, split by settlement shape",
         capitalized: false,

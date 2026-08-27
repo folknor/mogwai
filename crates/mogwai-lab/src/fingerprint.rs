@@ -413,7 +413,7 @@ fn avg_curves(curves: &[Vec<f64>]) -> Vec<f64> {
 /// `r["n_trades"]`, so a malformed report raises `KeyError` there. This
 /// previously substituted `""` and `0`, inventing an identity for one and
 /// silently changing an aggregate for the other - the worst class under the
-/// parity contract in `reference/architecture.md`, because it manufactures an
+/// parity contract in `reference/architecture-workspace.md`, because it manufactures an
 /// answer from input the original rejected.
 ///
 /// # Errors

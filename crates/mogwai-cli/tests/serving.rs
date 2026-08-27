@@ -2815,8 +2815,33 @@ async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
             ),
         );
         assert_eq!(status, 200, "the quote history answers: {body}");
-        let quotes: Vec<QuoteTick> = serde_json::from_str(&body).expect("quote history");
-        assert!(!quotes.is_empty(), "a quote at or before acceptance");
+        let mut quotes: Vec<QuoteTick> = serde_json::from_str(&body).expect("quote history");
+        if quotes.is_empty() {
+            // The bracket bet lost: no quote printed between the drain and the
+            // acceptance, which the fitted cadence legitimately produces - a
+            // parent event's book stands for whole seconds. The book the venue
+            // read is then the last quote at or before the acceptance, so
+            // fetch the standing quote and judge against it alone. This is the
+            // exact reading rather than a widened bracket: extending the
+            // bracket keeps every stale ask in the floor, where the standing
+            // quote is the one book a reading at this instant can be.
+            let (status, body) = http_get(
+                &venue.http_base(),
+                &format!(
+                    "/operator/quotes?symbol={}&start={}&end={reading_ts}&limit={}",
+                    venue.symbol,
+                    reading_ts.saturating_sub(600_000_000_000),
+                    mogwai_protocol::MAX_HISTORY_LIMIT,
+                ),
+            );
+            assert_eq!(status, 200, "the standing-quote fallback answers: {body}");
+            let standing: Vec<QuoteTick> = serde_json::from_str(&body).expect("standing quote");
+            let last = standing
+                .into_iter()
+                .next_back()
+                .expect("a quote at or before acceptance");
+            quotes = vec![last];
+        }
         match side {
             "Buy" => {
                 let floor = quotes

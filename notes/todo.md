@@ -433,26 +433,11 @@ instrument class is not a finding and does not need re-reporting.
 
 ## Documentation
 
-- **`reference/architecture.md` wants splitting; step one is done.** The entry
-  used to open "about 1,400 lines with two headings" and that is stale,
-  corrected 2026-08-27: the headings landed in `0ab8c4a` on 2026-08-26, and the
-  file is now about 1,700 lines under roughly forty of them. It still does the
-  same four jobs - the venue's runtime shape and account model; accounts, risk,
-  instruments and valuation; clocks, boats, delivery and faults; the generator
-  and fingerprint - plus a workspace section at the end, and its contradictions
-  have all sat where one job's old text survived another's landing.
-  `docs/havoc.md` was patched rather than rewritten and wants the same treatment
-  eventually.
-
-  What remains is step two: split into separate files with the boundaries
-  visible. The seams the split needs now exist, which was the whole point of
-  doing it in two steps.
-
-  The blast radius for step two: 17 files cite `architecture.md`, and two of them
-  are prose-scanning tests (`live_fact_prose.rs`, `tape_version_prose.rs`) that
-  read every markdown file in the repository. The failure mode of step two is
-  silently dropping a paragraph out of a durable must-be-true document while
-  moving text, which nobody would notice.
+- **`docs/havoc.md` was patched rather than rewritten** and wants the same
+  headings-then-split treatment `reference/architecture.md` got - step one
+  landed 2026-08-26 and step two split it into five part files on 2026-08-27,
+  byte-for-byte under a coverage assertion, with the map left at
+  `architecture.md`.
 
 ## Infrastructure
 
