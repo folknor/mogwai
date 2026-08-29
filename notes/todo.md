@@ -4,40 +4,16 @@ Open work only. How the built system works lives in `reference/architecture.md`;
 the landing-by-landing history is in git; the per-crate mechanics are in code
 comments.
 
-**Not the live arc.** Work that is actively being done belongs to its own
-track's document, not here - see `notes/README.md` for the map. This file is for
-what is parked, deferred, unresolved or owed by someone else.
+`reference/north-star.md` and `reference/glossary.md` are fully adjudicated
+statements of the end state, and they outrank anything written here. An entry
+disagreeing with either is dead weight, not a fork: it gets deleted rather than
+escalated.
 
 Once an item here is completed, it gets removed entirely. If the prose contains
 any relevant information that must endure, it gets either (a) added as an inline
 comment in the code, or (b) added to an existing or new `../reference/` document.
 Or both. There are no exceptions - a ruling recorded only here is a ruling the
 next bug hunter re-derives from scratch.
-
-`notes/bugs.md` and `notes/bugs-engine.md` were adjudicated entry by entry on
-2026-08-26 and deleted. Everything that survived that pass is below; everything
-that did not was either closed by a ruling, already answered at its own code
-site, or was never work in the first place. This file is now the only backlog.
-
-## How to read an entry here
-
-Two rules earned the hard way during that adjudication, both of which cost
-real owner attention before they were written down.
-
-**Read the code site before the entry's prose.** Four entries were still asking
-a question the code had already answered, in a doc comment at the exact site the
-entry named: the launcher's Ctrl-C trade, the adapter's account-label mismatch,
-`havoc.data` being refused rather than dropped, and the reconciliation test's
-scope. An entry that names a symbol is a pointer to that symbol's own
-documentation first and a claim second.
-
-**An entry earns its place only if something in this tree could change to close
-it.** A true observation about where our repository ends is not a defect. Three
-entries were deleted for this: we cannot prove a third-party framework calls our
-code, we cannot detect a widened conformance tolerance without new measurement,
-and a lint cannot separate an assertion message from a wire payload. Each was
-correct and none was work. Where such a limit is worth recording, it is recorded
-at the site it constrains, not here.
 
 ## Priority order across the slates
 
@@ -307,6 +283,78 @@ instrument class is not a finding and does not need re-reporting.
   the same again at any later reader comparing the two curves elementwise. Fixing
   the frozen sentence is a section 17 amendment through review, not an edit.
 
+## Product types
+
+What survived `notes/testnet.md`, the 2026-08-14 product-type plan, when it was
+adjudicated against the two end-state documents on 2026-08-29. The nautilus
+constraints it established are now `reference/nautilus.md`, verified against the
+0.62 pin, which the plan predated. What follows is only the work.
+
+Most of that plan was dead weight and is recorded here once so it is not
+re-derived. Its central claim - that nautilus's account model forces the venue
+to split into `MOGWAI-SPOT`, `-PERP`, `-FUT` and `-EQ` - is false, and it had
+declared north-star's "there is one venue across asset classes" retired on the
+strength of it. The mechanism is real but local: `Cache::add_account` indexes
+`venue_account` by issuer, so within one nautilus node a venue resolves to
+exactly one account and therefore one account type. That index is a node's own
+cache. Each agent runs its own node with its own account and one
+single-instrument strategy, so a batch's agents hold accounts of mixed types
+against one venue process and meet nowhere. `account_type` already sits on
+`MogwaiExecClientConfig` per exec client. Nothing splits. The residue is a
+consumer's node configuration choice: one account trading two settlement classes
+at once must pick one account type for both, closed by using two accounts.
+
+Also dead with it: the multi-account venue and user-owned venue process, both
+landed and both already the glossary's server mode; the "instrument declaration"
+as a unit deliberately named as not a preset, which north-star's preset entry
+forecloses; and its four-product taxonomy, narrower than the glossary's six
+classes.
+
+- **`Perpetual` and `Inverse` are both published as `CryptoPerpetual`.**
+  `convert::instrument_any` maps them onto the crypto-only elder type, while
+  `PerpetualContract` is the newer generic that carries an asset class. Our
+  `Perpetual` takes `asset_class` from the wire, so a non-crypto perp is
+  published wearing a type that cannot express what it is. Verified present at
+  the 0.62 pin, which retires the plan's doubt that the generic type might not
+  exist there.
+
+- **What margin to publish when the declared basis has no nautilus rate.** An
+  owner decision, not plumbing. The user declares `ConfiguredMargin` -
+  `initial_per_contract`, `maintenance_per_contract` and a `basis` - and the
+  venue enforces it. Nautilus computes its own independent requirement as
+  notional times `margin_init` divided by leverage, so it is strictly a rate on
+  notional. A `notional` basis converts exactly; the default `per_contract`
+  basis is an exchange performance bond in settlement currency, does not scale
+  with price, and has no rate that stays correct as the tape moves.
+
+  Today `convert` publishes neither field, so both take nautilus's zero default
+  and its pre-trade check requires no margin at all. The venue still enforces
+  its own regime, so nothing is mis-accounted; what a strategy loses is the
+  local denial, meeting a venue rejection instead. The fork is what to do per
+  basis: publish the rate for `notional`, and for `per_contract` either keep
+  publishing nothing and leave the check inert, or refuse the way `forex` does,
+  loudly, on the grounds that a wrong number is invisible where an absence is
+  not. Whichever way it lands, it is a wire change owing broadarrow a message,
+  because their percent and cash sizers read the account.
+
+- **The remaining six account-correctness rules are unaudited.** They are stated
+  at `reference/nautilus.md`, and nothing in nautilus checks any of them, which
+  is what makes them rules rather than observations. Rule 1, cash-only balances,
+  was audited on 2026-08-29 and is honoured. Rule 5 is the entry above. Rule 6,
+  which margin model an account is configured with, is host-side configuration
+  and no reading was taken on it.
+
+- **Product economics have nowhere to land on the live path, and the venue's
+  answer is undecided per class.** `reference/nautilus.md` states what the
+  channel can carry: liquidation works through venue-initiated fills, funding
+  survives only as an unattributed balance delta, expiry and halts inform the
+  strategy and change nothing, and corporate actions have no carrier at all.
+  What is owed here is per class, and only once an instrument of that class is
+  actually served: a perpetual owes funding, a dated future owes a roll schedule
+  and expiry settlement, an equity owes corporate actions. None is urgent under
+  the 2026-08-26 ranking, and each is gated on the upstream items below being
+  either landed or deliberately worked around.
+
 ## Venue and protocol
 
 - **One residual divergence between the boat implementation and the glossary's
@@ -548,6 +596,34 @@ Four still stand. One had closed and is struck below.
   does not reach us - mogwai overrides the method anyway, which is why this
   entry always said it protects the next adapter author rather than this repo.
   Nothing to file, nothing to wait for.
+
+The four below came from the 2026-08-14 product-type plan and are ordered by
+leverage. They are what separates mogwai modelling a product from mogwai faking
+it the way every other adapter fakes it. `reference/nautilus.md` carries the
+mechanism each one names.
+
+- **Lift `FundingSettlement` onto the live path.** The types exist, the
+  semantics exist including rollback, and they are wired only into the backtest.
+  Every shipped perp adapter currently launders funding through an unattributed
+  balance delta. The highest-value change in this list: it is additive, its
+  shape is obvious - an `ExecutionEvent` variant plus a live emitter method -
+  and mogwai emitting it correctly is what makes the gap visible.
+
+- **Make expiry act on the live path.** `InstrumentClose` carrying a
+  contract-expired reason already arrives; the machinery that cancels orders and
+  closes positions is matching-engine-only. Dated futures are not honestly
+  forward-testable until this exists.
+
+- **Complete the cash-account guard to include `FuturesContract`.** Verified
+  still open at the 0.62 pin: the backtest exchange's check is a hardcoded match
+  over the two crypto perpetual types and the generic perpetual type, so a cash
+  account holds a dated future with no complaint. Small, obviously correct, and
+  directly on the MNQ path.
+
+- **Corporate actions.** Genuinely new - no dividend or split type exists
+  anywhere. Splits are the hard half, because they rewrite an open position's
+  quantity and average price retroactively. Only needed when equities become
+  real.
 
 - **Tape sparsity has no attribution channel.** An empty historical window is
   correct behaviour here - the fitted ACD arrival process is persistent and
