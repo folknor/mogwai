@@ -556,14 +556,22 @@ half of the problem survived.
   retire it - and `send_order_event` is still infallible and still only warns, so
   the deaf-connection failure is unchanged in consequence.
 
-  Owed on our side regardless: the comment block at the guard in `client/exec.rs`
-  still describes the old by-value sender and argues from an asymmetry between
-  the live emitter field and frozen clones. Both claims died with #4874 and the
-  comment is now false about upstream. Separately, 0.63 added
-  `try_send_order_event`, a fallible sibling we do not call at any of our
-  thirteen emit sites; adopting it would surface a dropped event instead of
-  warning into the log, and wants its own change and a decision about what the
-  pump does with an `Err` mid-connection.
+  The stale comment at the guard is fixed. The sink-loss question it raised is
+  answered and built (AE21): a retained sender clone is a generation-scoped
+  liveness witness, checked after every emission, and closure retires the
+  transport generation rather than the client. `try_send_order_event` was
+  considered and not adopted - it answers whether one enqueue saw a live
+  receiver, which is not the terminal question, and it has no usable sibling for
+  account state, since `try_send_account_state` is private and
+  `try_emit_account_state` regenerates the event off the emitter's realtime
+  clock and would discard this venue's simulated `ts_init`.
+
+  Still wanted upstream, and worth one line in a PR: make
+  `try_send_account_state` public. It is the cleaner per-event interface for an
+  already-built `AccountState` and would remove the ambiguity about whether one
+  particular account enqueue failed. It is not required - the witness answers
+  the generation-liveness question without it - so this is an interface request
+  rather than a blocker.
 
   The original entry, kept for provenance: the emitter derived `Clone` and owned
   `sender: Option<UnboundedSender<ExecutionEvent>>` by value, installed once from

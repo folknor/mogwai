@@ -13,7 +13,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -26,6 +26,7 @@ use mogwai_protocol::{
 use nautilus_common::{
     clients::ExecutionClient,
     live::{get_runtime, try_get_exec_event_sender},
+    messages::ExecutionEvent,
     messages::execution::{
         CancelOrder, GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
         GeneratePositionStatusReports, ModifyOrder, QueryOrder, SubmitOrder,
@@ -296,7 +297,57 @@ pub struct MogwaiExecutionClient {
     /// outlived the client cannot emit exec events (its emitter still holds a
     /// live sender clone) after the client stopped (AE19).
     task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// A clone of the sender installed on the emitter, kept solely to ask
+    /// whether the nautilus runner still holds the receiving end (AE21).
+    ///
+    /// The emitter answers "is a sender installed", never "is the receiver
+    /// alive", and `send_order_event` swallows the difference into a
+    /// `log::warn!`. A retained sender answers the second question through
+    /// `is_closed()`, which is the only one the terminal policy needs: sink
+    /// loss is the terminal fact, not whether one particular enqueue succeeded.
+    ///
+    /// Client-scoped and replaceable rather than copied into each generation,
+    /// mirroring the emitter's own slot. A plain clone captured by a transport
+    /// task would freeze the old sender across a later `start()`, keeping the
+    /// old runner's channel open after the emitter had stopped retaining it -
+    /// the emitter's shared slot makes replacement visible everywhere, and the
+    /// witness has to track it or it stops being a witness for the sink the
+    /// emitter actually uses. A mutex rather than the emitter's `ArcSwapOption`
+    /// because the critical section is a `is_closed()` read with no await in
+    /// it, and that does not earn a dependency this workspace does not have.
+    ///
+    /// This does not extend the channel's life beyond what the emitter already
+    /// does: `set_sender` stores and never clears, so a started client already
+    /// pins its exec sender for as long as it lives. The runner's `recv` ends
+    /// only when every one of its channels closes, so a witness outliving the
+    /// emitter retention would convert a clean shutdown into a hang. This one
+    /// shares the emitter's ownership graph exactly.
+    sink: Arc<Mutex<Option<UnboundedSender<ExecutionEvent>>>>,
+    /// The transport generation currently entitled to emit; `NO_GENERATION`
+    /// when none is.
+    ///
+    /// Every emission is guarded by it. Without that guard the emitter's shared
+    /// sender slot becomes a cross-generation bug: a task left over from a
+    /// retired connection would observe whatever sender a later `start()`
+    /// installed and emit into it, attributing a dead generation's events to a
+    /// live one. Retirement clears this before it asks for task cancellation,
+    /// because cancellation is asynchronous and a late task must refuse on its
+    /// own rather than be raced to a stop.
+    generation: Arc<AtomicU64>,
+    /// Issues generation ids. Only `connect()` reads it, and it holds `&mut
+    /// self`, so a plain counter is enough.
+    next_generation: u64,
+    /// Raised when a generation observes its sink closed, and read by the WS
+    /// reader, which owns reconnect policy and is the only thing that can stop
+    /// redialling.
+    sink_dead: Arc<AtomicBool>,
 }
+
+/// The generation value meaning "no transport generation may emit".
+///
+/// Zero is never issued: `next_generation` starts at 1, so a context can never
+/// hold this by accident.
+const NO_GENERATION: u64 = 0;
 
 impl MogwaiExecutionClient {
     /// Creates a new disconnected mogwai execution client.
@@ -336,6 +387,10 @@ impl MogwaiExecutionClient {
             instruments: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(PendingQueries::default())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
+            sink: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(NO_GENERATION)),
+            next_generation: NO_GENERATION,
+            sink_dead: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -570,8 +625,11 @@ impl MogwaiExecutionClient {
             );
             state.prune();
         }
-        self.emitter
-            .send_order_event(OrderEventAny::Submitted(submitted));
+        // Through a context rather than off the emitter field directly, so the
+        // command path observes sink loss on the same rule the reader does. It
+        // used to be the one emission that bypassed every guard.
+        self.exec_context()
+            .emit(|e| e.send_order_event(OrderEventAny::Submitted(submitted)));
     }
 
     fn exec_context(&self) -> ExecContext {
@@ -584,6 +642,13 @@ impl MogwaiExecutionClient {
             account_id: self.core.account_id,
             account_type: self.config.account_type,
             sim: self.sim,
+            // A context takes the generation that is active when it is built.
+            // On the command path that is the live one; the reader's context is
+            // built in `connect()` from the generation it just issued.
+            epoch: self.generation.load(Ordering::Acquire),
+            generation: Arc::clone(&self.generation),
+            sink: Arc::clone(&self.sink),
+            sink_dead: Arc::clone(&self.sink_dead),
         }
     }
 
@@ -1013,23 +1078,23 @@ impl ExecutionClient for MogwaiExecutionClient {
         ts_event: UnixNanos,
         info: Option<nautilus_core::Params>,
     ) -> anyhow::Result<()> {
-        self.emitter.send_account_state(
-            NautilusAccountState::new(
-                self.core.account_id,
-                self.config.account_type,
-                balances,
-                margins,
-                reported,
-                UUID4::new(),
-                ts_event,
-                now_unix_nanos(self.sim),
-                None,
-            )
-            // The venue-specific `info` bag is the caller's, not ours: pass it
-            // through rather than dropping it, so a host that attaches account
-            // metadata sees it on the emitted event.
-            .with_info(info),
-        );
+        let account_state = NautilusAccountState::new(
+            self.core.account_id,
+            self.config.account_type,
+            balances,
+            margins,
+            reported,
+            UUID4::new(),
+            ts_event,
+            now_unix_nanos(self.sim),
+            None,
+        )
+        // The venue-specific `info` bag is the caller's, not ours: pass it
+        // through rather than dropping it, so a host that attaches account
+        // metadata sees it on the emitted event.
+        .with_info(info);
+        self.exec_context()
+            .emit(|e| e.send_account_state(account_state));
         Ok(())
     }
 
@@ -1043,6 +1108,11 @@ impl ExecutionClient for MogwaiExecutionClient {
         // to see the runner's thread-local, so say so rather than swallowing
         // it. `connect()` refuses later if nothing ever installs a sender.
         if let Some(sender) = try_get_exec_event_sender() {
+            // The witness is installed from the same sender in the same step,
+            // so the two can never describe different channels. Replacing it
+            // here rather than cloning it per generation is what lets a later
+            // `start()` retarget both the emitter and the witness together.
+            *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
             self.emitter.set_sender(sender);
         } else if !self.emitter.is_initialized() {
             tracing::warn!(
@@ -1056,6 +1126,13 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     fn stop(&mut self) -> anyhow::Result<()> {
         self.ws_cmd = None;
+        // Before the aborts, not after. Abortion is asynchronous, so a task is
+        // resident until it is not, and clearing the generation first is what
+        // makes a late task refuse on its own rather than emit into a client
+        // the host has stopped. This is the same ordering the sink-loss
+        // retirement uses, and it is what AE19 asks for by a different route:
+        // the emitter a stray task holds is still perfectly able to send.
+        self.generation.store(NO_GENERATION, Ordering::Release);
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
         // Drop every in-flight query waiter's sender so a report generator
@@ -1146,6 +1223,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         if !self.emitter.is_initialized()
             && let Some(sender) = try_get_exec_event_sender()
         {
+            *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
             self.emitter.set_sender(sender);
         }
         ensure!(
@@ -1153,6 +1231,16 @@ impl ExecutionClient for MogwaiExecutionClient {
             "execution event sender not initialized: call start() on the runner's thread before \
              connect(), or every order event this connection receives would be dropped silently"
         );
+        // This connection is a new generation. Issuing it here, after the sink
+        // guard and before anything is spawned, is what makes the guard and the
+        // generation agree: a context can only exist for a generation whose
+        // sink was proven installed. `sink_dead` is cleared with it, because a
+        // previous generation's loss says nothing about this runner - a host
+        // that reinstalled a sender and reconnected deserves a live client.
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        self.sink_dead.store(false, Ordering::Release);
+        self.generation.store(generation, Ordering::Release);
         let http_base_url = self.config.http_base_url();
         // The execution client rides only the affine map; the tape boundary in
         // the envelope is the data client's concern.
@@ -1283,6 +1371,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         let disconnect_filter = Arc::clone(&havoc_filter);
         let disconnect_deliver = deliver_tx;
         let task_ws_url = ws_url.clone();
+        let sink_dead = Arc::clone(&self.sink_dead);
         let identity = run_identity_check(
             self.http.clone(),
             self.http_quota.clone(),
@@ -1304,6 +1393,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     label: "exec",
                     identity,
                     dial_timeout,
+                    sink_dead: Some(sink_dead),
                 },
                 Some(cmd_rx),
                 exec_command_to_client_message,
@@ -2269,8 +2359,7 @@ fn emit_cancel_rejected(
         wire_venue_order_id.or(record.venue_order_id),
         Some(ctx.account_id),
     );
-    ctx.emitter
-        .send_order_event(OrderEventAny::CancelRejected(event));
+    ctx.emit(|e| e.send_order_event(OrderEventAny::CancelRejected(event)));
 }
 
 #[derive(Clone)]
@@ -2285,6 +2374,78 @@ struct ExecContext {
     account_id: AccountId,
     account_type: nautilus_model::enums::AccountType,
     sim: SimClock,
+    /// The generation this context belongs to. Compared against `generation`
+    /// before every emission; a context whose generation is no longer the
+    /// active one emits nothing.
+    epoch: u64,
+    /// The client's live generation. See `MogwaiExecutionClient::generation`.
+    generation: Arc<AtomicU64>,
+    /// The client's sink witness. See `MogwaiExecutionClient::sink`.
+    sink: Arc<Mutex<Option<UnboundedSender<ExecutionEvent>>>>,
+    /// Raised by `emit` when this context observes its sink closed.
+    sink_dead: Arc<AtomicBool>,
+}
+
+impl ExecContext {
+    /// The one way this translator reaches nautilus (AE21).
+    ///
+    /// Three steps, in this order and for reasons that do not commute:
+    ///
+    /// 1. Refuse if this context is not the active generation. A task left over
+    ///    from a retired connection would otherwise emit through an emitter
+    ///    whose shared sender slot now points at a later runner, filing a dead
+    ///    generation's events under a live one. Cancellation cannot cover this,
+    ///    because aborting a task is asynchronous and the task is resident until
+    ///    it is not.
+    /// 2. Emit. The send itself stays infallible: `send_order_event` warns and
+    ///    drops, and the fallible sibling would only answer whether this one
+    ///    enqueue saw a live receiver - which is not the question. It also
+    ///    cannot be used for account state without discarding the simulated
+    ///    `ts_init`, so routing everything through the same infallible call and
+    ///    the same witness keeps one rule rather than two.
+    /// 3. Ask the witness whether the receiver is still there, and retire the
+    ///    generation if it is not. Observing after the send rather than before
+    ///    is deliberate: a check first would still race, and checking after
+    ///    means the event that provoked the loss is the one that reveals it.
+    ///
+    /// The guarantee is therefore "sink closure observed at an emission
+    /// boundary retires the generation", not continuous detection. A receiver
+    /// that closes between two emissions is seen at the next one.
+    fn emit(&self, send: impl FnOnce(&ExecutionEventEmitter)) {
+        if self.generation.load(Ordering::Acquire) != self.epoch {
+            return;
+        }
+        send(&self.emitter);
+        let closed = lock_recover(&self.sink, "exec sink witness")
+            .as_ref()
+            .is_some_and(tokio::sync::mpsc::UnboundedSender::is_closed);
+        if !closed {
+            return;
+        }
+        // Clear the generation before raising the flag, so a late task refuses
+        // on its own rather than being raced to a stop by the reader's teardown.
+        // `compare_exchange` is what makes retirement happen exactly once: the
+        // loser of a concurrent observation returns without logging.
+        if self
+            .generation
+            .compare_exchange(
+                self.epoch,
+                NO_GENERATION,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.sink_dead.store(true, Ordering::Release);
+            tracing::warn!(
+                generation = self.epoch,
+                "the nautilus execution event receiver is closed; retiring this transport \
+                 generation. Events this connection already translated were dropped, and the \
+                 venue is not the authority that can be asked for them again - a host that \
+                 reinstalls a sender and reconnects gets a fresh generation"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2513,7 +2674,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
             let event = OrderTriggered::new(ctx.trader_id, record.strategy_id, record.instrument_id,
                 client_order_id, UUID4::new(), UnixNanos::from(ts_event), now_unix_nanos(ctx.sim),
                 false, Some(venue_order_id), Some(ctx.account_id));
-            ctx.emitter.send_order_event(OrderEventAny::Triggered(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Triggered(event)));
         }
         VenueMessage::OrderAccepted {
             client_order_id,
@@ -2581,7 +2742,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 now_unix_nanos(ctx.sim),
                 false,
             );
-            ctx.emitter.send_order_event(OrderEventAny::Accepted(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Accepted(event)));
         }
         VenueMessage::OrderRejected {
             client_order_id,
@@ -2647,7 +2808,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 false,
                 false,
             );
-            ctx.emitter.send_order_event(OrderEventAny::Rejected(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Rejected(event)));
         }
         VenueMessage::OrderCanceled {
             client_order_id,
@@ -2705,7 +2866,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 Some(venue_order_id),
                 Some(ctx.account_id),
             );
-            ctx.emitter.send_order_event(OrderEventAny::Canceled(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Canceled(event)));
         }
         // Deliberately a copy of the Canceled arm rather than a shared helper
         // over both: the two are the same shape carrying different facts, and the
@@ -2762,7 +2923,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 Some(venue_order_id),
                 Some(ctx.account_id),
             );
-            ctx.emitter.send_order_event(OrderEventAny::Expired(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Expired(event)));
         }
         VenueMessage::OrderUpdated {
             client_order_id,
@@ -2898,7 +3059,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 None,
                 false,
             );
-            ctx.emitter.send_order_event(OrderEventAny::Updated(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::Updated(event)));
         }
         VenueMessage::OrderModifyRejected {
             client_order_id,
@@ -2949,8 +3110,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                     .or(record.venue_order_id),
                 Some(ctx.account_id),
             );
-            ctx.emitter
-                .send_order_event(OrderEventAny::ModifyRejected(event));
+            ctx.emit(|e| e.send_order_event(OrderEventAny::ModifyRejected(event)));
         }
         VenueMessage::OrderCancelRejected {
             client_order_id,
@@ -3399,7 +3559,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         commission,
         None,
     );
-    ctx.emitter.send_order_event(OrderEventAny::Filled(event));
+    ctx.emit(|e| e.send_order_event(OrderEventAny::Filled(event)));
 }
 
 fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext) {
@@ -3532,20 +3692,24 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
             );
         }
     }
-    ctx.emitter.send_account_state(
-        NautilusAccountState::new(
-            ctx.account_id,
-            ctx.account_type,
-            balances,
-            margins,
-            true,
-            UUID4::new(),
-            ts_event,
-            now_unix_nanos(ctx.sim),
-            None,
-        )
-        .with_info(risk_info(state.risk.as_ref())),
-    );
+    // The state is built here, with this venue's simulated `ts_init`, and
+    // handed to the infallible send. The upstream `try_emit_account_state` is
+    // public and fallible but generates the event itself off the emitter's
+    // realtime clock, which would silently replace the simulated stamp - so the
+    // witness, not the return value, is what reports sink loss on this path.
+    let account_state = NautilusAccountState::new(
+        ctx.account_id,
+        ctx.account_type,
+        balances,
+        margins,
+        true,
+        UUID4::new(),
+        ts_event,
+        now_unix_nanos(ctx.sim),
+        None,
+    )
+    .with_info(risk_info(state.risk.as_ref()));
+    ctx.emit(|e| e.send_account_state(account_state));
 }
 
 /// The venue's risk state rendered into nautilus's account info bag, so a
@@ -3744,6 +3908,14 @@ mod tests {
             account_id,
             account_type: nautilus_model::enums::AccountType::Margin,
             sim: SimClock::identity(),
+            // Generation 1 and active, so these mirror tests exercise the
+            // ordinary emitting path rather than the refusal. The witness is
+            // empty, which reads as "no sink installed" and therefore never as
+            // closure - these tests assert on mirror state, not on delivery.
+            epoch: 1,
+            generation: Arc::new(AtomicU64::new(1)),
+            sink: Arc::new(Mutex::new(None)),
+            sink_dead: Arc::new(AtomicBool::new(false)),
         };
         (state, ctx)
     }
@@ -3755,6 +3927,115 @@ mod tests {
             .get(&ClientOrderId::from("O-1"))
             .expect("order remains mirrored");
         (record.status, record.ts_last)
+    }
+
+    /// A context wired to a real channel, at `epoch`, with the client's active
+    /// generation set to `active`. The same sender is installed on the emitter
+    /// and as the witness, which is the invariant `start()` maintains.
+    fn a_context_on_a_live_channel(
+        epoch: u64,
+        active: u64,
+    ) -> (
+        ExecContext,
+        tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+        Arc<AtomicU64>,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let trader_id = nautilus_model::identifiers::TraderId::from("TRADER-001");
+        let account_id = AccountId::from("MOGWAI-001");
+        let mut emitter = ExecutionEventEmitter::new(
+            get_atomic_clock_realtime(),
+            trader_id,
+            account_id,
+            nautilus_model::enums::AccountType::Margin,
+            None,
+        );
+        emitter.set_sender(tx.clone());
+        let generation = Arc::new(AtomicU64::new(active));
+        let sink_dead = Arc::new(AtomicBool::new(false));
+        let ctx = ExecContext {
+            emitter,
+            state: Arc::new(Mutex::new(ExecState::default())),
+            instruments: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(PendingQueries::default())),
+            trader_id,
+            account_id,
+            account_type: nautilus_model::enums::AccountType::Margin,
+            sim: SimClock::identity(),
+            epoch,
+            generation: Arc::clone(&generation),
+            sink: Arc::new(Mutex::new(Some(tx))),
+            sink_dead: Arc::clone(&sink_dead),
+        };
+        (ctx, rx, generation, sink_dead)
+    }
+
+    fn a_submitted_event(ctx: &ExecContext) -> OrderEventAny {
+        OrderEventAny::Submitted(OrderSubmitted::new(
+            ctx.trader_id,
+            nautilus_model::identifiers::StrategyId::from("S-1"),
+            InstrumentId::from("EURUSD.MOGWAI"),
+            ClientOrderId::from("O-1"),
+            ctx.account_id,
+            UUID4::new(),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+        ))
+    }
+
+    /// The cross-generation guard. The emitter's sender slot is shared and
+    /// survives a generation, so without this check a task left over from a
+    /// retired connection would emit into whatever runner is current now.
+    #[test]
+    fn a_context_from_a_retired_generation_emits_nothing() {
+        let (ctx, mut rx, _generation, sink_dead) = a_context_on_a_live_channel(1, 2);
+        let event = a_submitted_event(&ctx);
+
+        ctx.emit(|e| e.send_order_event(event));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a context whose generation is no longer active must not reach the runner, even \
+             though its emitter holds a live sender"
+        );
+        assert!(
+            !sink_dead.load(Ordering::Acquire),
+            "refusing to emit is not sink loss and must not retire anything"
+        );
+    }
+
+    /// The terminal rule: closure observed at an emission boundary retires the
+    /// generation, exactly once, clearing it before anything asynchronous.
+    #[test]
+    fn a_closed_receiver_retires_the_generation_once() {
+        let (ctx, rx, generation, sink_dead) = a_context_on_a_live_channel(1, 1);
+        drop(rx);
+        let event = a_submitted_event(&ctx);
+
+        ctx.emit(|e| e.send_order_event(event));
+
+        assert_eq!(
+            generation.load(Ordering::Acquire),
+            NO_GENERATION,
+            "the generation is cleared before the reader is asked to stop, so a late task \
+             refuses on its own rather than being raced to it"
+        );
+        assert!(
+            sink_dead.load(Ordering::Acquire),
+            "the reader owns reconnect policy and this flag is the only thing that tells it \
+             the consumer is gone"
+        );
+
+        // Exactly once: a second observation finds the generation already
+        // cleared, refuses at step one, and cannot re-log or re-raise.
+        sink_dead.store(false, Ordering::Release);
+        let again = a_submitted_event(&ctx);
+        ctx.emit(|e| e.send_order_event(again));
+        assert!(
+            !sink_dead.load(Ordering::Acquire),
+            "retirement is compare-exchanged, so only the first observer of the closure acts"
+        );
     }
 
     #[test]

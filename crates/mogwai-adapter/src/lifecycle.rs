@@ -270,6 +270,20 @@ pub(crate) struct WsConnectionConfig {
     /// that follows a first dial which never completed placement, pays the same
     /// cost as a first.
     pub(crate) dial_timeout: Duration,
+    /// Set by the frame handler when the consumer this socket feeds has gone
+    /// away, which no venue frame can announce.
+    ///
+    /// Every other terminal here is the venue saying it is finished. This one is
+    /// the opposite end: the execution client watches whether the nautilus
+    /// runner still holds the receiving end of its event channel, and a socket
+    /// whose events reach nobody has nothing to redial for. It is a flag rather
+    /// than a `Terminal` variant because `mogwai_protocol::close::Terminal`
+    /// enumerates what the venue can say, and the venue cannot say this.
+    ///
+    /// `None` for a socket with no such consumer to lose - the data client
+    /// passes none, because its sink is the runner's data channel and it does
+    /// not hold a witness for it.
+    pub(crate) sink_dead: Option<Arc<AtomicBool>>,
 }
 
 /// What an identity probe established. Three outcomes, not two: only one of
@@ -507,7 +521,18 @@ async fn run_ws_connection_inner<
         label,
         identity,
         dial_timeout,
+        sink_dead,
     } = config;
+    // Read after every handler call and once more before each redial. The
+    // handler is what observes the loss - it runs the translator that emits to
+    // the consumer - so the flag can only turn true underneath a `handler`
+    // await, and reading it there is what makes the break prompt rather than
+    // waiting out an idle timeout.
+    let sink_lost = || {
+        sink_dead
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    };
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
     // is set, so jitter is reproducible (D.6). Both construction sites -
@@ -762,7 +787,7 @@ async fn run_ws_connection_inner<
                                 Ok(venue_msg) => {
                                     terminal = terminal.or_else(|| terminal_for(&venue_msg));
                                     handler(venue_msg).await;
-                                    if terminal.is_some() {
+                                    if terminal.is_some() || sink_lost() {
                                         break;
                                     }
                                 }
@@ -780,7 +805,7 @@ async fn run_ws_connection_inner<
                                 Ok(venue_msg) => {
                                     terminal = terminal.or_else(|| terminal_for(&venue_msg));
                                     handler(venue_msg).await;
-                                    if terminal.is_some() {
+                                    if terminal.is_some() || sink_lost() {
                                         break;
                                     }
                                 }
@@ -876,6 +901,18 @@ async fn run_ws_connection_inner<
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
+        // Checked before the venue's own terminals because it outranks them: if
+        // the consumer is gone, what the venue was about to say next reaches
+        // nobody either way, and redialling would only refill a dead channel.
+        if sink_lost() {
+            tracing::warn!(
+                socket = label,
+                "the consumer this socket feeds has dropped its receiver; reconnect disabled, \
+                 because every event a new connection delivered would be dropped. An explicit \
+                 stop, start and connect on a live runner recovers"
+            );
+            return;
+        }
         if let Some(kind) = terminal {
             // Each of these is terminal, and saying which one matters to an
             // operator reading the log: a completed run is the expected end of
@@ -1616,6 +1653,7 @@ mod tests {
                 label: "test",
                 identity: None,
                 dial_timeout: Duration::from_secs(mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS),
+                sink_dead: None,
             },
             Some(cmd_rx),
             |cmd: &Command| cmd.clone(),
@@ -1938,6 +1976,7 @@ mod tests {
                     label: "test",
                     identity: None,
                     dial_timeout: Duration::from_secs(mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS),
+                    sink_dead: None,
                 },
                 Some(cmd_rx),
                 |cmd: &Command| cmd.clone(),

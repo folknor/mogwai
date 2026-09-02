@@ -542,6 +542,11 @@ impl DataClient for MogwaiDataClient {
                     label: "data",
                     identity,
                     dial_timeout,
+                    // The data leg holds no witness for its sink. Its events go
+                    // to the runner's data channel, which it never obtains a
+                    // sender for - the execution leg is the only one that keeps
+                    // one, so it is the only one that can observe the loss.
+                    sink_dead: None,
                 },
                 Some(cmd_rx),
                 // The client's command type is itself the wire command here: this leg

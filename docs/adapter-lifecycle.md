@@ -61,7 +61,7 @@ the emitter. The refusal only fires when a sender was never resolved at all.
 ## What ends a connection for good, and what does not
 
 Both clients reconnect on their own, with backoff, for the whole life of the
-client. Three things stop that permanently, and each writes one log line:
+client. Four things stop that permanently, and each writes one log line:
 
 - the venue's **run completing** - the `RunComplete` frame, or a WS 1000 close
   reasoned `run complete`,
@@ -72,13 +72,31 @@ client. Three things stop that permanently, and each writes one log line:
   newer connection presented this client's account id under a different or
   absent callsign. Redialling would evict the claimant in turn, forever, so the
   client stops.
+- **the consumer going away** - the execution client only, and the one entry
+  here the venue does not announce. It keeps a clone of the sender it emits
+  through, and when that channel's receiver is dropped - the nautilus runner
+  gone or shutting down - the events this socket translates reach nobody. It
+  retires the connection rather than redialling into a dead sink.
+
+  This one is recoverable in a way the other three are not: it retires the
+  transport generation, not the client. A host that installs a live sender by
+  calling `start()` on the runner's thread again and then `connect()` gets a
+  working client back. What it must not expect is self-healing, because the
+  adapter never redials on its own after this.
+
+  It is observed at emission boundaries, not continuously, so a receiver that
+  closes while the socket is quiet is noticed at the next event rather than
+  immediately. Events translated before the loss was observed are gone: the
+  venue is not an authority that can be asked for them again, which is why the
+  connection ends rather than continuing on a best-effort basis.
+
 Everything else is a transport event and is redialled, including any other WS
 1000. That matters because 1000 is the ordinary code for any graceful close: a
 proxy retiring an idle socket sends it, and so does a venue restarting. The
 adapter classifies on the close reason (`mogwai_protocol::close::classify`), not
 on the code, and a reason it does not recognize is never read as completion.
 
-**The log line distinguishes all three.** The venue announces a finished run
+**The log line distinguishes all of them.** The venue announces a finished run
 and an elapsed passenger duration as different frames, so the adapter classifies
 each correctly from the frame and the close behind it agrees rather than
 refining it. Until those frames split, both completions sent one frame and an
