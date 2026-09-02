@@ -6,7 +6,7 @@ about mogwai, and each one is load-bearing because nothing in nautilus will
 catch us being wrong about the thing it describes.
 
 Read the source from `research/nautilus_trader`; build against the crates.io
-release pinned in `mogwai-adapter/Cargo.toml`, currently 0.62. The two are kept
+release pinned in `mogwai-adapter/Cargo.toml`, currently 0.63. The two are kept
 in sync, so what is read here is what compiles.
 
 Provenance, because it bears on how far each claim can be trusted. The spine of

@@ -63,11 +63,15 @@ pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
     }
 }
 
-pub(crate) fn wire_side(side: OrderSide) -> anyhow::Result<Side> {
+/// Infallible: nautilus 0.63 dropped the `NoOrderSide` sentinel, so `OrderSide`
+/// is exactly the two sides this venue trades and the refusal arm this function
+/// used to carry could never fire. Absence of a side is now spelled
+/// `Option<OrderSide>` at the fields that admit it, which is a different
+/// question and is answered where those fields are read.
+pub(crate) fn wire_side(side: OrderSide) -> Side {
     match side {
-        OrderSide::Buy => Ok(Side::Buy),
-        OrderSide::Sell => Ok(Side::Sell),
-        other => anyhow::bail!("unsupported order side {other:?}"),
+        OrderSide::Buy => Side::Buy,
+        OrderSide::Sell => Side::Sell,
     }
 }
 
@@ -112,7 +116,7 @@ pub(crate) fn wire_order_link(
         .map(|ids| ids.iter().map(ToString::to_string).collect())
         .unwrap_or_default();
     let contingency = match init.contingency_type {
-        None | Some(ContingencyType::NoContingency) => mogwai_protocol::Contingency::NoContingency,
+        None => mogwai_protocol::Contingency::NoContingency,
         Some(ContingencyType::Oco) => mogwai_protocol::Contingency::Oco,
         Some(ContingencyType::Oto) => mogwai_protocol::Contingency::Oto,
         Some(ContingencyType::Ouo) => mogwai_protocol::Contingency::Ouo,
@@ -155,9 +159,7 @@ pub(crate) fn wire_trail_offset(
         return Ok(None);
     };
     match offset_type {
-        None | Some(TrailingOffsetType::NoTrailingOffset | TrailingOffsetType::Price) => {
-            Ok(Some(offset))
-        }
+        None | Some(TrailingOffsetType::Price) => Ok(Some(offset)),
         Some(other) => anyhow::bail!(
             "unsupported trailing offset type {other:?}: the MOGWAI venue trails by an \
              absolute price distance, so state the offset in price rather than in ticks \
@@ -168,9 +170,7 @@ pub(crate) fn wire_trail_offset(
 
 pub(crate) fn wire_trigger_type(trigger: Option<TriggerType>) -> anyhow::Result<()> {
     match trigger {
-        None | Some(TriggerType::NoTrigger | TriggerType::Default | TriggerType::LastPrice) => {
-            Ok(())
-        }
+        None | Some(TriggerType::Default | TriggerType::LastPrice) => Ok(()),
         Some(other) => anyhow::bail!(
             "unsupported trigger type {other:?}: MOGWAI triggers from last traded price only"
         ),
@@ -379,33 +379,19 @@ pub(crate) fn instrument_any(
             let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
             let quote =
                 Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
-            let pair = CurrencyPair::new_checked(
-                id,
-                symbol,
-                base,
-                quote,
-                def.price_precision,
-                def.size_precision,
-                price(def.price_increment, def.price_precision)?,
-                quantity(def.size_increment, def.size_precision)?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                UnixNanos::from(0),
-                ts_init,
-            )
-            .context("convert spot currency pair")?;
+            let pair = CurrencyPair::builder()
+                .instrument_id(id)
+                .raw_symbol(symbol)
+                .base_currency(base)
+                .quote_currency(quote)
+                .price_precision(def.price_precision)
+                .size_precision(def.size_precision)
+                .price_increment(price(def.price_increment, def.price_precision)?)
+                .size_increment(quantity(def.size_increment, def.size_precision)?)
+                .ts_event(UnixNanos::from(0))
+                .ts_init(ts_init)
+                .build()
+                .context("convert spot currency pair")?;
             Ok(InstrumentAny::CurrencyPair(pair))
         }
         InstrumentClass::Forex { .. } => anyhow::bail!(
@@ -435,36 +421,26 @@ pub(crate) fn instrument_any(
                 WireAssetClass::Index => AssetClass::Index,
                 WireAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
             };
-            let contract = FuturesContract::new_checked(
-                id,
-                symbol,
-                asset_class,
+            let contract = FuturesContract::builder()
+                .instrument_id(id)
+                .raw_symbol(symbol)
+                .asset_class(asset_class)
                 // The exchange field takes the venue name from the same
                 // constant `MOGWAI_VENUE` is built from, so a rename reaches
                 // here too rather than leaving a stale literal behind.
-                Some(ustr::Ustr::from(MOGWAI_VENUE_STR)),
-                ustr::Ustr::from(underlying),
-                UnixNanos::from(0),
-                UnixNanos::from(i64::MAX as u64),
-                currency,
-                def.price_precision,
-                price(def.price_increment, def.price_precision)?,
-                quantity(*multiplier, multiplier.scale() as u8)?,
-                quantity(Decimal::ONE, 0)?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                UnixNanos::from(0),
-                ts_init,
-            )
-            .context("construct futures contract")?;
+                .exchange(ustr::Ustr::from(MOGWAI_VENUE_STR))
+                .underlying(ustr::Ustr::from(underlying))
+                .activation_ns(UnixNanos::from(0))
+                .expiration_ns(UnixNanos::from(i64::MAX as u64))
+                .currency(currency)
+                .price_precision(def.price_precision)
+                .price_increment(price(def.price_increment, def.price_precision)?)
+                .multiplier(quantity(*multiplier, multiplier.scale() as u8)?)
+                .lot_size(quantity(Decimal::ONE, 0)?)
+                .ts_event(UnixNanos::from(0))
+                .ts_init(ts_init)
+                .build()
+                .context("construct futures contract")?;
             Ok(InstrumentAny::FuturesContract(contract))
         }
         // A share is `Equity`, not a currency pair. Nautilus carries the type,
@@ -492,28 +468,18 @@ pub(crate) fn instrument_any(
                 }),
             );
             info.insert("mogwai_settlement_ns".into(), (*settlement_ns).into());
-            let equity = nautilus_model::instruments::Equity::new_checked(
-                id,
-                symbol,
-                None,
-                currency,
-                def.price_precision,
-                price(def.price_increment, def.price_precision)?,
-                Some(quantity(*lot_size, lot_size.scale() as u8)?),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(info),
-                UnixNanos::from(0),
-                ts_init,
-            )
-            .context("construct equity")?;
+            let equity = nautilus_model::instruments::Equity::builder()
+                .instrument_id(id)
+                .raw_symbol(symbol)
+                .currency(currency)
+                .price_precision(def.price_precision)
+                .price_increment(price(def.price_increment, def.price_precision)?)
+                .lot_size(quantity(*lot_size, lot_size.scale() as u8)?)
+                .info(info)
+                .ts_event(UnixNanos::from(0))
+                .ts_init(ts_init)
+                .build()
+                .context("construct equity")?;
             Ok(InstrumentAny::Equity(equity))
         }
         // Both crypto derivatives are `CryptoPerpetual`, which carries the
@@ -603,35 +569,26 @@ fn crypto_perpetual(
         );
         info
     });
-    let contract = nautilus_model::instruments::CryptoPerpetual::new_checked(
-        id,
-        symbol,
-        base,
-        quote,
-        settlement,
-        is_inverse,
-        def.price_precision,
-        def.size_precision,
-        price(def.price_increment, def.price_precision)?,
-        quantity(def.size_increment, def.size_precision)?,
-        Some(quantity(multiplier, multiplier.scale() as u8)?),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        info,
-        UnixNanos::from(0),
-        ts_init,
-    )
-    .context("construct crypto perpetual")?;
+    let contract = nautilus_model::instruments::CryptoPerpetual::builder()
+        .instrument_id(id)
+        .raw_symbol(symbol)
+        .base_currency(base)
+        .quote_currency(quote)
+        .settlement_currency(settlement)
+        .is_inverse(is_inverse)
+        .price_precision(def.price_precision)
+        .size_precision(def.size_precision)
+        .price_increment(price(def.price_increment, def.price_precision)?)
+        .size_increment(quantity(def.size_increment, def.size_precision)?)
+        .multiplier(quantity(multiplier, multiplier.scale() as u8)?)
+        // `info` is already optional here - a perpetual without funding terms
+        // carries none - so the absence passes through rather than being
+        // spelled as an empty map.
+        .maybe_info(info)
+        .ts_event(UnixNanos::from(0))
+        .ts_init(ts_init)
+        .build()
+        .context("construct crypto perpetual")?;
     Ok(InstrumentAny::CryptoPerpetual(contract))
 }
 

@@ -35,10 +35,7 @@ use nautilus_core::{Params, UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{
-        LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified,
-        TriggerType,
-    },
+    enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSide, TriggerType},
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
         OrderEventAny, OrderExpired, OrderFilled, OrderModifyRejected, OrderRejected,
@@ -309,22 +306,22 @@ impl MogwaiExecutionClient {
     /// Returns an error if the supplied config is invalid.
     pub fn new(core: ExecutionClientCore, config: MogwaiExecClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
+        // The trader identity comes off the core, never off the config. Since
+        // nautilus 0.63 the node passes the trader id to the factory, so the
+        // core is the one authority for it; a config field beside it would be a
+        // second, unvalidated source that could stamp emitted events with an
+        // identity the client is not registered under.
         let emitter = ExecutionEventEmitter::new(
             get_atomic_clock_realtime(),
-            config.trader_id,
+            core.trader_id,
             config.account_id,
             config.account_type,
             None,
         );
-        let http = HttpClient::new(
-            HashMap::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-            None,
-        )
-        .context("create HTTP client")?;
+        let http = HttpClient::builder()
+            .timeout_secs(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS)
+            .build()
+            .context("create HTTP client")?;
         Ok(Self {
             core,
             http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc), SimClock::identity()),
@@ -440,7 +437,7 @@ impl MogwaiExecutionClient {
             client_order_id: client_order_id.to_string(),
             symbol: symbol_from_instrument(instrument_id),
             position_id: position_id.map(|id| id.to_string()),
-            side: convert::wire_side(init.order_side)?,
+            side: convert::wire_side(init.order_side),
             order_type: convert::wire_order_type(init.order_type)?,
             quantity: init.quantity.as_decimal(),
             price: match init.order_type {
@@ -826,7 +823,10 @@ fn order_status_report_from_info(
         instrument_id,
         Some(client_order_id),
         venue_order_id,
-        convert::nautilus_side(info.side),
+        // `OrderStatusReport` takes the side as an option since nautilus 0.63
+        // dropped the `NoOrderSide` sentinel. Every order the venue reports has
+        // a real side, so this is always `Some`.
+        Some(convert::nautilus_side(info.side)),
         convert::nautilus_order_type(info.order_type),
         convert::nautilus_time_in_force(info.time_in_force),
         convert::nautilus_order_status(info.status),
@@ -3665,13 +3665,13 @@ fn order_record(
         .cloned()
 }
 
-fn position_side(quantity: Decimal) -> PositionSideSpecified {
+fn position_side(quantity: Decimal) -> PositionSide {
     if quantity.is_sign_positive() && !quantity.is_zero() {
-        PositionSideSpecified::Long
+        PositionSide::Long
     } else if quantity.is_sign_negative() {
-        PositionSideSpecified::Short
+        PositionSide::Short
     } else {
-        PositionSideSpecified::Flat
+        PositionSide::Flat
     }
 }
 
@@ -3689,7 +3689,7 @@ mod tests {
             ..MogwaiExecClientConfig::default()
         };
         let core = ExecutionClientCore::new(
-            config.trader_id,
+            nautilus_model::identifiers::TraderId::from(crate::config::DEFAULT_TRADER_ID),
             ClientId::from("MOGWAI-EXEC"),
             *MOGWAI_VENUE,
             OmsType::Netting,

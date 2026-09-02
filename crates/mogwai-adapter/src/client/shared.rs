@@ -816,15 +816,10 @@ mod tests {
     /// returning a probe when a seed IS set would silently disable the check.
     #[test]
     fn an_absent_expected_seed_installs_no_identity_probe() {
-        let http = HttpClient::new(
-            std::collections::HashMap::new(),
-            vec![],
-            vec![],
-            None,
-            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-            None,
-        )
-        .expect("http client builds");
+        let http = HttpClient::builder()
+            .timeout_secs(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS)
+            .build()
+            .expect("http client builds");
         let quota = HttpQuota::from_conn(&ConnHavoc::default(), SimClock::identity());
         assert!(
             run_identity_check(

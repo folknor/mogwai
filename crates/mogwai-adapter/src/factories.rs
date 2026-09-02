@@ -11,7 +11,7 @@ use nautilus_common::{
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
 };
 use nautilus_live::ExecutionClientCore;
-use nautilus_model::identifiers::ClientId;
+use nautilus_model::identifiers::{ClientId, TraderId};
 
 use crate::{
     MOGWAI_VENUE, MOGWAI_VENUE_STR, MogwaiDataClient, MogwaiDataClientConfig,
@@ -92,6 +92,7 @@ impl Default for MogwaiExecutionClientFactory {
 impl ExecutionClientFactory for MogwaiExecutionClientFactory {
     fn create(
         &self,
+        trader_id: TraderId,
         name: &str,
         config: &dyn ClientConfig,
         cache: CacheView,
@@ -114,7 +115,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
         // the validated fields, so it is harmless. Validating in the
         // constructor keeps a single validation site - see the data factory.
         let core = ExecutionClientCore::new(
-            config.trader_id,
+            trader_id,
             ClientId::from(name),
             *MOGWAI_VENUE,
             config.oms_type,

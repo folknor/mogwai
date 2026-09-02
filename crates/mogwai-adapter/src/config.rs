@@ -11,7 +11,7 @@ use mogwai_protocol::{
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::{AccountType, OmsType},
-    identifiers::{AccountId, TraderId},
+    identifiers::AccountId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +21,13 @@ use serde::{Deserialize, Serialize};
 /// told about accounts serves exactly the ledger it always did.
 pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 
-/// Default nautilus trader identity stamped on the order events this adapter
-/// emits.
+/// Fallback nautilus trader identity, for a caller that builds an
+/// `ExecutionClientCore` itself rather than going through the factory.
+///
+/// It is not a config field. Since nautilus 0.63 the node passes the trader id
+/// to `ExecutionClientFactory::create`, so a host running this adapter under a
+/// node gets the node's identity and never sees this constant; it exists for
+/// direct construction, which is mostly this crate's own tests.
 ///
 /// It happens to spell the same string as [`DEFAULT_ACCOUNT_ID`], and that
 /// coincidence is not load-bearing: the account id names a ledger the venue
@@ -309,10 +314,6 @@ impl ClientConfig for MogwaiDataClientConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiExecClientConfig {
-    /// The nautilus trader identity stamped on emitted order events. Defaults
-    /// to [`DEFAULT_TRADER_ID`], which is a separate job from `account_id`
-    /// despite the two defaults sharing a spelling.
-    pub trader_id: TraderId,
     pub account_id: AccountId,
     /// Base URL of the running mogwai venue.
     pub base_url: String,
@@ -372,7 +373,6 @@ fn default_oms_type() -> OmsType {
 impl Default for MogwaiExecClientConfig {
     fn default() -> Self {
         Self {
-            trader_id: TraderId::from(DEFAULT_TRADER_ID),
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             symbol: None,
@@ -458,15 +458,6 @@ impl MogwaiExecClientConfig {
     #[must_use]
     pub fn with_callsign(mut self, callsign: Option<String>) -> Self {
         self.callsign = callsign;
-        self
-    }
-
-    /// Set the trader id. [`Self::for_addr`] leaves it at this crate's default,
-    /// which is a mogwai-flavoured placeholder rather than the host's identity,
-    /// so a host with its own trader id sets it here.
-    #[must_use]
-    pub fn with_trader_id(mut self, trader_id: TraderId) -> Self {
-        self.trader_id = trader_id;
         self
     }
 

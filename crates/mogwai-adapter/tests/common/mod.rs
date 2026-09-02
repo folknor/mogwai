@@ -1414,7 +1414,7 @@ pub async fn connected_exec_client(
         ..MogwaiExecClientConfig::default()
     };
     let core = ExecutionClientCore::new(
-        config.trader_id,
+        TraderId::from(DEFAULT_TRADER_ID),
         ClientId::from("MOGWAI-EXEC"),
         *MOGWAI_VENUE,
         OmsType::Netting,

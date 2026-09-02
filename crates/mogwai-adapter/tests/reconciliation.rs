@@ -33,7 +33,7 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
-    enums::{LiquiditySide, OrderStatus, OrderType, PositionSideSpecified, TriggerType},
+    enums::{LiquiditySide, OrderStatus, OrderType, PositionSide, TriggerType},
     identifiers::{
         ClientId, ClientOrderId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId,
     },
@@ -144,7 +144,7 @@ fn assert_mass_status(mass: &nautilus_model::reports::ExecutionMassStatus) {
     let positions = mass.position_reports();
     let position = positions.get(&instrument_id()).and_then(|reports| reports.first())
         .expect("empty position reports: the account route degraded and startup reconciliation would adopt nothing");
-    assert_eq!(position.position_side, PositionSideSpecified::Long);
+    assert_eq!(position.position_side, PositionSide::Long);
     assert_eq!(position.quantity, Quantity::from("1"));
     assert_eq!(position.instrument_id, instrument_id());
 }
@@ -375,7 +375,7 @@ async fn position_status_reports_are_non_empty_end_to_end() {
         1,
         "empty reports would mask the legacy-account-route fallback"
     );
-    assert_eq!(reports[0].position_side, PositionSideSpecified::Long);
+    assert_eq!(reports[0].position_side, PositionSide::Long);
     assert_eq!(reports[0].instrument_id, instrument_id());
 }
 

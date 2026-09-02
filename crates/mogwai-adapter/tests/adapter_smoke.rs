@@ -1094,7 +1094,7 @@ fn unconnected_exec_client(cache: Rc<RefCell<Cache>>) -> MogwaiExecutionClient {
         ..MogwaiExecClientConfig::default()
     };
     let core = ExecutionClientCore::new(
-        config.trader_id,
+        nautilus_model::identifiers::TraderId::from(mogwai_adapter::DEFAULT_TRADER_ID),
         ClientId::from("MOGWAI-EXEC"),
         *MOGWAI_VENUE,
         OmsType::Netting,

@@ -131,15 +131,10 @@ impl MogwaiDataClient {
     /// Returns an error if the supplied config is invalid.
     pub fn new(client_id: ClientId, config: MogwaiDataClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
-        let http = HttpClient::new(
-            HashMap::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-            None,
-        )
-        .context("create HTTP client")?;
+        let http = HttpClient::builder()
+            .timeout_secs(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS)
+            .build()
+            .context("create HTTP client")?;
         Ok(Self {
             client_id,
             http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc), SimClock::identity()),

@@ -35,11 +35,11 @@ tokio-tungstenite = "0.30.0"
 tracing = { workspace = true, features = ["log"] }
 ustr = "1.1.0"
 
-nautilus-common = { version = "0.62.0", default-features = false }
-nautilus-core = { version = "0.62.0", default-features = false }
-nautilus-live = { version = "0.62.0", default-features = false }
-nautilus-model = { version = "0.62.0", default-features = false }
-nautilus-network = { version = "0.62.0", default-features = false }
+nautilus-common = { version = "0.63.0", default-features = false }
+nautilus-core = { version = "0.63.0", default-features = false }
+nautilus-live = { version = "0.63.0", default-features = false }
+nautilus-model = { version = "0.63.0", default-features = false }
+nautilus-network = { version = "0.63.0", default-features = false }
 
 [dev-dependencies]
 serde_urlencoded = "0.7"

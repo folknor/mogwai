@@ -494,15 +494,10 @@ pub(crate) async fn fetch_clock(http: &HttpClient, http_base: &str) -> anyhow::R
 pub async fn mogwai_clock_factory(
     http_base: &str,
 ) -> anyhow::Result<impl Fn() -> Rc<RefCell<dyn Clock>> + 'static> {
-    let http = HttpClient::new(
-        std::collections::HashMap::new(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-        None,
-    )
-    .context("create HTTP client")?;
+    let http = HttpClient::builder()
+        .timeout_secs(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS)
+        .build()
+        .context("create HTTP client")?;
     // The node clock only needs the affine map; the tape boundary in the
     // `VenueClock` envelope is for the data client's history guard, not the clock.
     let sim = fetch_clock(&http, http_base).await?.sim;
