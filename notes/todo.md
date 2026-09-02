@@ -569,7 +569,7 @@ problem, not a solution, and it closes when the problem goes away by any route.
   silent cross-runner misrouting, and only the factory has upstream's proof of
   which runner owns the thread.
 
-  AE20's refusal stays, narrowed to what it now guards: a client built outside a
+  The deaf-client refusal stays, narrowed to what it now guards: a client built outside a
   node that found no sink at construction, at `start()`, or at `connect()`.
 
   One line still wanted upstream, filed as a request rather than a need: make
@@ -581,7 +581,7 @@ problem, not a solution, and it closes when the problem goes away by any route.
   dispatch or its own timestamps, not both. Our sink witness does not need it.
 
   The stale comment at the guard is fixed. The sink-loss question it raised is
-  answered and built (AE21): a retained sender clone is a generation-scoped
+  answered and built: a retained sender clone is a generation-scoped
   liveness witness, checked after every emission, and closure retires the
   transport generation rather than the client. `try_send_order_event` was
   considered and not adopted - it answers whether one enqueue saw a live

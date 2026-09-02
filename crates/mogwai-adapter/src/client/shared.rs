@@ -61,7 +61,7 @@ async fn sleep_until_wall(deadline: Instant) {
 /// release deadline at its arrival. Unlike the inline-sleep `dispatch_havoc`,
 /// this does NOT block on the delay - the enqueue is immediate, so the caller's
 /// select loop stays responsive to pings/commands and a burst pipelines instead
-/// of serializing (AD4). A dropped receiver (the pump gone) discards the
+/// of serializing. A dropped receiver (the pump gone) discards the
 /// message, which only happens during teardown.
 pub(crate) fn enqueue_havoc(
     filter: &mut HavocFilter,
@@ -98,7 +98,7 @@ pub(crate) fn flush_havoc_into_pump(
 /// a network that delays every frame in parallel at full throughput, replacing
 /// the old inline `sleep_havoc_delay` that realized the delay as inter-message
 /// spacing - a ~33 msg/s ceiling that head-of-line-blocked pings/commands and
-/// grew the inbound queue without bound under any burst (AD4). It mirrors the
+/// grew the inbound queue without bound under any burst. It mirrors the
 /// deadline discipline of the mogwai venue's own `spawn_exec_pump`.
 ///
 /// Ordering is preserved by construction (a single task over an ordered
@@ -132,7 +132,7 @@ pub(crate) fn lock_recover<'a, T>(
     })
 }
 /// Records a spawned task's handle so `stop()`/`disconnect()` can abort it
-/// (AD17/AE19: a spawned `request_*` handler, instrument reseed or order-status
+/// (a spawned `request_*` handler, instrument reseed or order-status
 /// probe left running across a disconnect otherwise keeps issuing HTTP
 /// requests, racing the HttpQuota, and sends into a possibly-dropped sink after
 /// the client stopped). Already-finished
@@ -459,7 +459,7 @@ pub(crate) async fn fetch_clock_or_identity(
     http: &HttpClient,
     http_base: &str,
 ) -> (VenueClock, bool) {
-    // Retry before committing to identity (AD16): the identity fallback silently
+    // Retry before committing to identity: the identity fallback silently
     // puts every ts_init, havoc sleep, quota interval, backoff and timeout on the
     // wrong axis for the life of the connection if the venue actually runs at
     // speed != 1, and nothing re-fetches the clock later. A couple of quick
@@ -847,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn latency_pump_pipelines_a_burst_instead_of_serializing() {
-        // AD4: messages that arrive together must drain in ~one delay window, not
+        // Messages that arrive together must drain in ~one delay window, not
         // one-delay-per-message. The old inline sleep serialized the 30 ms
         // baseline latency into inter-message spacing (~33 msg/s); the pump
         // anchors each deadline at arrival, so a simultaneous burst collapses to

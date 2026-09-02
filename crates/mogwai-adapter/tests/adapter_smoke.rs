@@ -791,7 +791,7 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
 /// reference price the two ends would have to agree on independently - the exact
 /// silent disagreement that leaves a stop somewhere neither side intended.
 ///
-/// Per the AE8 ordering the convert-first block exists for, it must fail before
+/// Per the ordering the convert-first block exists for, it must fail before
 /// any `OrderSubmitted` is emitted.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
@@ -1106,7 +1106,7 @@ fn unconnected_exec_client(cache: Rc<RefCell<Cache>>) -> MogwaiExecutionClient {
     MogwaiExecutionClient::new(core, config).expect("client builds")
 }
 
-/// AE20. A connection with no event sink is deaf, and must refuse.
+/// A connection with no event sink is deaf, and must refuse.
 ///
 /// The sender is resolved from a `thread_local!` the runner binds, so a client
 /// that never ran on a bound thread - not at construction, not at `start()`,
@@ -1216,7 +1216,7 @@ async fn a_list_whose_second_leg_is_unresolvable_announces_neither() {
 
 /// Asserts nothing reaches the execution sink inside a short window. A refusal
 /// that emitted `OrderSubmitted` first would queue an event nautilus then has
-/// to apply to an order it has already denied, which is the AE8 stray.
+/// to apply to an order it has already denied, which is the stray.
 async fn assert_no_exec_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>) {
     let stray = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
     assert!(

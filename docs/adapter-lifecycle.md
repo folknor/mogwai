@@ -104,11 +104,11 @@ client. Four things stop that permanently, and each writes one log line:
   gone or shutting down - the events this socket translates reach nobody. It
   retires the connection rather than redialling into a dead sink.
 
-  This one is recoverable in a way the other three are not: it retires the
-  transport generation, not the client. A host that installs a live sender by
-  calling `start()` on the runner's thread again and then `connect()` gets a
-  working client back. What it must not expect is self-healing, because the
-  adapter never redials on its own after this.
+  What it retires is the transport generation rather than the client object,
+  which is a statement about internal state and not an invitation: nothing
+  self-heals, the adapter never redials after this, and a forward run whose
+  consumer has gone is over. A run is fire and forget - reproducing a path
+  means a fresh instance with the same seed and config, never a revived one.
 
   It is observed at emission boundaries, not continuously, so a receiver that
   closes while the socket is quiet is noticed at the next event rather than

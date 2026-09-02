@@ -295,10 +295,10 @@ pub struct MogwaiExecutionClient {
     /// `Arc<Mutex<..>>` so the `&self` handlers can record a task alongside the
     /// `&mut self` connect path; `stop()` aborts the lot so a task that
     /// outlived the client cannot emit exec events (its emitter still holds a
-    /// live sender clone) after the client stopped (AE19).
+    /// live sender clone) after the client stopped.
     task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// A clone of the sender installed on the emitter, kept solely to ask
-    /// whether the nautilus runner still holds the receiving end (AE21).
+    /// whether the nautilus runner still holds the receiving end.
     ///
     /// The emitter answers "is a sender installed", never "is the receiver
     /// alive", and `send_order_event` swallows the difference into a
@@ -481,7 +481,7 @@ impl MogwaiExecutionClient {
     /// `SubmitPhase::PreStamp` before it leaves - the venue's own decode-boundary
     /// verdict (`mogwai_venue::http::boundary_error` calls the same function at
     /// the same phase), not a second copy of its rule table that could drift from
-    /// it. A malformed init therefore fails conversion, which by the AE8 ordering
+    /// it. A malformed init therefore fails conversion, which by the convert-first ordering
     /// above returns before any event is emitted or any mirror record exists, and
     /// nautilus denies the order with the venue's own reason on it.
     ///
@@ -682,7 +682,7 @@ impl MogwaiExecutionClient {
             // (and a submit in Submitted) with no reject to restore it. Synthesize
             // the matching reject here and report success: the reject event is the
             // signal, not the return value, which is the same contract the
-            // reader's undelivered-command path answers under (AE9).
+            // reader's undelivered-command path answers under.
             let ctx = self.exec_context();
             synthesize_transport_reject(cmd, &err, &ctx);
             Ok(())
@@ -1149,7 +1149,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // resident until it is not, and clearing the generation first is what
         // makes a late task refuse on its own rather than emit into a client
         // the host has stopped. This is the same ordering the sink-loss
-        // retirement uses, and it is what AE19 asks for by a different route:
+        // retirement uses, and it is what the stray-task rule asks for by a different route:
         // the emitter a stray task holds is still perfectly able to send.
         self.generation.store(NO_GENERATION, Ordering::Release);
         abort_tasks(&self.task_handles);
@@ -1205,7 +1205,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
-        // Refuse a deaf connection outright (AE20). The sender that carries
+        // Refuse a deaf connection outright. The sender that carries
         // every venue event to nautilus is resolved from
         // `try_get_exec_event_sender`, which reads a `thread_local!` set on the
         // runner's thread; there is no process-wide slot to fall back to. A
@@ -1278,7 +1278,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         .await?;
         if let Some(havoc) = &self.config.havoc {
             // Same scaled timeout as dispatch_order: the configured
-            // conn.request_timeout_secs, not the default (AD25).
+            // conn.request_timeout_secs, not the default.
             let timeout_secs = request_timeout_secs(&self.config.havoc, sim);
             ship_venue_havoc(
                 &self.http,
@@ -1355,7 +1355,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         )));
         // Exec drain pipelines the per-message havoc latency through a pump
         // rather than sleeping inline in the reader loop, which capped throughput
-        // and head-of-line-blocked pings/commands (AD4 - see the data client and
+        // and head-of-line-blocked pings/commands (see the data client and
         // spawn_latency_pump). The pump owns a clone of the exec context and
         // applies each event to the mirror off-loop. handle_exec_message is
         // already called from off this loop - by the transport rejects
@@ -1446,7 +1446,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 // same context. Before this existed, a submit queued in the
                 // millisecond before a socket drop reached nautilus as
                 // `Submitted` and then never received another event - the wedge
-                // AE9 closed for the channel-closed case, still open for the
+                // Closed for the channel-closed case, still open for the
                 // writer-aborted one.
                 //
                 // The context is cloned here rather than resolved per call:
@@ -1512,7 +1512,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
-        // Build the wire order first (AE8). An unsupported side/type/TIF errors
+        // Build the wire order first. An unsupported side/type/TIF errors
         // out of convert::wire_* here; emitting OrderSubmitted before this - as
         // the code used to - queued a Submitted event that nautilus then had to
         // apply to an order it had already denied (Initialized -> Denied) on the
@@ -1646,7 +1646,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         let query = self.venue_query();
         // Through a context, not a bare emitter clone. This probe is spawned,
         // so it outlives the call that made it and `stop()` can only abort it
-        // asynchronously - which is the AE19 shape exactly. Cloning the emitter
+        // asynchronously - which is the stray-task shape exactly. Cloning the emitter
         // straight into the task routed around the emission boundary, so the
         // generation guard and the sink witness both had no effect on the one
         // path most able to outlive its client.
@@ -1721,7 +1721,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 // mass-status returns every resting order, and reconciliation
                 // passes a lookback-bounded `start`, so filtering a long-quiet
                 // open order by `ts_last` used to hide it - and the manager
-                // then inferred it canceled-at-venue (AE10). The time filter
+                // then inferred it canceled-at-venue. The time filter
                 // still applies to closed/historical records (open_only false).
                 (cmd.open_only && info.status.is_open())
                     || in_time_range(UnixNanos::from(info.ts_last), cmd.start, cmd.end)
@@ -1876,7 +1876,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 // one - the engine removes a symbol from its position map the
                 // moment it goes flat - so a lookback-bounded `start` must not
                 // hide a long-quiet resting position; reconciliation would
-                // otherwise have to re-adopt it as external mid-run (AE10).
+                // otherwise have to re-adopt it as external mid-run.
                 // The time filter therefore only guards a defensive flat row.
                 !position.quantity.is_zero() || in_time_range(ts_event, cmd.start, cmd.end)
             })
@@ -2280,7 +2280,7 @@ fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
 
 /// Synthesizes the nautilus reject for a command whose transport failed before
 /// the venue ever saw it - shared by `dispatch_order`'s send failure and the
-/// reader's undelivered-command report (AE9). A failed `Cancel` is reported as a `CancelRejected`
+/// reader's undelivered-command report. A failed `Cancel` is reported as a `CancelRejected`
 /// (the order is still live, or its fate is simply unknown, not dead), leaving
 /// the mirrored status untouched; a failed `Submit`/`Modify` is reported as the
 /// matching `OrderRejected`/`OrderModifyRejected` so the order reaches a terminal
@@ -2414,7 +2414,7 @@ struct ExecContext {
     /// that owns a generation may emit only while that generation is still the
     /// live one, and is the only kind that may retire it. A context that owns
     /// none may still speak - a stopped client synthesizing a transport reject
-    /// has something true to say and AE9 requires it to be said - but it has no
+    /// has something true to say and that contract requires it to be said - but it has no
     /// generation to retire and must not touch the reader's flag.
     epoch: Option<u64>,
     /// The client's live generation. See `MogwaiExecutionClient::generation`.
@@ -2426,7 +2426,7 @@ struct ExecContext {
 }
 
 impl ExecContext {
-    /// The one way this translator reaches nautilus (AE21).
+    /// The one way this translator reaches nautilus.
     ///
     /// Three steps, in this order and for reasons that do not commute:
     ///
@@ -2454,7 +2454,7 @@ impl ExecContext {
         let Some(epoch) = self.epoch else {
             // Owns no generation. It may speak - `dispatch_order` swallows a
             // send failure and returns `Ok` because the reject event is the
-            // signal rather than the return value (AE9), and `ws_cmd` is
+            // signal rather than the return value, and `ws_cmd` is
             // exactly `None` before a connection and after a stop, so gating
             // this would delete the only signal that contract has. What it may
             // not do is retire: there is no generation to retire, the reader is
@@ -2487,8 +2487,8 @@ impl ExecContext {
                 generation = epoch,
                 "the nautilus execution event receiver is closed; retiring this transport \
                  generation. Events this connection already translated were dropped, and the \
-                 venue is not the authority that can be asked for them again - a host that \
-                 reinstalls a sender and reconnects gets a fresh generation"
+                 venue is not the authority that can be asked for them again, so this run \
+                 cannot be made whole and is over"
             );
         }
     }
@@ -2606,7 +2606,7 @@ impl ExecState {
 /// Cap on retained terminal order records. Open orders are never pruned (they
 /// are live reconciliation truth); only closed records beyond this many are
 /// dropped, oldest-by-`ts_last` first, so a long forward run cannot
-/// accumulate terminal orders without bound (AE6). (The mirror once kept an
+/// accumulate terminal orders without bound. (The mirror once kept an
 /// append-only fill Vec with its own cap; fill reports now come from the
 /// venue-truth `QueryFills`, so no fill store remains to bound.)
 const MAX_TERMINAL_ORDERS: usize = 10_000;
@@ -2616,7 +2616,7 @@ impl ExecState {
     /// Called after each mirror mutation that can grow the map (a submit
     /// insert), and does real work only when the cap is exceeded.
     ///
-    /// This does not bound the map, and the AE6 note that said it did was
+    /// This does not bound the map, and the note that said it did was
     /// wrong. Open orders are never pruned, because they are live
     /// reconciliation truth and an adapter that forgot one would report a
     /// standing order as unknown - a strictly worse failure than memory. So a
@@ -3633,7 +3633,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         .filter_map(|balance| {
             // Warn on a balance whose currency string nautilus cannot represent,
             // matching every other unrepresentable-amount drop in this closure
-            // (AE18): a bare `.ok()?` swallowed the whole currency's balance with
+            // A bare `.ok()?` swallowed the whole currency's balance with
             // no diagnostic, so an account snapshot silently under-reported.
             let currency = match Currency::from_str(&balance.currency) {
                 Ok(currency) => currency,
@@ -4057,7 +4057,7 @@ mod tests {
     /// none when none is - before the first `connect()`, and after any `stop()`,
     /// which clears it. Such a context must still emit, because `dispatch_order`
     /// swallows a websocket send failure and returns `Ok` on the contract that
-    /// the reject event is the signal rather than the return value (AE9), and
+    /// the reject event is the signal rather than the return value, and
     /// `ws_cmd` is `None` in exactly those two states. Gating it would delete
     /// the only signal that contract has and leave the host with silence.
     ///

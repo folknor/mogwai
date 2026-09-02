@@ -160,7 +160,7 @@ async fn backoff_or_exhausted(
 /// Per-connection HTTP rate limiter enforcing `max_requests_per_second`.
 ///
 /// Accounting contract - which HTTP calls this meters, and which are exempt
-/// (AE13). Keep call sites consistent with this list, since the meter itself
+/// Keep call sites consistent with this list, since the meter itself
 /// cannot see who bypasses it:
 ///
 /// Metered (the recurring HTTP calls either client makes). Every
@@ -908,8 +908,8 @@ async fn run_ws_connection_inner<
             tracing::warn!(
                 socket = label,
                 "the consumer this socket feeds has dropped its receiver; reconnect disabled, \
-                 because every event a new connection delivered would be dropped. An explicit \
-                 stop, start and connect on a live runner recovers"
+                 because every event a new connection delivered would be dropped. This run is \
+                 over: reproducing its path means a fresh instance on the same seed and config"
             );
             return;
         }

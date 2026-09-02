@@ -87,7 +87,7 @@ pub struct MogwaiDataClient {
     /// their handle too, not just the `&mut self` connect path; `stop()` aborts
     /// the lot so a fetch spawned just before disconnect cannot keep issuing
     /// HTTP requests (and racing the HttpQuota) or send into a dropped sink
-    /// after the client stopped (AD17).
+    /// after the client stopped.
     task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Outbound command channel for this leg.
     ///
@@ -319,7 +319,7 @@ impl MogwaiDataClient {
         })
     }
 
-    /// Flush every completed-but-withheld bar window on teardown (AD19). A time
+    /// Flush every completed-but-withheld bar window on teardown. A time
     /// window whose `close_ts` has already passed but that never got a later
     /// trade to cross its boundary is a genuinely complete bar that the lazy
     /// emit-on-next-trade rule would otherwise discard when the subscription
@@ -390,7 +390,7 @@ impl DataClient for MogwaiDataClient {
         // timeout after this transport generation is gone.
         lock_recover(&self.pending_history, "pending history").clear();
         // Emit any completed-but-withheld bar windows before the drain tasks are
-        // gone and `reset` clears the table (AD19). Done after abort so no drain
+        // gone and `reset` clears the table. Done after abort so no drain
         // task races a fresh trade into the same window; the shared bar mutex
         // keeps the flush idempotent regardless.
         self.flush_completed_bars();
@@ -475,7 +475,7 @@ impl DataClient for MogwaiDataClient {
         )));
         // The market-data drain no longer sleeps the per-message havoc latency
         // inline in the reader loop (which capped throughput at ~33 msg/s and
-        // head-of-line-blocked pings/commands - AD4). It enqueues each filtered
+        // head-of-line-blocked pings/commands). It enqueues each filtered
         // message, arrival-anchored, into a latency pump that owns the sink and
         // paces delivery off-loop. Spawn and track the pump before the reader so
         // stop() aborts it alongside the connection task.
@@ -766,10 +766,10 @@ impl DataClient for MogwaiDataClient {
             let mut bars = lock_recover(&self.bars, "bar");
             bars.entry(cmd.bar_type).or_default().refs += 1;
         }
-        // Roll the ref back when the symbol subscription refuses (AD27). The
+        // Roll the ref back when the symbol subscription refuses. The
         // per-`BarType` ref and the per-symbol `SubState.bars` count are the
         // two halves of one subscription and must move together - that is the
-        // whole of AD10's rule in `unsubscribe_bars`, stated there from the
+        // whole of the release rule in `unsubscribe_bars`, stated there from the
         // release side. `subscribe_symbol` can refuse (the bound-symbol check),
         // and a ref left standing over a refusal is the same cross-counter
         // desync arriving from the subscribe side: a later `unsubscribe_bars`
@@ -804,7 +804,7 @@ impl DataClient for MogwaiDataClient {
     fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
         // Decrement the per-symbol bars count only when this bar type actually had
-        // a live subscription to release (AD10). The per-BarType refs and the
+        // a live subscription to release. The per-BarType refs and the
         // per-symbol SubState.bars count are incremented together on subscribe, so
         // they must be decremented together. An unmatched unsubscribe_bars (a bar
         // type never subscribed, or a double-unsubscribe interleaved by nautilus
@@ -833,7 +833,7 @@ impl DataClient for MogwaiDataClient {
             match refs_after {
                 // On the last release, take the removed bar type's active window
                 // out with it so a completed-but-withheld bar can be flushed
-                // below rather than silently discarded (AD19).
+                // below rather than silently discarded.
                 Some(0) => (
                     true,
                     bars.remove(&cmd.bar_type).and_then(|state| state.active),
@@ -845,14 +845,14 @@ impl DataClient for MogwaiDataClient {
         if matched {
             // Flush the removed bar type's active window only if it already closed
             // (close_ts <= sim-now) but was withheld only for lack of a later
-            // trade to cross its boundary - the AD19 discard-on-unsubscribe case.
+            // trade to cross its boundary - the discard-on-unsubscribe case.
             // A genuinely in-progress window (close_ts still in the future) is
             // dropped, not emitted: shipping it would inject a future-stamped,
             // incomplete bar a consumer could not tell from a real completed one.
             // The teardown twin of this flush lives in `flush_completed_bars`
             // (called from `stop`). Closing a live in-progress window on time on
             // a clock timer is a separate feature, deliberately not built - see
-            // `flush_completed_bars` and the AD19 note in havoc.md.
+            // `flush_completed_bars` and the withheld-bar note in havoc.md.
             if let Some(active) = to_flush {
                 let now = now_unix_nanos(self.sim).as_u64();
                 if active.close_ts <= now
@@ -877,7 +877,7 @@ impl DataClient for MogwaiDataClient {
             tracing::warn!(
                 bar_type = %cmd.bar_type,
                 "ignoring unsubscribe_bars with no matching subscription; \
-                 not touching the symbol's shared bars count (AD10)"
+                 not touching the symbol's shared bars count"
             );
         }
         Ok(())
@@ -1936,7 +1936,7 @@ fn emit_live_bars(
     }
 }
 
-/// True for the time-aggregated bar aggregations mogwai refuses (AD11). Week,
+/// True for the time-aggregated bar aggregations mogwai refuses. Week,
 /// Month, and Year are calendar-anchored in nautilus (`get_time_bar_start`
 /// anchors weeks to Monday and months/years to the calendar), but
 /// `get_bar_interval_ns` returns a fixed 7-day/30-day/365-day proxy - nautilus's
@@ -2147,7 +2147,7 @@ mod quote_cache_tests {
             .expect("an absent binding applies no client-side check");
     }
 
-    /// AD27. The bar ref and the per-symbol bars count are one subscription in
+    /// The bar ref and the per-symbol bars count are one subscription in
     /// two counters, and a refused `subscribe_bars` must leave both at zero.
     /// A ref surviving the refusal makes a later `unsubscribe_bars` for that
     /// bar type "match", so it spends a symbol decrement belonging to another

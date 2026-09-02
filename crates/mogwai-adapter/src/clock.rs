@@ -357,7 +357,7 @@ impl MogwaiTimer {
         // `LocalSet` on that thread; a nautilus live worker does, and the unit
         // tests below wrap their bodies in one.
         let handle = tokio::task::spawn_local(async move {
-            // Past-start catch-up (AE15) is a deliberate deviation from nautilus
+            // Past-start catch-up is a deliberate deviation from nautilus
             // `LiveTimer`. `LiveTimer::start` CAS-adjusts an observed next_time
             // that is `<= now` forward to now (with a warning) and then fires
             // once and continues from now (common/src/live/timer.rs). This loop
@@ -514,7 +514,7 @@ pub async fn mogwai_clock_factory(
         // afterward on the same runner thread. A senderless `MogwaiClock` can
         // therefore only arise off this path (e.g. a unit test that never binds
         // a runner), where the inline-invoke fallback in `MogwaiTimer::start`
-        // is the correct behavior - AE16.
+        // is the correct behavior.
         //
         // Capturing the sender here (rather than per fire) also pins this clock
         // permanently to the runner channel that was bound when it was created,
@@ -808,7 +808,7 @@ mod tests {
     }
 
     async fn past_start_repeating_timer_replays_a_catch_up_burst_inner() {
-        // AE15 (deliberate deviation from nautilus LiveTimer): a repeating timer
+        // A deliberate deviation from nautilus LiveTimer: a repeating timer
         // armed with an explicit past start replays one fire per elapsed
         // interval, each carrying its historically-correct ts_event, instead of
         // skipping to now and firing once (LiveTimer's CAS-to-now). Pin the

@@ -426,7 +426,7 @@ async fn ships_venue_havoc() {
 
     // An exec client with no event sink is deaf - nautilus's emitter drops
     // every order event with a log line and no error - so `connect()` refuses
-    // one outright (AE20). This test cares only about the HTTP control leg,
+    // one outright. This test cares only about the HTTP control leg,
     // but it still has to be a client that could hear an answer; hold the
     // receiver alive for the duration rather than dropping it.
     let (sink_tx, _sink_rx) = unbounded_channel::<ExecutionEvent>();
