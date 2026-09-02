@@ -19,30 +19,34 @@ trip it.
     dropped silently
 
 This is not a style preference, and it is not a guard that can be relaxed. The
-sink is nautilus's own `ExecutionEventEmitter`, and two of its properties
-combine badly:
+sink is nautilus's own `ExecutionEventEmitter`, and two facts combine badly:
 
-- The emitter derives `Clone` and owns its sender by value. The client clones
-  its execution context into the websocket pump at connect time, so whatever
-  sender state exists at that instant is frozen into the pump for the life of
-  the connection. A sender installed afterwards never reaches it.
+- The sender is resolved from a thread-local set on the runner's thread
+  (`EXEC_EVENT_SENDER` in `nautilus_common::live::runner`). A client whose
+  `start()` ran on any other thread cannot obtain one at all - there is no
+  process-wide slot to fall back to.
 - `send_order_event` on an emitter with no sender writes a `log::warn!` and
   returns. There is no error and no return value to check.
 
 So a client connected without a sender reports success, holds a healthy socket,
 and drops every `OrderAccepted`, `OrderFilled`, `OrderCanceled` and
 `OrderRejected` the venue pushes, for the whole run, with nothing in the strategy
-path observing it. A strategy would see its orders acknowledged as `Submitted`
-and then never hear another word. Refusing the connection is the only way this
-adapter can make that condition visible, so it refuses.
+path observing it. Refusing the connection is the only way this adapter can make
+that condition visible, so it refuses.
 
-`start()` is where the sender is resolved, because nautilus keeps it in a
-thread-local on the runner's thread (`EXEC_EVENT_SENDER` in
-`nautilus_common::live::runner`) rather than in a shared cell. That is also why
-the adapter cannot simply resolve it lazily inside `connect()`: an async fn may
-already be polled on a different thread, where the slot is empty. `connect()`
-retries the lookup once - free when it really is on the runner's thread - and
-then refuses.
+That is also why the adapter cannot simply resolve the sender lazily inside
+`connect()`: an async fn may already be polled on a different thread, where the
+slot is empty. `connect()` retries the lookup once - free when it really is on
+the runner's thread - and then refuses.
+
+One thing this guard used to also cover no longer applies, and a host reading an
+older version of this page should know it. Until nautilus 0.63 the emitter owned
+its sender by value on a `Clone` type, so an execution context cloned into the
+websocket pump froze whatever sender state existed at clone time and a later
+installation never reached it. Nautilus 0.63 moved the sender into a shared cell
+that every clone observes, so that narrower ordering hazard is gone. The refusal
+above is unaffected: it fires when a sender is never obtainable at all, which the
+shared cell does not address.
 
 **What a host must do:** call `start()` on the execution client from the
 runner's thread, before `connect()`. The nautilus kernel already does: its

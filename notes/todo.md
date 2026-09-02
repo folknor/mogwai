@@ -288,7 +288,7 @@ instrument class is not a finding and does not need re-reporting.
 What survived `notes/testnet.md`, the 2026-08-14 product-type plan, when it was
 adjudicated against the two end-state documents on 2026-08-29. The nautilus
 constraints it established are now `reference/nautilus.md`, verified against the
-0.62 pin, which the plan predated. What follows is only the work.
+0.63 pin, which the plan predated. What follows is only the work.
 
 Most of that plan was dead weight and is recorded here once so it is not
 re-derived. Its central claim - that nautilus's account model forces the venue
@@ -314,9 +314,11 @@ classes.
   `convert::instrument_any` maps them onto the crypto-only elder type, while
   `PerpetualContract` is the newer generic that carries an asset class. Our
   `Perpetual` takes `asset_class` from the wire, so a non-crypto perp is
-  published wearing a type that cannot express what it is. Verified present at
-  the 0.62 pin, which retires the plan's doubt that the generic type might not
-  exist there.
+  published wearing a type that cannot express what it is. `PerpetualContract`
+  verified present at the 0.63 pin, which retires the plan's doubt that the
+  generic type might not exist there. It requires `underlying` and
+  `asset_class`, both of which the elder type has no field for, so the move is a
+  widening rather than a rename.
 
 - **What margin to publish when the declared basis has no nautilus rate.** An
   owner decision, not plumbing. The user declares `ConfiguredMargin` -
@@ -514,15 +516,56 @@ Read the source from `research/nautilus_trader`; build against the pinned
 crates.io release. Each of these names what the other side would have to ship,
 which is what makes it a writable patch rather than a grievance.
 
-All five were re-verified 2026-08-27 against the pin rather than against
-memory. That was worth doing for a reason this section should keep in view:
-the checkout used to sit on `develop`, which is neither what we link nor what
-this section claims to describe, and a maintainer may reshape or reject what we
-file, so an entry here can go stale without anyone touching this repository.
-Four still stand. One had closed and is struck below.
+Every entry was re-verified 2026-09-02 against the 0.63 pin rather than against
+memory. That is worth doing for a reason this section should keep in view: the
+checkout used to sit on `develop`, which is neither what we link nor what this
+section claims to describe, and a maintainer may reshape or reject what we file,
+so an entry here can go stale without anyone touching this repository. Of the
+five carried into 0.63, three still stand, one is struck - the mass status
+default, closed at 0.62 - and one half closed at 0.63: #4874 gave the emitter
+the shared sender cell, leaving the thread-local sender lookup that was the
+entry's other named fix. One new entry, fractional-share equity, is filed at the
+bottom.
 
-- **`ExecutionEventEmitter` cannot share its sender**, so this adapter can only
-  refuse rather than heal. The emitter derives `Clone` and owns
+A partial close is worth naming as one. Reading #4874's title as closing that
+entry outright is the mistake this section is built to prevent: the entry offered
+two acceptable patches, one landed, and only re-reading the tree showed which
+half of the problem survived.
+
+- **The execution event sender cannot be obtained off the runner's thread.**
+  Half closed at the 0.63 pin, and the surviving half is the one that binds us.
+  This entry originally named two acceptable PRs - a shared cell for the
+  emitter's sender, or resolving it from a process-wide rather than thread-local
+  slot. #4874 shipped the first: `live/src/execution/emitter.rs` now holds
+  `sender: Arc<ArcSwapOption<UnboundedSender<ExecutionEvent>>>`, documented as
+  "Clones share the sender slot and observe later sender installations and
+  replacements", with `test_clone_before_set_sender_observes_sender` pinning it.
+
+  What remains: `try_get_exec_event_sender` still reads `EXEC_EVENT_SENDER`, a
+  `thread_local!` in `common/src/live/runner.rs`, and
+  `test_event_senders_are_thread_local` pins that deliberately. So an adapter
+  whose `start()` runs off the runner's thread still cannot obtain a sender at
+  all - the emitter will now heal, but there is nothing to heal it with. The
+  remaining PR: hand the sender to the adapter at construction, the way 0.63
+  began handing `ExecutionClientFactory::create` the node's `TraderId`, or add a
+  node-scoped fallback beside the thread-local. The upstream-facing writeup of
+  this is drafted and belongs in the owner's nautilus PR queue, not here.
+
+  Our refusal stays until then. `connect()` refusing a deaf client (AE20) exists
+  because the sender is unobtainable, not because clones froze, so #4874 does not
+  retire it - and `send_order_event` is still infallible and still only warns, so
+  the deaf-connection failure is unchanged in consequence.
+
+  Owed on our side regardless: the comment block at the guard in `client/exec.rs`
+  still describes the old by-value sender and argues from an asymmetry between
+  the live emitter field and frozen clones. Both claims died with #4874 and the
+  comment is now false about upstream. Separately, 0.63 added
+  `try_send_order_event`, a fallible sibling we do not call at any of our
+  thirteen emit sites; adopting it would surface a dropped event instead of
+  warning into the log, and wants its own change and a decision about what the
+  pump does with an `Err` mid-connection.
+
+  The original entry, kept for provenance: the emitter derived `Clone` and owned
   `sender: Option<UnboundedSender<ExecutionEvent>>` by value, installed once from
   `try_get_exec_event_sender()`, which reads a `thread_local!` in
   `nautilus_common::live::runner` set on the runner's thread. Every clone taken
@@ -530,15 +573,9 @@ Four still stand. One had closed and is struck below.
   `send_order_event` on a sender-less clone only logs a warning. Our workaround
   is a refusal, not a repair: a host that starts its clients on one thread and
   connects them on another gets a named error rather than a working client.
-  The PR: an emitter holding its sender behind a shared cell, or resolving it per
-  send from a process-wide rather than thread-local slot, so a clone taken before
-  `set_sender` still emits.
-
-  Still open at the pin: `live/src/execution/emitter.rs` holds
-  `sender: Option<UnboundedSender<ExecutionEvent>>` by value on a `Clone` type,
-  unchanged. Upstream now documents the intended pattern - "call `set_sender` in
-  the adapter's `start()`" - which is guidance rather than a fix, since a clone
-  taken before that call still freezes with no sender.
+  The PR asked for an emitter holding its sender behind a shared cell, or
+  resolving it per send from a process-wide rather than thread-local slot, so a
+  clone taken before `set_sender` still emits. The first of those is what landed.
 
 - **No channel for a declared feed gap.** `VenueMessage::FeedLagged` carries
   `skipped` and `sim_now_ns` and the adapter has nowhere to put it. No
@@ -558,7 +595,7 @@ Four still stand. One had closed and is struck below.
   error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
   reconcile-and-distrust-the-window signal.
 
-  Still open at the pin: `DataEvent` carries `Response`, `Data`, `Instrument`,
+  Still open at the 0.63 pin: `DataEvent` carries `Response`, `Data`, `Instrument`,
   `FundingRate`, `InstrumentStatus`, `OptionGreeks` and a `defi`-gated variant,
   and none of them means a hole in the stream - the enumeration in
   `client/data.rs`'s gap comment matches the pinned source exactly. There is a
@@ -573,9 +610,10 @@ Four still stand. One had closed and is struck below.
   queues it. The PR: a signal at the cache insertion boundary. No adapter-side
   latch can substitute.
 
-  Still open at the pin: `Cache::add_account` writes the database, inserts into
-  `accounts` and indexes `venue_account`, then returns. There is no notify, no
-  watch and no subscriber hook on that path, so a waiter has nothing to sleep on.
+  Still open at the 0.63 pin: `Cache::add_account` writes the database, inserts
+  into `accounts` and indexes `venue_account`, then returns. There is no notify,
+  no watch and no subscriber hook on that path, so a waiter has nothing to sleep
+  on.
 
   The connection half of this is already closed and should not be re-filed:
   `wait_connected` sleeps on an adapter-owned notification with a 250 ms backstop
@@ -597,10 +635,10 @@ Four still stand. One had closed and is struck below.
   entry always said it protects the next adapter author rather than this repo.
   Nothing to file, nothing to wait for.
 
-The four below came from the 2026-08-14 product-type plan and are ordered by
-leverage. They are what separates mogwai modelling a product from mogwai faking
-it the way every other adapter fakes it. `reference/nautilus.md` carries the
-mechanism each one names.
+The first four below came from the 2026-08-14 product-type plan and are ordered
+by leverage; the fifth was filed later, from the 0.63 sweep. They are what
+separates mogwai modelling a product from mogwai faking it the way every other
+adapter fakes it. `reference/nautilus.md` carries the mechanism each one names.
 
 - **Lift `FundingSettlement` onto the live path.** The types exist, the
   semantics exist including rollback, and they are wired only into the backtest.
@@ -615,7 +653,7 @@ mechanism each one names.
   forward-testable until this exists.
 
 - **Complete the cash-account guard to include `FuturesContract`.** Verified
-  still open at the 0.62 pin: the backtest exchange's check is a hardcoded match
+  still open at the 0.63 pin: the backtest exchange's check is a hardcoded match
   over the two crypto perpetual types and the generic perpetual type, so a cash
   account holds a dated future with no complaint. Small, obviously correct, and
   directly on the MNQ path.
@@ -624,6 +662,29 @@ mechanism each one names.
   anywhere. Splits are the hard half, because they rewrite an open position's
   quantity and average price retroactively. Only needed when equities become
   real.
+
+- **`Equity` cannot express a fractional share.** Filed 2026-09-02, from the
+  0.63 sweep of `reference/nautilus.md`, which recorded the constraint without
+  anyone asking for it. The `Instrument` impl in `model/src/instruments/equity.rs`
+  hardcodes `size_precision` to 0, `size_increment` to 1 and `multiplier` to 1 as
+  trait method bodies rather than struct fields, so there is no declaration a
+  venue can make that admits a fractional quantity. Unlike the `forex` case this
+  has no named refusal on our side: `convert::instrument_any` publishes the
+  equity, and a venue serving fractional lots would have its sizes silently
+  rounded to whole shares by nautilus's own quantity handling rather than
+  rejected.
+
+  The PR: carry size precision, size increment and multiplier as fields on
+  `Equity` the way `CurrencyPair` does, defaulting to today's 0, 1 and 1 so every
+  existing declaration keeps its behaviour. An info-bag workaround does not close
+  it, for the same reason it does not close `forex` - nautilus computes notional
+  and normalizes quantity itself, so a preserved precision in `Params` would sit
+  beside a wrong number rather than correct it.
+
+  Not urgent, and honestly stated as such: no shipped preset is a fractional-lot
+  equity, NVDA is whole-share, and this only bites when equities become real. It
+  is filed because the constraint is verified and the fix is small and additive,
+  which makes it writable now rather than rediscovered later.
 
 - **Tape sparsity has no attribution channel.** An empty historical window is
   correct behaviour here - the fitted ACD arrival process is persistent and

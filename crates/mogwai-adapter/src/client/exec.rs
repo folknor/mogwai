@@ -1109,22 +1109,28 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
-        // Refuse a deaf connection outright (AE20). Nautilus's `ExecutionEventEmitter`
-        // derives Clone and owns `sender: Option<..>` by value, so every
-        // `exec_context()` clone - the WS pump's above all - freezes whatever
-        // sender state exists at the instant it is taken. The sender is
-        // installed exactly once, by `start()`, and `send_order_event` on an
-        // emitter without one only writes `log::warn!("Cannot send order
-        // event: sender not initialized")`: no error, no return value. So a
-        // host that connects without starting gets a client that reads as
-        // connected and is not - accepts, fills, cancels and rejects all
-        // vanish for the life of the connection, silently.
+        // Refuse a deaf connection outright (AE20). The sender that carries
+        // every venue event to nautilus is resolved from
+        // `try_get_exec_event_sender`, which reads a `thread_local!` set on the
+        // runner's thread; there is no process-wide slot to fall back to. A
+        // host whose `start()` ran on any other thread therefore never installs
+        // one, and `send_order_event` on an emitter without a sender only
+        // writes `log::warn!("Cannot send order event: sender not
+        // initialized")`: no error, no return value. So such a host gets a
+        // client that reads as connected and is not - accepts, fills, cancels
+        // and rejects all vanish for the life of the connection, silently.
         //
-        // The failure is worse than a dead stream because it is asymmetric:
-        // `submit_order` emits its own `Submitted` off the live emitter field
-        // rather than through a frozen clone, so nautilus keeps seeing every
-        // order go Submitted and nothing after it, forever. That reads as a
-        // wedged venue rather than as a broken client.
+        // A second, narrower hazard this guard used to describe is gone as of
+        // nautilus 0.63. The emitter held its sender by value on a `Clone`
+        // type, so every `exec_context()` clone - the WS pump's above all -
+        // froze whatever sender state existed when it was taken, and a sender
+        // installed afterwards never reached the pump while `submit_order`
+        // kept emitting `Submitted` off the live field. 0.63 moved the sender
+        // into a shared `ArcSwapOption` that all clones observe, so that
+        // asymmetry cannot arise. It does not retire this guard: a sender that
+        // was never obtainable is still never installed, and the drop is still
+        // silent. Closing that needs the sender to be reachable off the
+        // runner's thread, which is filed upstream.
         //
         // No shipped host hits this: nautilus's own kernel starts clients
         // before connecting them, on one current-thread runtime. So this is a

@@ -12,20 +12,31 @@ in sync, so what is read here is what compiles.
 Provenance, because it bears on how far each claim can be trusted. The spine of
 this document came out of three read-only investigations of nautilus on
 2026-08-14, made against HEAD `409214a` rather than against the pin. The claims
-marked verified below were re-derived against the in-tree copy on 2026-08-29 and
-are current.
+marked verified below were re-derived against the in-tree copy on 2026-08-29,
+and every claim here was re-swept at the 0.63 pin on 2026-09-02.
 
-One claim is carried and not re-read: the per-type lists of mandatory fields in
-the last section, which are a restatement of constructor signatures rather than
-a behavioural claim, and which the compiler settles the moment anything is built
-on them. Everything else here was re-derived at the pin on 2026-08-29.
+That first sweep was worth its cost, which is the argument for repeating it
+after any pin bump: four claims had moved or were wrong. The equity double count
+turned out to be gated on the account being a margin account; the inbound
+channel had more variants than the three claimed; `Equity` hardcodes its
+multiplier as well as its size fields; and rule 8's stated justification could
+not be found in the tree at all.
 
-That sweep was worth its cost, which is the argument for repeating it after any
-pin bump: four claims had moved or were wrong. The equity double count turned
-out to be gated on the account being a margin account; the inbound channel had
-more variants than the three claimed; `Equity` hardcodes its multiplier as well
-as its size fields; and rule 8's stated justification could not be found in the
-tree at all.
+The 0.63 sweep bears that out again. Every behavioural claim survived unchanged.
+What moved was structural, and it was the one section previously carried without
+re-reading: the per-type mandatory fields. That section used to be excused as a
+restatement of constructor signatures which the compiler settles the moment
+anything is built on them. The excuse is false and this sweep is how we found
+out. The compiler settles only the fields a caller actually passes, so a field
+wrongly described as mandatory is never contradicted by anyone who omits it -
+and `convert` has always omitted the two the section got wrong. Read that
+section as a behavioural claim owing verification like any other.
+
+0.63 also moved construction itself. `new_checked` is now private on the
+instrument types and construction goes through a `bon` builder, so "mandatory"
+means a builder parameter that is not `Option` rather than a positional argument
+that is not `None`. The correctness checks still run on `build`, so every
+construction-time check below is unaffected.
 
 ## The venue is the sole authority for money
 
@@ -204,13 +215,20 @@ and `inverse` both to `CryptoPerpetual`, and `forex` to a named refusal because
 nautilus ships no leveraged-FX instrument. The refusal is deliberate and its
 reasoning lives with the open work.
 
-Mandatory fields beyond the common spine: a spot pair owes base and quote
-currency; an equity owes its currency; a perpetual owes underlying, asset class,
-quote and settlement currency, inverse flag, multiplier and lot size; a dated
-future owes asset class, underlying, activation and expiration timestamps,
-currency, multiplier and lot size. Multiplier and lot size are non-optional
-positive quantities on the dated and perpetual types and absent or optional
-everywhere else, so a spot declaration omits both and gets one.
+Mandatory fields beyond the common spine, re-derived at the 0.63 pin rather than
+carried: a spot pair owes base and quote currency; an equity owes its currency;
+a `CryptoPerpetual` owes base, quote and settlement currency and the inverse
+flag; a dated future owes asset class, underlying, activation and expiration
+timestamps, currency, multiplier and lot size.
+
+Multiplier and lot size are non-optional positive quantities on the dated type
+alone. On both perpetual types and on the spot pair they are optional, so a
+declaration omitting them gets nautilus's default of one. The previous version
+of this paragraph claimed they were mandatory on the perpetual types too, and
+that `CryptoPerpetual` owes underlying and asset class; neither is true. Those
+two fields exist on `PerpetualContract`, the newer generic type, which is
+required to carry them - but that is the type we do not publish, and mixing its
+signature into the elder crypto-only type is what produced the error.
 
 Four traps, each of which must be guarded rather than exposed as a knob:
 
@@ -226,16 +244,20 @@ Four traps, each of which must be guarded rather than exposed as a knob:
   construction errors.
 - **`Equity` has no size precision, size increment or multiplier.** Verified:
   the trait hardcodes size precision zero, size increment one and multiplier
-  one, so fractional-share equities are not expressible at the pin. The
+  one, so fractional-share equities are not expressible at the 0.63 pin. The
   hardcoded multiplier is the same mechanism that makes the `forex` refusal
   necessary rather than fixable with an info bag, since nautilus computes
   notional itself at an implicit multiplier of one.
 - **Activation and expiration are mandatory on dated types.** Verified: both are
-  bare `UnixNanos` on `FuturesContract` and on all three of its constructors,
-  optional only in the accessor's return type. A synthetic future must invent a
-  contract lifecycle rather than a single symbol, which means a roll schedule.
+  bare `UnixNanos` on `FuturesContract` and on both of its constructors - the
+  private `new_checked` and the public builder - optional only in the accessor's
+  return type. A synthetic future must invent a contract lifecycle rather than a
+  single symbol, which means a roll schedule. At 0.62 this said three
+  constructors; 0.63 removed the panicking `new` and made `new_checked` private,
+  leaving the builder as the only public way in.
 
-And one place nautilus will not catch a misdeclaration. Verified 2026-08-29: the
+And one place nautilus will not catch a misdeclaration. Verified 2026-09-02 at
+the 0.63 pin: the
 backtest exchange refuses a cash account trading a perpetual, but the check is a
 hardcoded match over the two crypto perpetual types and the generic perpetual
 type only. `FuturesContract` is absent, so a cash account holds a dated future
