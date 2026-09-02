@@ -1108,11 +1108,16 @@ fn unconnected_exec_client(cache: Rc<RefCell<Cache>>) -> MogwaiExecutionClient {
 
 /// AE20. A connection with no event sink is deaf, and must refuse.
 ///
-/// Nautilus's `ExecutionEventEmitter` is `Clone` and owns its sender by value,
-/// so the WS pump's context freezes the sender state at connect time and
-/// `send_order_event` on a sender-less emitter only logs. A client that
-/// connected without one would report success and then drop every accept,
-/// fill, cancel and reject the venue pushed, for the whole run, silently.
+/// The sender is resolved from a `thread_local!` the runner binds, so a client
+/// that never ran on a bound thread - not at construction, not at `start()`,
+/// not at `connect()` - has no sink at all, and `send_order_event` on a
+/// sender-less emitter only logs. A client that connected without one would
+/// report success and then drop every accept, fill, cancel and reject the venue
+/// pushed, for the whole run, silently.
+///
+/// Under a node this cannot arise: the factory seeds the sink at creation, on
+/// the thread the node bound. The refusal is for a host that builds the client
+/// itself, which `MogwaiExecutionClient::new` lets it do.
 ///
 /// This test installs no sender at all - `replace_exec_event_sender` is a
 /// `thread_local!` and libtest gives each test its own thread (in every lane,

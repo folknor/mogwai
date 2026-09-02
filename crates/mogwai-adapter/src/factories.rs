@@ -9,6 +9,7 @@ use nautilus_common::{
     clients::{DataClient, ExecutionClient},
     clock::Clock,
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
+    live::try_get_exec_event_sender,
 };
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::identifiers::{ClientId, TraderId};
@@ -124,7 +125,28 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
             None,
             cache,
         );
-        let client = MogwaiExecutionClient::new(core, config)?;
+        let mut client = MogwaiExecutionClient::new(core, config)?;
+        // Seed the event sink here, and only here, because this is the one site
+        // where the runner that owns the thread-local is known. The node binds
+        // its senders and then calls this factory in the same function on the
+        // same thread - `LiveNodeBuilder::build` does, and so does
+        // `LiveNode::build` - so the sender resolved here is that node's.
+        //
+        // Deliberately not done inside `MogwaiExecutionClient::new`. `new` is
+        // public and callable at any moment, and the last runner to bind a
+        // thread wins the slot, so a constructor reading it would capture
+        // whichever runner happened to own the thread. A client that then ran
+        // under a second runner would pass every "is a sender installed" check
+        // and deliver its whole event stream to the first - turning a loud,
+        // detectable total loss into silent cross-runner misrouting. Absence is
+        // catchable; wrong-but-present is not.
+        //
+        // A `None` here is not fatal: a host constructing clients outside a
+        // node still has `start()` on the runner's thread, and `connect()`
+        // refuses if that never happened.
+        if let Some(sender) = try_get_exec_event_sender() {
+            client.install_sink(sender);
+        }
         Ok(Box::new(client))
     }
 

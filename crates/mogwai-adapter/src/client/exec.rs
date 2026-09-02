@@ -394,6 +394,22 @@ impl MogwaiExecutionClient {
         })
     }
 
+    /// Points this client's emitter and its sink witness at one channel.
+    ///
+    /// The only place either is installed. Keeping it to one helper is the
+    /// whole guarantee available here: nothing in the nautilus API can prove
+    /// that a given emitter and a given retained sender name the same channel,
+    /// so the guarantee has to come from their never being set apart.
+    ///
+    /// Replacement is deliberate rather than first-write-wins. A runner rebinds
+    /// the thread-local to reclaim it from a previous runner, so a client that
+    /// is handed a newer sender must move to it; refusing would pin it to a
+    /// runner that may already be gone.
+    pub(crate) fn install_sink(&mut self, sender: UnboundedSender<ExecutionEvent>) {
+        *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
+        self.emitter.set_sender(sender);
+    }
+
     /// Retires the current transport generation's connectivity flag by
     /// replacing the shared cell outright, not by storing `false` into it.
     ///
@@ -642,10 +658,15 @@ impl MogwaiExecutionClient {
             account_id: self.core.account_id,
             account_type: self.config.account_type,
             sim: self.sim,
-            // A context takes the generation that is active when it is built.
-            // On the command path that is the live one; the reader's context is
-            // built in `connect()` from the generation it just issued.
-            epoch: self.generation.load(Ordering::Acquire),
+            // A context owns whatever generation is live when it is built, and
+            // owns none when none is. `connect()` issues the generation before
+            // it builds the reader's and the pump's contexts, so those always
+            // own one; a command-path context raised before a connection or
+            // after a stop owns none and is limited accordingly.
+            epoch: match self.generation.load(Ordering::Acquire) {
+                NO_GENERATION => None,
+                live => Some(live),
+            },
             generation: Arc::clone(&self.generation),
             sink: Arc::clone(&self.sink),
             sink_dead: Arc::clone(&self.sink_dead),
@@ -1111,9 +1132,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             // The witness is installed from the same sender in the same step,
             // so the two can never describe different channels. Replacing it
             // here rather than cloning it per generation is what lets a later
-            // `start()` retarget both the emitter and the witness together.
-            *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
-            self.emitter.set_sender(sender);
+            self.install_sink(sender);
         } else if !self.emitter.is_initialized() {
             tracing::warn!(
                 "no execution event sender on this thread at start(): connect() will refuse \
@@ -1223,8 +1242,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         if !self.emitter.is_initialized()
             && let Some(sender) = try_get_exec_event_sender()
         {
-            *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
-            self.emitter.set_sender(sender);
+            self.install_sink(sender);
         }
         ensure!(
             self.emitter.is_initialized(),
@@ -1626,10 +1644,13 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// accept gate.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let query = self.venue_query();
-        let instruments = Arc::clone(&self.instruments);
-        let account_id = self.core.account_id;
-        let emitter = self.emitter.clone();
-        let sim = self.sim;
+        // Through a context, not a bare emitter clone. This probe is spawned,
+        // so it outlives the call that made it and `stop()` can only abort it
+        // asynchronously - which is the AE19 shape exactly. Cloning the emitter
+        // straight into the task routed around the emission boundary, so the
+        // generation guard and the sink witness both had no effect on the one
+        // path most able to outlive its client.
+        let ctx = self.exec_context();
         let client_order_id = cmd.client_order_id.to_string();
         track_task(
             &self.task_handles,
@@ -1639,12 +1660,19 @@ impl ExecutionClient for MogwaiExecutionClient {
                     .await
                 {
                     Ok(snapshot) => {
-                        let ts_init = now_unix_nanos(sim);
+                        let ts_init = now_unix_nanos(ctx.sim);
                         let report = snapshot.orders.first().and_then(|info| {
-                            order_status_report_from_info(info, &instruments, account_id, ts_init)
+                            order_status_report_from_info(
+                                info,
+                                &ctx.instruments,
+                                ctx.account_id,
+                                ts_init,
+                            )
                         });
                         match report {
-                            Some(report) => emitter.send_order_status_report(report),
+                            Some(report) => {
+                                ctx.emit(|e| e.send_order_status_report(report));
+                            }
                             None => tracing::warn!(
                                 order = %client_order_id,
                                 "query_order: venue has no record of this order"
@@ -2374,10 +2402,21 @@ struct ExecContext {
     account_id: AccountId,
     account_type: nautilus_model::enums::AccountType,
     sim: SimClock,
-    /// The generation this context belongs to. Compared against `generation`
-    /// before every emission; a context whose generation is no longer the
-    /// active one emits nothing.
-    epoch: u64,
+    /// The transport generation this context owns, if it owns one.
+    ///
+    /// `Some(n)` for a context built while generation `n` was live - every
+    /// transport context, and any command-path context raised during a
+    /// connection. `None` for a command-path context built when no generation
+    /// was live, which is a client that has not connected yet or has been
+    /// stopped.
+    ///
+    /// Ownership, not thread of origin, is what the guard turns on. A context
+    /// that owns a generation may emit only while that generation is still the
+    /// live one, and is the only kind that may retire it. A context that owns
+    /// none may still speak - a stopped client synthesizing a transport reject
+    /// has something true to say and AE9 requires it to be said - but it has no
+    /// generation to retire and must not touch the reader's flag.
+    epoch: Option<u64>,
     /// The client's live generation. See `MogwaiExecutionClient::generation`.
     generation: Arc<AtomicU64>,
     /// The client's sink witness. See `MogwaiExecutionClient::sink`.
@@ -2412,7 +2451,19 @@ impl ExecContext {
     /// boundary retires the generation", not continuous detection. A receiver
     /// that closes between two emissions is seen at the next one.
     fn emit(&self, send: impl FnOnce(&ExecutionEventEmitter)) {
-        if self.generation.load(Ordering::Acquire) != self.epoch {
+        let Some(epoch) = self.epoch else {
+            // Owns no generation. It may speak - `dispatch_order` swallows a
+            // send failure and returns `Ok` because the reject event is the
+            // signal rather than the return value (AE9), and `ws_cmd` is
+            // exactly `None` before a connection and after a stop, so gating
+            // this would delete the only signal that contract has. What it may
+            // not do is retire: there is no generation to retire, the reader is
+            // already gone, and raising the flag here would contaminate the
+            // next connection with a previous one's loss.
+            send(&self.emitter);
+            return;
+        };
+        if self.generation.load(Ordering::Acquire) != epoch {
             return;
         }
         send(&self.emitter);
@@ -2428,17 +2479,12 @@ impl ExecContext {
         // loser of a concurrent observation returns without logging.
         if self
             .generation
-            .compare_exchange(
-                self.epoch,
-                NO_GENERATION,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(epoch, NO_GENERATION, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             self.sink_dead.store(true, Ordering::Release);
             tracing::warn!(
-                generation = self.epoch,
+                generation = epoch,
                 "the nautilus execution event receiver is closed; retiring this transport \
                  generation. Events this connection already translated were dropped, and the \
                  venue is not the authority that can be asked for them again - a host that \
@@ -3912,7 +3958,7 @@ mod tests {
             // ordinary emitting path rather than the refusal. The witness is
             // empty, which reads as "no sink installed" and therefore never as
             // closure - these tests assert on mirror state, not on delivery.
-            epoch: 1,
+            epoch: Some(1),
             generation: Arc::new(AtomicU64::new(1)),
             sink: Arc::new(Mutex::new(None)),
             sink_dead: Arc::new(AtomicBool::new(false)),
@@ -3933,7 +3979,7 @@ mod tests {
     /// generation set to `active`. The same sender is installed on the emitter
     /// and as the witness, which is the invariant `start()` maintains.
     fn a_context_on_a_live_channel(
-        epoch: u64,
+        epoch: Option<u64>,
         active: u64,
     ) -> (
         ExecContext,
@@ -3989,7 +4035,7 @@ mod tests {
     /// retired connection would emit into whatever runner is current now.
     #[test]
     fn a_context_from_a_retired_generation_emits_nothing() {
-        let (ctx, mut rx, _generation, sink_dead) = a_context_on_a_live_channel(1, 2);
+        let (ctx, mut rx, _generation, sink_dead) = a_context_on_a_live_channel(Some(1), 2);
         let event = a_submitted_event(&ctx);
 
         ctx.emit(|e| e.send_order_event(event));
@@ -4005,11 +4051,46 @@ mod tests {
         );
     }
 
+    /// A context owning no generation may speak, but may not retire.
+    ///
+    /// `exec_context()` owns whatever generation is live when it is built, and
+    /// none when none is - before the first `connect()`, and after any `stop()`,
+    /// which clears it. Such a context must still emit, because `dispatch_order`
+    /// swallows a websocket send failure and returns `Ok` on the contract that
+    /// the reject event is the signal rather than the return value (AE9), and
+    /// `ws_cmd` is `None` in exactly those two states. Gating it would delete
+    /// the only signal that contract has and leave the host with silence.
+    ///
+    /// What it must not do is act on the witness. There is no generation to
+    /// retire, the reader that would read the flag is already gone, and raising
+    /// it would carry one connection's loss into the next.
+    ///
+    /// The channel here is deliberately closed, so a context that wrongly
+    /// claimed retirement authority is caught rather than merely unobserved.
+    #[test]
+    fn a_context_owning_no_generation_still_emits_but_never_retires() {
+        let (ctx, rx, generation, sink_dead) = a_context_on_a_live_channel(None, NO_GENERATION);
+        drop(rx);
+
+        ctx.emit(|e| e.send_order_event(a_submitted_event(&ctx)));
+
+        assert_eq!(
+            generation.load(Ordering::Acquire),
+            NO_GENERATION,
+            "there was no generation to retire and none may be invented"
+        );
+        assert!(
+            !sink_dead.load(Ordering::Acquire),
+            "a context owning no generation must not raise the reader's flag: the reader is \
+             already gone, and the flag would contaminate the next connection"
+        );
+    }
+
     /// The terminal rule: closure observed at an emission boundary retires the
     /// generation, exactly once, clearing it before anything asynchronous.
     #[test]
     fn a_closed_receiver_retires_the_generation_once() {
-        let (ctx, rx, generation, sink_dead) = a_context_on_a_live_channel(1, 1);
+        let (ctx, rx, generation, sink_dead) = a_context_on_a_live_channel(Some(1), 1);
         drop(rx);
         let event = a_submitted_event(&ctx);
 

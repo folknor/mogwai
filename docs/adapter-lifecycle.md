@@ -9,9 +9,31 @@ everything below. This page exists because exactly one of these requirements is 
 refusal rather than a warning, and a host assembling its clients by hand can
 trip it.
 
-## `start()` before `connect()`, on the runner's thread
+## Getting the execution event sink
 
-**The execution client refuses to connect until it has been started.**
+**A host using a nautilus node has nothing to arrange.** The node binds its
+event senders and then calls every registered client factory on the same
+thread, so `MogwaiExecutionClientFactory` resolves the sink at creation and
+installs it before it hands the client back. `start()` and `connect()` can then
+run whenever the host runs them.
+
+That is the only site where the sink is resolved from ambient state, and
+deliberately so. `MogwaiExecutionClient::new` does **not** read the runner's
+thread-local, even though it could. The last runner to bind a thread owns the
+slot, so a constructor reading it would capture whichever runner happened to be
+bound at that moment; a client that later ran under a second runner would pass
+every "is a sender installed" check and deliver its whole event stream to the
+first. Absence is detectable and this document tells you how to detect it -
+misrouting is not. The factory is the one place where the owning runner is
+known, so it is the one place that guesses nothing.
+
+A host that builds the client itself, rather than through a node, has to supply
+the sink some other way: call `start()` on the runner's thread. The refusal
+below is what tells you if that never happened.
+
+### The refusal, for a client built outside a node
+
+**The execution client refuses to connect until it has a sink.**
 `connect()` returns an error naming the missing sink:
 
     execution event sender not initialized: call start() on the runner's thread
@@ -48,11 +70,15 @@ that every clone observes, so that narrower ordering hazard is gone. The refusal
 above is unaffected: it fires when a sender is never obtainable at all, which the
 shared cell does not address.
 
-**What a host must do:** call `start()` on the execution client from the
-runner's thread, before `connect()`. The nautilus kernel already does: its
-startup sequence runs `start_engines` ahead of `connect_*_clients`, so no
-shipped host ordering hits this refusal. A host that constructs and connects
-clients itself must preserve that order.
+**What a host must do:** nothing, if it registers the factory with a node. If it
+constructs the client itself, call `start()` on the execution client from the
+runner's thread before `connect()`.
+
+**This is not a licence to drive the client from another thread.** Nautilus
+declares `ExecutionClient` as `#[async_trait(?Send)]` and its adapter guide says
+clients do not move across threads. Seeding the sink at creation fixes where
+*events* go; it says nothing about where the client's own lifecycle methods may
+be called. Create it, start it, connect it and stop it on one thread.
 
 **Reconnecting is unaffected.** `connect()` after a `stop()` is supported and
 does not need another `start()`; the sender, once installed, stays installed on

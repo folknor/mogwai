@@ -521,19 +521,21 @@ memory. That is worth doing for a reason this section should keep in view: the
 checkout used to sit on `develop`, which is neither what we link nor what this
 section claims to describe, and a maintainer may reshape or reject what we file,
 so an entry here can go stale without anyone touching this repository. Of the
-five carried into 0.63, three still stand, one is struck - the mass status
-default, closed at 0.62 - and one half closed at 0.63: #4874 gave the emitter
-the shared sender cell, leaving the thread-local sender lookup that was the
-entry's other named fix. One new entry, fractional-share equity, is filed at the
-bottom.
+five carried into 0.63, two still stand and two are struck - the mass status
+default, closed at 0.62, and the execution event sender, closed at 0.63 by
+#4874 plus the binding-order answer recorded below. One new entry,
+fractional-share equity, is filed at the bottom.
 
-A partial close is worth naming as one. Reading #4874's title as closing that
-entry outright is the mistake this section is built to prevent: the entry offered
-two acceptable patches, one landed, and only re-reading the tree showed which
-half of the problem survived.
+Two lessons from closing the sender entry, both worth keeping. Reading #4874's
+title as closing it outright would have been wrong - the entry offered two
+acceptable patches and only one landed. But so was assuming the other patch was
+therefore owed: the second half turned out to be unnecessary rather than
+outstanding, and only asking upstream surfaced that. An entry here names a
+problem, not a solution, and it closes when the problem goes away by any route.
 
-- **The execution event sender cannot be obtained off the runner's thread.**
-  Half closed at the 0.63 pin, and the surviving half is the one that binds us.
+- ~~**The execution event sender cannot be obtained off the runner's thread.**~~
+  **Closed, verified at the 0.63 pin.** Half by #4874 and half by an answer that
+  showed the second half was never the problem.
   This entry originally named two acceptable PRs - a shared cell for the
   emitter's sender, or resolving it from a process-wide rather than thread-local
   slot. #4874 shipped the first: `live/src/execution/emitter.rs` now holds
@@ -541,20 +543,42 @@ half of the problem survived.
   "Clones share the sender slot and observe later sender installations and
   replacements", with `test_clone_before_set_sender_observes_sender` pinning it.
 
-  What remains: `try_get_exec_event_sender` still reads `EXEC_EVENT_SENDER`, a
-  `thread_local!` in `common/src/live/runner.rs`, and
-  `test_event_senders_are_thread_local` pins that deliberately. So an adapter
-  whose `start()` runs off the runner's thread still cannot obtain a sender at
-  all - the emitter will now heal, but there is nothing to heal it with. The
-  remaining PR: hand the sender to the adapter at construction, the way 0.63
-  began handing `ExecutionClientFactory::create` the node's `TraderId`, or add a
-  node-scoped fallback beside the thread-local. The upstream-facing writeup of
-  this is drafted and belongs in the owner's nautilus PR queue, not here.
+  The rest is closed too, by an answer rather than a change. Upstream declined
+  both shapes this entry asked for, with reasons that hold: a process-wide
+  fallback cannot tell which runner an unbound thread belongs to when two
+  runners live in one process, and their own live test binary binds runners on
+  spawned threads, so a static would be order-dependent. Passing the sender
+  through `create` adds nothing, because it is already bound by the time
+  `create` runs.
 
-  Our refusal stays until then. `connect()` refusing a deaf client (AE20) exists
-  because the sender is unobtainable, not because clones froze, so #4874 does not
-  retire it - and `send_order_event` is still infallible and still only warns, so
-  the deaf-connection failure is unchanged in consequence.
+  What we had missed is that the sender is already reachable where it matters.
+  `LiveNodeBuilder::build` calls `runner.bind_senders()` and then every
+  `ExecutionClientFactory::create` in the same function on the same thread
+  (`builder.rs` 582 and 669); `LiveNode::build` does the same. So our factory
+  resolves it and installs it before returning the client, and #4874's shared
+  slot carries it to every later clone. Landed. Upstream also corrected their
+  adapter guide, which had told adapters to install in `start()` - the exact
+  convention that failed here - in nautechsystems/nautilus_trader#4906, and
+  fixed the "global" wording on the sender accessors to say thread-local.
+
+  Deliberately not done in `MogwaiExecutionClient::new`, though it would have
+  been less code. The last runner to bind a thread wins the slot, so a public
+  constructor reading it captures whichever runner is bound at that instant; a
+  client later run under a second runner would pass every sender-installed check
+  and deliver its entire stream to the first. That trades a loud total loss for
+  silent cross-runner misrouting, and only the factory has upstream's proof of
+  which runner owns the thread.
+
+  AE20's refusal stays, narrowed to what it now guards: a client built outside a
+  node that found no sink at construction, at `start()`, or at `connect()`.
+
+  One line still wanted upstream, filed as a request rather than a need: make
+  `try_send_account_state` public. It is the only one of the emitter's three
+  fallible dispatchers that is private, its two siblings
+  (`try_send_order_event`, `try_send_execution_report`) are public, and the
+  public `try_emit_account_state` regenerates the event off the emitter's
+  realtime clock - so an adapter with a simulated clock can have fallible
+  dispatch or its own timestamps, not both. Our sink witness does not need it.
 
   The stale comment at the guard is fixed. The sink-loss question it raised is
   answered and built (AE21): a retained sender clone is a generation-scoped
