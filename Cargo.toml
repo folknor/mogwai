@@ -62,7 +62,7 @@ criterion = { version = "0.8", default-features = false, features = [
 # which "inert when off" does not achieve. Its own `hotpath` feature is what
 # arms the macros - without it every annotation compiles to nothing - so the
 # entry here turns the default off and the crate features forward it.
-hotpath = { version = "0.24.0", default-features = false }
+hotpath = { version = "0.25.0", default-features = false }
 
 [profile.release]
 opt-level = 3

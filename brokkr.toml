@@ -7,6 +7,19 @@ project = "mogwai"
 # graph rather than merely inert.
 [[check]]
 name = "workspace"
+# `parallel = { budget = 8 }` fans the test binaries out concurrently -
+# prebuilt binaries executed directly, budget = tests in flight. Adopted
+# 2026-09-02 on the thread-scaling evidence recorded at the gate profile:
+# 8 and 16 threads measured identically (~1m20s), which is the floor-bound
+# signature - cargo ran the binaries sequentially, so no within-binary thread
+# count could compress further, and the fan-out removes exactly that
+# boundary. 8 is the measured saturation point, not a guess; retune only
+# after the timing store has two warm runs (the first run weights by test
+# count and is always the slow one), and if `claims` reads 1-1 the pole
+# binary needs a bigger budget (see brokkr man config parallel). The
+# socket-backed tests all bind 127.0.0.1:0 (checked 2026-09-02), so
+# concurrent binaries cannot collide on a port.
+parallel = { budget = 8 }
 
 # The instrumented shape. It exists because a feature nothing compiles is a
 # feature that is broken and nobody knows: with `hotpath` off, every
@@ -26,6 +39,9 @@ name = "workspace"
 name = "instrumented"
 packages = ["mogwai-data", "mogwai-lab"]
 features = ["hotpath-alloc"]
+# Same fan-out as the workspace sweep; direct execution works on every
+# selection shape, package-scoped included.
+parallel = { budget = 8 }
 
 # The wall-clock contract, and the only sweep in this workspace that compiles
 # release. It asserts a latency budget, so the build profile is not an
