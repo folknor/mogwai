@@ -875,9 +875,28 @@ mod tests {
         );
         let acc_parents: i64 = by_hour.values().map(|r| r.parents).sum();
         assert!(acc_parents > 0, "the walk produced no parents");
+        // Compared against the summary's session cells, not its top-level
+        // parent count. Both passes measure under the lab's session frame,
+        // which carves a 15:15 Chicago halt the exchange does not have and
+        // the venue's MNQ calendar stopped carving at tape protocol 31; the
+        // cells and `GeneratedAcc` both drop a parent that opens in that
+        // hole, while the top-level count is the whole tape and now runs
+        // ahead by exactly those parents.
+        let cell_parents: i64 = walk.summary["session_cells"]
+            .as_array()
+            .expect("session cells")
+            .iter()
+            .flat_map(|cell| {
+                cell["parent_count_by_hour"]
+                    .as_array()
+                    .expect("a 24-hour cell")
+                    .iter()
+                    .map(|count| count.as_i64().expect("a parent count"))
+                    .collect::<Vec<_>>()
+            })
+            .sum();
         assert_eq!(
-            acc_parents,
-            walk.summary["parents"].as_i64().expect("a parent count"),
+            acc_parents, cell_parents,
             "the two passes disagree about the tape they walked"
         );
     }

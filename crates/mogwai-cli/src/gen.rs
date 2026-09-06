@@ -1447,7 +1447,22 @@ mod tests {
                 "latent_size_median",
                 "\"generator.latent_size_median\" = \"40\"",
             ),
-            ("vol_scalar", "\"generator.vol_scalar\" = 0.000005"),
+            // The activity cascade (tape protocol 32): its knobs are the
+            // volatility and texture candidates on this preset, and the
+            // GARCH scale is inert (refused below).
+            (
+                "event_log_sigma",
+                "\"generator.cascade.event_log_sigma\" = 0.00002",
+            ),
+            (
+                "texture_amplitude",
+                "\"generator.cascade.texture_amplitude\" = 1.2",
+            ),
+            ("level_log_sd", "\"generator.cascade.level_log_sd\" = 1.0"),
+            (
+                "jumps_per_session",
+                "\"generator.cascade.jumps_per_session\" = 300.0",
+            ),
             ("quoted_width", "\"generator.quoted_width.ticks\" = 3"),
             ("top_sizes_bid", "\"generator.top_sizes.bid\" = \"7\""),
             ("top_sizes_ask", "\"generator.top_sizes.ask\" = \"9\""),
@@ -1461,23 +1476,77 @@ mod tests {
             let moved = summary_json_for(&mnq(over), &format!("mnq-{slot}.toml"), WINDOW_NS);
             assert_ne!(baseline, moved, "{slot} never reached the summary");
         }
+        // Under the cascade `vol_scalar` reaches nothing, and an override of
+        // it is refused by name rather than accepted silently.
+        let inert = scratch_config(
+            "mnq-vol-scalar.toml",
+            &mnq("\"generator.vol_scalar\" = 0.000005"),
+        );
+        let error = profile_from_config(&inert).expect_err("an inert override is refused");
+        assert!(
+            format!("{error:#}").contains("generator.vol_scalar is inert"),
+            "{error:#}"
+        );
 
-        // Protocol-11 session arrays (spec Brick G2): candidate curves are
-        // the values the session refit solves, so a flat override must
-        // demonstrably reach the new session-cell measurements through the
-        // same scratch-config path.
-        let flat = |name: &str| {
-            let ones = vec!["1.0"; 24].join(", ");
-            format!("\"session.{name}\" = [{ones}]")
+        // The activity envelope (tape protocol 31): on a calendar that
+        // carries one, the envelope's per-minute tables are the session
+        // candidates the fit solves, and the hourly session arrays are inert
+        // (overriding them is refused at the config door). A flat envelope
+        // must demonstrably reach the measurement through the same
+        // scratch-config path.
+        let flat_envelope = |name: &str| {
+            let ones = vec!["1.0"; 1_380].join(", ");
+            format!("\"calendar.envelope.{name}\" = [{ones}]")
         };
-        for name in ["vol_hour", "intensity_hour"] {
+        for name in ["volume", "range"] {
             let moved = summary_json_for(
-                &mnq(&flat(name)),
-                &format!("mnq-session-{name}.toml"),
+                &mnq(&flat_envelope(name)),
+                &format!("mnq-envelope-{name}.toml"),
                 WINDOW_NS,
             );
             assert_ne!(
                 baseline, moved,
+                "calendar.envelope.{name} never reached the summary through the config path"
+            );
+        }
+
+        // Protocol-11 session arrays (spec Brick G2) remain the candidates
+        // for a calendar-less instrument, where no envelope can exist. NVDA
+        // runs on the fingerprint's default session profile; a flat table
+        // stated outright in the scratch config must move its summary.
+        let nvda =
+            |session: &str| format!("[instrument]\npreset = \"NVDA\"\n{session}\n[balances]\n");
+        let nvda_baseline = summary_json_for(&nvda(""), "base-nvda.toml", WINDOW_NS);
+        let flat_session = |name: &str, value: &str| {
+            let cells = [value; 24].join(", ");
+            let days = ["0.142857142857"; 7].join(", ");
+            let default = mogwai_venue::config::profile_from_preset("NVDA")
+                .expect("the shipped default preset")
+                .session;
+            let other = if name == "vol_hour" {
+                (
+                    "intensity_hour",
+                    default.intensity_hour.map(|v| v.to_string()).join(", "),
+                )
+            } else {
+                (
+                    "vol_hour",
+                    default.vol_hour.map(|v| v.to_string()).join(", "),
+                )
+            };
+            format!(
+                "[instrument.session]\n{name} = [{cells}]\n{} = [{}]\ndow_weight = [{days}]",
+                other.0, other.1
+            )
+        };
+        for (name, value) in [("vol_hour", "1.0"), ("intensity_hour", "0.041666666667")] {
+            let moved = summary_json_for(
+                &nvda(&flat_session(name, value)),
+                &format!("nvda-session-{name}.toml"),
+                WINDOW_NS,
+            );
+            assert_ne!(
+                nvda_baseline, moved,
                 "session.{name} never reached the summary through the config path"
             );
         }
@@ -1941,8 +2010,12 @@ mod tests {
         // three parameters of candidate[i+1] = a0 + a1 * base[i]^2 +
         // b1 * sigma2[i] by least squares over the transitions, then show
         // a perturbed local coefficient fails the residual bound.
-        let args = m12a_args(M12A_START_NS, "1h");
-        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        //
+        // On the crypto preset: since tape protocol 32 the MNQ preset runs
+        // the activity cascade, whose trace carries no recursion to recover.
+        let mut args = m12a_args(M12A_START_NS, "1h");
+        args.symbol = "BTCUSDT".to_string();
+        let profile = resolve_profile_for(&args).expect("BTCUSDT profile");
         let mut source = build_source(&args, &profile, M12A_START_NS).expect("source");
         source.enable_vol_trace();
         let end = M12A_START_NS + 1_800_000_000_000;

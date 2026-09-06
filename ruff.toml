@@ -54,3 +54,8 @@ ignore = [
 # the 58 ARG hits in analysis/ are this file's fixtures. Scoped to this file
 # alone so ARG keeps catching genuinely orphaned parameters elsewhere.
 "analysis/databento_download.py" = ["ARG001", "ARG002", "ARG005"]
+# The tape-v2 sync script's whole job is to exec tar and ssh with argv built
+# from module constants; nothing in it comes from outside the file. S603
+# (untrusted subprocess input) and S607 (partial executable path) would each
+# demand a noqa on every call for no defect caught.
+"analysis/tape-v2/sync.py" = ["S603", "S607"]

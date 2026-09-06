@@ -1108,6 +1108,11 @@ pub(crate) fn classify_fault(fault: mogwai_data::TickFault) -> FaultClass {
                 "composed river clock cannot advance, so clock_ns={target_ns} is unreachable"
             ),
         },
+        TickFault::CascadeClockExhausted { clock_ns } => FaultClass {
+            kind: "cascade.clock_exhausted",
+            clock_ns,
+            detail: format!("the activity cascade's clock cannot advance past clock_ns={clock_ns}"),
+        },
     }
 }
 
@@ -3452,6 +3457,7 @@ mod calendar_tests {
                 end_minute: 5_761,
             }],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         let order = SubmitOrder {
             client_order_id: "CLOSED".into(),
@@ -3530,6 +3536,7 @@ mod calendar_tests {
                 end_minute: 5_761,
             }],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         let closed = 2 * 60_000_000_000;
         let limit = |id: &str, price: i64| SubmitOrder {

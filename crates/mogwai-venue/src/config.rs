@@ -759,6 +759,7 @@ fn effective_preset_walk(
             }
         }
         for (path, value) in overrides {
+            refuse_inert_session_override(&merged, &path)?;
             replace_dotted(&mut merged, &path, value)?;
         }
         for (path, value) in own_provenance {
@@ -1011,6 +1012,7 @@ fn apply_overlay(
                 .insert("arrival".to_string(), value);
             continue;
         }
+        refuse_inert_session_override(merged, &path)?;
         replace_dotted_for_bundle(merged, &path, value, bundle)?;
     }
     // A top-level key is the operator's explicit choice. It replaces a knob the
@@ -1025,11 +1027,52 @@ fn apply_overlay(
     // as under `[instrument.override]`, and keeps the strict guard.
     for (path, value) in operator {
         if path.contains('.') || merged.contains_key(&path) {
+            refuse_inert_session_override(merged, &path)?;
             replace_dotted_for_bundle(merged, &path, value, bundle)?;
         } else {
             tracing::info!(path, override_value = %value, bundle, symbol = requested, overlay = source, "instrument bundle addition");
             merged.insert(path, value);
         }
+    }
+    Ok(())
+}
+
+/// Refuses an override of the hourly session curves on a bundle whose calendar
+/// carries an activity envelope.
+///
+/// With an envelope declared, the modulator never reads `session.intensity_hour`,
+/// `session.vol_hour` or `session.dow_weight`: the per-minute-of-session tables
+/// stand in for all three. An operator who overrides one of them would then be
+/// turning a knob wired to nothing, and both halves would stay green, which is
+/// the vacuous-gate shape. Refusing at the override door names the knob that is
+/// actually connected.
+fn refuse_inert_session_override(merged: &toml::Table, path: &str) -> anyhow::Result<()> {
+    let touches_session = path == "session" || path.starts_with("session.");
+    let has_envelope = merged
+        .get("calendar")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|calendar| calendar.contains_key("envelope"));
+    if touches_session && has_envelope {
+        anyhow::bail!(
+            "override path {path} is inert: this bundle's calendar carries an activity \
+             envelope, which replaces the hourly session curves; override \
+             calendar.envelope.volume, calendar.envelope.range or \
+             calendar.envelope.weekday_weight instead"
+        );
+    }
+    // The same shape one layer down: on a generator that carries the
+    // activity cascade (tape protocol 32) the GARCH walk never runs, so its
+    // scale knob is wired to nothing.
+    let has_cascade = merged
+        .get("generator")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|generator| generator.contains_key("cascade"));
+    if path == "generator.vol_scalar" && has_cascade {
+        anyhow::bail!(
+            "override path {path} is inert: this bundle's generator carries the activity \
+             cascade, which replaces the GARCH walk; override \
+             generator.cascade.event_log_sigma instead"
+        );
     }
     Ok(())
 }
@@ -1138,6 +1181,7 @@ pub(crate) struct PartialGeneratorScalars {
     pub(crate) depth_growth: Option<mogwai_data::DepthGrowth>,
     pub(crate) trade_displacement_ticks: Option<mogwai_data::TradeDisplacement>,
     pub(crate) arrival: Option<mogwai_data::ArrivalConfig>,
+    pub(crate) cascade: Option<mogwai_data::CascadeConfig>,
 }
 
 impl PartialGeneratorScalars {
@@ -1164,6 +1208,7 @@ impl PartialGeneratorScalars {
             depth_growth,
             trade_displacement_ticks,
             arrival,
+            cascade,
         } = self;
         // The definition owns the symbol; a stated one is accepted for
         // compatibility with full tables and ignored.
@@ -1219,6 +1264,9 @@ impl PartialGeneratorScalars {
         if let Some(value) = arrival {
             scalars.arrival = Some(*value);
         }
+        if let Some(value) = cascade {
+            scalars.cascade = Some(value.clone());
+        }
     }
 }
 
@@ -1244,6 +1292,7 @@ impl From<mogwai_data::GeneratorScalars> for PartialGeneratorScalars {
             depth_growth: Some(scalars.depth_growth),
             trade_displacement_ticks: Some(scalars.trade_displacement_ticks),
             arrival: scalars.arrival,
+            cascade: scalars.cascade,
         }
     }
 }
@@ -1775,7 +1824,7 @@ fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::Instrument
 ///
 /// See [`refuse_unknown_subtable_keys`] for why the list exists, and
 /// `the_generator_key_list_is_exhaustive` for what stops it drifting.
-const GENERATOR_KEYS: [&str; 18] = [
+const GENERATOR_KEYS: [&str; 19] = [
     "symbol",
     "modal_tick",
     "price_decimals",
@@ -1794,6 +1843,7 @@ const GENERATOR_KEYS: [&str; 18] = [
     "depth_growth",
     "trade_displacement_ticks",
     "arrival",
+    "cascade",
 ];
 
 /// The keys `mogwai_data::SessionProfile` accepts, in its declaration order.
@@ -1865,6 +1915,33 @@ fn arrival_family_keys(family: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// The keys of the `[instrument.generator.cascade]` table. Its type denies
+/// unknown fields itself, but the check here runs before the resolved
+/// instrument deserializes and names the table the operator wrote.
+const CASCADE_KEYS: [&str; 21] = [
+    "texture_tau_minutes",
+    "texture_weights",
+    "texture_amplitude",
+    "texture_exponent",
+    "level_tau_minutes",
+    "level_weights",
+    "level_log_sd",
+    "sigma_level_exponent",
+    "sigma_level_log_sd",
+    "event_log_sigma",
+    "student_df",
+    "gap_median_ratio",
+    "gap_log_sd",
+    "gap_log_clamp_sd",
+    "jumps_per_session",
+    "jump_size",
+    "jump_log_sd",
+    "jump_log_clamp_sd",
+    "jump_volume_kick",
+    "jump_local_exponent",
+    "side_persistence",
+];
+
 fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result<()> {
     for (name, known) in [
         ("quoted_width", &QUOTED_WIDTH_KEYS[..]),
@@ -1872,6 +1949,7 @@ fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result
         ("depth_levels", &DEPTH_LEVELS_KEYS[..]),
         ("depth_growth", &DEPTH_GROWTH_KEYS[..]),
         ("trade_displacement_ticks", &TRADE_DISPLACEMENT_KEYS[..]),
+        ("cascade", &CASCADE_KEYS[..]),
     ] {
         let Some(seam) = generator.get(name).and_then(toml::Value::as_table) else {
             continue;
@@ -2704,8 +2782,9 @@ mod tests {
             depth_growth: _,
             trade_displacement_ticks: _,
             arrival: _,
+            cascade: _,
         } = sample;
-        assert_eq!(GENERATOR_KEYS.len(), 18);
+        assert_eq!(GENERATOR_KEYS.len(), 19);
     }
 
     /// The anchor for `SESSION_KEYS`, on the same terms.
@@ -3374,6 +3453,43 @@ mod tests {
         assert_eq!(profile.def.symbol.as_ref(), "MNQ");
     }
 
+    /// Tape protocol 31: on a bundle whose calendar carries an activity
+    /// envelope the hourly session curves are wired to nothing, so an
+    /// override of one is refused by name and the envelope's own tables are
+    /// the knobs that resolve. Bite-checked by removing the refusal: the
+    /// first resolve then succeeds silently, which is the defect.
+    #[test]
+    fn a_session_curve_override_is_refused_under_an_envelope() {
+        let ones = vec!["1.0"; 24].join(", ");
+        let overlay: toml::Table =
+            toml::from_str(&format!("[override]\n\"session.vol_hour\" = [{ones}]\n")).unwrap();
+        let error = profile_for_config(Some("MNQ"), vec![overlay]).expect_err("refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("session.vol_hour is inert"),
+            "the refusal must name the inert knob: {text}"
+        );
+        assert!(
+            text.contains("calendar.envelope.volume"),
+            "the refusal must name the connected knob: {text}"
+        );
+        let ones = vec!["1.0"; 1_380].join(", ");
+        let overlay: toml::Table = toml::from_str(&format!(
+            "[override]\n\"calendar.envelope.range\" = [{ones}]\n"
+        ))
+        .unwrap();
+        let profile = profile_for_config(Some("MNQ"), vec![overlay]).expect("resolves");
+        let envelope = profile
+            .calendar
+            .as_ref()
+            .unwrap()
+            .envelope
+            .as_ref()
+            .unwrap();
+        assert!(envelope.range.iter().all(|value| *value == 1.0));
+        assert_eq!(envelope.volume.len(), 1_380);
+    }
+
     #[test]
     fn a_preset_with_incomplete_provenance_refuses_boot() {
         let instrument: toml::Table =
@@ -3542,7 +3658,10 @@ mod tests {
         // change, so the preset can never drift from the artifact silently.
         let profile = profile_from_preset("MNQ").unwrap();
         let s = &profile.scalars;
-        assert_eq!(s.mean_event_duration_s, 0.060859305487494256);
+        // Tape protocol 32: the parent gap is refit to the year's median
+        // session (747 parents a minute at 1.98 contracts a parent) and no
+        // longer the July artifact's 0.0609, which was the 1.7x level defect.
+        assert_eq!(s.mean_event_duration_s, 0.08032128514056225);
         assert_eq!(s.children_mean, 1.1711127211559897);
         assert_eq!(s.children_single_frac, 0.9048983982868222);
         assert_eq!(s.levels_mean, 1.1215513514243831);
@@ -3594,8 +3713,24 @@ mod tests {
         let (_, provenance) = effective_preset("MNQ").unwrap();
         let corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG";
         let window = "2026-07 full month, 22 usable sessions";
+        // `generator.mean_event_duration_s` left this list at tape protocol
+        // 32: it is fitted to the year's median session for the cascade, and
+        // its own entry names that corpus.
+        let gap = provenance
+            .get("generator.mean_event_duration_s")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(
+            gap.get("kind").and_then(toml::Value::as_str),
+            Some("fitted")
+        );
+        assert!(
+            gap.get("window")
+                .and_then(toml::Value::as_str)
+                .unwrap()
+                .contains("260 full sessions")
+        );
         for path in [
-            "generator.mean_event_duration_s",
             "generator.children_mean",
             "generator.children_single_frac",
             "generator.levels_mean",

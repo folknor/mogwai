@@ -38,7 +38,13 @@ breach_action = "liquidate"
 symbol = "MNQ"
 modal_tick = "0.25"
 price_decimals = 2
-mean_event_duration_s = 0.060859305487494256
+# Tape protocol 32: the mean parent gap the cascade below centres on. The
+# year's median session prints 1,478 contracts a minute over its 1,380
+# minutes, and the July TBBO fit puts 1.98 contracts on a parent (1.17
+# children at a 1.69-contract mean), so the reference minute holds 747
+# parents. The July value of 0.0609 was the protocol-31 level defect: a
+# tape 1.7 times the year's median in every phase.
+mean_event_duration_s = 0.08032128514056225
 children_mean = 1.1711127211559897
 children_single_frac = 0.9048983982868222
 levels_mean = 1.1215513514243831
@@ -74,6 +80,70 @@ top_sizes = { bid = "3", ask = "3", provenance = { kind = "fitted", corpus = "MN
 depth_levels = { levels = 8, provenance = { kind = "uncalibrated" } }
 depth_growth = { growth = "1", provenance = { kind = "uncalibrated" } }
 trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
+# The activity cascade, tape protocol 32: the synthetic tape v2 walk. Its
+# presence is what selects it; the arrival clock, the GARCH mid and the
+# bounce/drift process above it do not run on this preset. The mechanism
+# is stated in `mogwai_data::generated::cascade`; what is fitted here was
+# measured on 260 full MNQ sessions of one-minute bars (2025-08-19 to
+# 2026-09-03) with `analysis/tape-v2/residuals.py` and `price_targets.py`,
+# and checked against the same on the prototype `proto_engine.py`.
+#
+# - The texture is the envelope-normalised minute-volume residual: lognormal
+#   to two decimals in every phase, log-sd 0.70 in Asia and 0.36 at the cash
+#   open, which `texture_amplitude * v^(-texture_exponent)` reproduces. Its
+#   autocorrelation (0.52, 0.39, 0.27, 0.20, 0.17, 0.09, 0.03 at lags 1, 2,
+#   5, 10, 15, 30, 60 minutes in Asia) is a mixture of five timescales, and
+#   the whole-session autocorrelation (0.18, 0.11, 0.03 at one, two and
+#   four hours) wants a sixth at three hours, the swell a night rides. The
+#   weights are stated at the second level, where the 15-second component
+#   keeps about half its variance in a minute average.
+# - A jump follows the square root of the minute sd where it lands: real
+#   Asia's largest minute in the year is 140 points and the cash open's
+#   197 across a threefold spread in minute sd, and only four Asia minutes
+#   exceed 100. Every real minute over 100 points came with volume, two to
+#   ten times the phase median, which the kick on the fastest texture
+#   components supplies. The jump rate follows the envelope and the slow
+#   level, never the texture, so a jump's own volume cannot raise the
+#   chance of the next one.
+# - The level is the per-session mean minute volume: log-sd 0.34 across the
+#   year, day-to-day autocorrelation 0.78, 0.66, 0.55, 0.48, 0.28 at lags 1,
+#   2, 5, 10, 20 sessions, which three components of a session, a week and a
+#   month give.
+# - The per-parent sigma level follows the volume level to the 0.57 power
+#   with its own 0.207 log-sd (range level log-sd 0.42, correlation 0.87
+#   with the volume level).
+# - `event_log_sigma` is 0.21 points at the 28,284 start price: the year's
+#   one-minute close-return sd per phase (5.9 Asia, 17.1 open, 10.7 midday)
+#   at 747 parents a minute under the range shape.
+# - Jumps at three a session, four reference sds, are what put the
+#   standardised minute kurtosis at the real nine and the largest minute of
+#   a session near the real 82 points.
+# - The gap is lognormal: the real reopen gap is 9.6 points at the median,
+#   63 at p90, 316 at p99, and the largest in the year is 541; the draw is
+#   clamped at 2.75 sds so the law's tail past what a year shows is not
+#   printed.
+[instrument.generator.cascade]
+texture_tau_minutes = [0.25, 1.0, 5.0, 25.0, 90.0, 180.0]
+texture_weights = [0.46, 0.12, 0.16, 0.11, 0.03, 0.12]
+texture_amplitude = 0.54
+texture_exponent = 0.24
+level_tau_minutes = [420.0, 8640.0, 47520.0]
+level_weights = [0.2, 0.3, 0.5]
+level_log_sd = 0.34
+sigma_level_exponent = 0.57
+sigma_level_log_sd = 0.207
+event_log_sigma = 0.00000742
+student_df = 4.0
+gap_median_ratio = 1.2
+gap_log_sd = 1.6
+gap_log_clamp_sd = 2.75
+jumps_per_session = 3.0
+jump_size = 3.5
+jump_log_sd = 0.7
+jump_log_clamp_sd = 2.75
+jump_volume_kick = 1.5
+jump_local_exponent = 0.5
+side_persistence = 0.6
 # Intraday shape, refitted at protocol 11 from the July 2026 MNQ TBBO
 # month in the units the runtime actually applies (the protocol-8 NQ-bar
 # curves were per-minute quantities applied per parent event, which made
@@ -85,6 +155,13 @@ trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "
 # composite by its own exposure-weighted mean over the calendar's open
 # minutes, so the arrays satisfy no particular sum and any positive
 # rescaling of them is equivalent.
+#
+# Since protocol 31 these hourly curves are not what this preset runs on:
+# the calendar below carries a per-minute-of-session envelope, and the
+# modulator reads that instead whenever one is declared. The arrays stay
+# because the schema requires them, because the fit they record is the
+# protocol-11 evidence, and because a preset that inherits this one and
+# drops the envelope falls back to them.
 #
 # Estimators, definitions in the fit artifact analysis/mnq-fit.json:
 # - intensity_hour is the conditional hour parameter under the frozen
@@ -105,8 +182,9 @@ trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "
 # structurally carry:
 #
 # - Hour 21 UTC is unexposed (the 16:00-17:00 Central daily break); its 1.0
-#   is a convention, not a measurement. Hour 20 is partially exposed, 45
-#   open minutes per session around the 15:15-15:30 halt.
+#   is a convention, not a measurement. Hour 20 was fitted with 45 open
+#   minutes per session, around a 15:15-15:30 halt the calendar no longer
+#   carves.
 # - dow_weight is untouched by the protocol-11 refit and keeps its NQ-bar
 #   provenance and caveats: Saturday's 1.0 is a zero-exposure convention,
 #   Sunday rests on an order of magnitude less exposure than any weekday,
@@ -137,10 +215,10 @@ vol_hour = [
 ]
 
 # Exchange-local CME equity-index hours on a permanent CDT clock: Sunday 17:00
-# through Friday 16:00 Chicago time, with the daily 15:15-15:30 halt, the
-# 16:00-17:00 break, and a genuinely shut Saturday. Minutes count from local
-# Sunday 00:00. Local minute 900 is 15:00, when the daily settlement price is
-# struck; without this table the instrument would carry margin it never settles.
+# through Friday 16:00 Chicago time, with the 16:00-17:00 daily break and a
+# genuinely shut Saturday. Minutes count from local Sunday 00:00. Local minute
+# 900 is 15:00, when the daily settlement price is struck; without this table
+# the instrument would carry margin it never settles.
 #
 # The offset is fixed at -300 and DST transitions are unmodelled, so the model
 # week is CDT all year. Half of a real calendar year is CST, and those sessions
@@ -152,24 +230,390 @@ vol_hour = [
 # a CDT clock. It described no civil session CME publishes, and the comment
 # calling it Chicago time was wrong: CME equity index opens at 17:00 Central,
 # not 18:00. Correcting it moved settlement from 960 to 900, which is the same
-# real instant rather than a new choice, and which the calendar validator
-# requires: 960 is now the exclusive end of the 15:30-16:00 window, and a
-# settlement minute that is not open on any day is refused outright.
+# real instant rather than a new choice.
+#
+# Until protocol 31 the table also carved a 15:15-15:30 halt out of every
+# session. The exchange's own `status` feed shows no such halt: for ES on
+# 2026-08-18 it records trading from 17:00, closed at 16:00, pre-open quoting
+# at 16:45 and the no-cancel period at 16:59:30, and nothing else; and real
+# MNQ prints in every one of those fifteen minutes. The halt was a schedule
+# CME no longer runs, and the calendar now trades straight through to 16:00.
 [instrument.calendar]
 utc_offset_minutes = -300
 settlement_minute_of_day = 900
 open_windows = [
-  { start_minute = 1020, end_minute = 2355 },
-  { start_minute = 2370, end_minute = 2400 },
-  { start_minute = 2460, end_minute = 3795 },
-  { start_minute = 3810, end_minute = 3840 },
-  { start_minute = 3900, end_minute = 5235 },
-  { start_minute = 5250, end_minute = 5280 },
-  { start_minute = 5340, end_minute = 6675 },
-  { start_minute = 6690, end_minute = 6720 },
-  { start_minute = 6780, end_minute = 8115 },
-  { start_minute = 8130, end_minute = 8160 },
+  { start_minute = 1020, end_minute = 2400 },
+  { start_minute = 2460, end_minute = 3840 },
+  { start_minute = 3900, end_minute = 5280 },
+  { start_minute = 5340, end_minute = 6720 },
+  { start_minute = 6780, end_minute = 8160 },
 ]
+# The L0 activity envelope: per-minute-of-session shape, fitted as
+# the median over 260 full sessions.
+# Corpus: MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg.
+# Window: 2025-08-19 through 2026-09-03, 260 full sessions.
+# `volume` is normalised so the session's mean minute is 1.0 and
+# `range` so the session's median minute is 1.0; the generator
+# derives its per-parent volatility multiplier from the two as
+# range / sqrt(volume). Minute 0 is the 17:00 Chicago reopen, 930
+# the 08:30 cash open, 1320 the 15:00 settlement. Level is not
+# carried here: it is a slow regime and belongs to the driver.
+[instrument.calendar.envelope]
+session_open_minute_of_day = 1020
+# Session weekday, Sunday to Saturday; the closed days are 1.0 by
+# convention. Median session level relative to the weekday mean.
+weekday_weight = [1.0000, 0.9093, 1.0211, 0.9641, 1.1101, 0.9953, 1.0000]
+volume = [
+  1.0546, 0.7050, 0.5322, 0.4573, 0.4408, 0.4844, 0.4196, 0.3582,
+  0.3299, 0.3242, 0.3616, 0.3162, 0.2728, 0.2800, 0.2782, 0.3170,
+  0.2793, 0.2772, 0.2482, 0.2580, 0.3127, 0.2892, 0.2652, 0.2304,
+  0.2430, 0.2624, 0.2565, 0.2231, 0.2281, 0.2181, 0.3339, 0.2714,
+  0.2649, 0.2414, 0.2629, 0.2576, 0.2535, 0.2232, 0.2176, 0.2174,
+  0.2386, 0.2200, 0.2085, 0.2064, 0.2154, 0.2541, 0.2555, 0.2174,
+  0.2353, 0.2094, 0.2610, 0.2178, 0.2093, 0.2104, 0.2034, 0.2280,
+  0.2112, 0.2130, 0.1917, 0.2013, 0.4614, 0.3661, 0.3189, 0.2973,
+  0.2843, 0.2697, 0.2616, 0.2763, 0.2481, 0.2526, 0.2818, 0.2718,
+  0.2793, 0.2646, 0.2517, 0.2815, 0.2789, 0.2403, 0.2481, 0.2423,
+  0.2416, 0.2798, 0.2642, 0.2419, 0.2449, 0.2720, 0.2575, 0.2335,
+  0.2245, 0.2325, 0.3398, 0.2816, 0.2762, 0.2627, 0.2426, 0.2529,
+  0.2298, 0.2586, 0.2379, 0.2139, 0.2599, 0.2332, 0.2262, 0.2327,
+  0.2284, 0.3891, 0.3422, 0.3176, 0.2907, 0.2733, 0.3316, 0.2906,
+  0.2885, 0.2545, 0.2554, 0.2717, 0.2371, 0.2582, 0.2425, 0.2922,
+  0.9879, 0.6771, 0.5941, 0.5595, 0.5003, 0.5354, 0.5762, 0.5028,
+  0.4700, 0.4036, 0.5232, 0.4709, 0.4516, 0.4227, 0.4224, 0.5847,
+  0.4802, 0.4481, 0.4127, 0.3854, 0.4689, 0.4104, 0.4160, 0.3830,
+  0.3822, 0.4103, 0.3632, 0.3786, 0.3617, 0.3286, 0.5277, 0.4714,
+  0.3951, 0.3865, 0.3595, 0.3974, 0.3737, 0.3585, 0.3484, 0.3184,
+  0.3702, 0.3506, 0.3421, 0.3341, 0.3033, 0.4133, 0.3512, 0.3333,
+  0.3470, 0.3148, 0.3576, 0.3417, 0.3241, 0.3202, 0.3281, 0.3534,
+  0.3249, 0.2982, 0.2810, 0.2802, 0.6093, 0.4948, 0.4348, 0.4030,
+  0.3635, 0.4390, 0.4001, 0.3885, 0.3590, 0.3393, 0.3781, 0.3604,
+  0.3600, 0.3381, 0.3305, 0.3958, 0.3729, 0.3342, 0.3233, 0.2988,
+  0.3470, 0.3397, 0.3302, 0.3011, 0.2778, 0.3321, 0.3285, 0.2931,
+  0.2836, 0.2695, 0.4395, 0.3911, 0.3580, 0.3091, 0.3168, 0.3533,
+  0.3536, 0.3460, 0.3300, 0.2749, 0.3483, 0.3276, 0.3133, 0.2914,
+  0.2780, 0.3208, 0.2913, 0.2790, 0.2956, 0.2857, 0.3158, 0.2728,
+  0.2921, 0.2699, 0.2710, 0.2941, 0.2812, 0.2750, 0.2563, 0.2354,
+  0.4547, 0.3442, 0.3421, 0.2977, 0.2645, 0.2968, 0.3019, 0.2738,
+  0.2566, 0.2364, 0.2824, 0.2831, 0.2789, 0.2411, 0.2448, 0.3175,
+  0.2956, 0.2676, 0.2662, 0.2336, 0.2788, 0.2651, 0.2609, 0.2442,
+  0.2293, 0.2655, 0.2508, 0.2398, 0.2322, 0.2188, 0.3481, 0.3030,
+  0.2837, 0.2781, 0.2541, 0.2721, 0.2752, 0.2428, 0.2089, 0.1926,
+  0.2545, 0.2216, 0.2047, 0.2079, 0.2148, 0.2418, 0.2470, 0.2262,
+  0.2276, 0.2241, 0.2362, 0.2248, 0.2189, 0.2191, 0.1923, 0.2244,
+  0.2048, 0.2043, 0.1897, 0.1655, 0.2937, 0.2472, 0.2199, 0.2050,
+  0.2132, 0.2396, 0.2321, 0.2197, 0.2295, 0.1993, 0.2228, 0.2052,
+  0.2185, 0.1937, 0.1816, 0.2395, 0.2172, 0.1994, 0.2095, 0.1875,
+  0.2298, 0.1964, 0.1885, 0.1852, 0.1960, 0.2114, 0.2066, 0.2034,
+  0.1774, 0.1718, 0.3217, 0.2475, 0.2196, 0.2083, 0.1836, 0.2333,
+  0.2195, 0.1911, 0.1832, 0.1611, 0.1960, 0.1777, 0.1865, 0.1875,
+  0.1671, 0.2293, 0.1944, 0.1695, 0.1718, 0.1747, 0.1998, 0.1808,
+  0.1817, 0.1539, 0.1523, 0.1737, 0.1746, 0.1707, 0.1739, 0.1531,
+  0.2685, 0.2387, 0.2003, 0.1978, 0.1903, 0.2198, 0.2186, 0.1820,
+  0.1925, 0.1851, 0.2115, 0.1982, 0.1767, 0.1722, 0.1841, 0.1983,
+  0.1904, 0.1922, 0.1900, 0.1653, 0.2029, 0.1947, 0.1929, 0.1821,
+  0.1710, 0.2032, 0.1760, 0.1731, 0.1692, 0.1562, 0.2353, 0.2058,
+  0.1849, 0.1825, 0.1698, 0.1931, 0.2013, 0.1876, 0.1699, 0.1562,
+  0.1923, 0.1784, 0.1752, 0.1733, 0.1660, 0.1883, 0.1801, 0.1810,
+  0.1634, 0.1691, 0.2022, 0.1697, 0.1702, 0.1598, 0.1675, 0.1845,
+  0.1801, 0.1667, 0.1517, 0.1536, 0.3290, 0.2788, 0.2350, 0.2117,
+  0.2094, 0.2532, 0.2306, 0.2128, 0.2146, 0.2268, 0.2563, 0.2311,
+  0.2113, 0.2079, 0.1978, 0.2197, 0.2305, 0.2053, 0.2077, 0.2074,
+  0.2511, 0.2202, 0.1965, 0.2133, 0.2004, 0.2300, 0.2186, 0.1869,
+  0.1953, 0.2181, 0.3986, 0.2666, 0.2682, 0.2408, 0.2320, 0.2541,
+  0.2264, 0.2198, 0.2170, 0.2052, 0.2435, 0.2139, 0.1989, 0.1837,
+  0.1910, 0.2569, 0.2199, 0.2045, 0.2044, 0.1940, 0.2244, 0.2091,
+  0.2085, 0.1936, 0.1952, 0.2152, 0.1987, 0.1812, 0.1723, 0.1777,
+  0.4943, 0.3524, 0.3156, 0.2749, 0.2876, 0.2997, 0.3075, 0.2879,
+  0.2667, 0.2470, 0.2863, 0.2645, 0.2549, 0.2417, 0.2363, 0.2933,
+  0.2745, 0.2296, 0.2501, 0.2219, 0.2846, 0.2520, 0.2507, 0.2366,
+  0.2474, 0.2863, 0.2685, 0.2391, 0.2529, 0.2696, 0.4485, 0.3133,
+  0.2785, 0.2518, 0.2628, 0.2909, 0.2626, 0.2415, 0.2430, 0.2343,
+  0.2502, 0.2352, 0.2358, 0.2157, 0.2088, 0.2748, 0.2525, 0.2485,
+  0.2451, 0.2141, 0.2528, 0.2081, 0.2069, 0.1941, 0.1826, 0.2291,
+  0.2016, 0.1876, 0.1926, 0.2468, 0.7909, 0.5267, 0.4506, 0.4083,
+  0.4123, 0.4786, 0.4330, 0.3857, 0.3614, 0.3524, 0.4099, 0.3756,
+  0.3633, 0.3603, 0.3401, 0.3924, 0.3703, 0.3351, 0.3235, 0.3163,
+  0.3533, 0.3375, 0.3215, 0.3386, 0.3422, 0.3742, 0.3265, 0.3085,
+  0.3096, 0.2906, 0.4134, 0.3447, 0.3154, 0.3188, 0.3039, 0.3505,
+  0.3252, 0.3250, 0.2991, 0.2899, 0.3049, 0.2970, 0.2927, 0.2871,
+  0.2777, 0.3384, 0.3140, 0.2807, 0.2913, 0.2937, 0.3316, 0.2932,
+  0.2823, 0.2604, 0.2542, 0.2814, 0.2716, 0.2452, 0.2298, 0.2391,
+  0.7288, 0.5329, 0.5253, 0.4709, 0.4580, 0.5250, 0.4649, 0.4064,
+  0.3981, 0.3958, 0.4067, 0.4109, 0.3829, 0.3645, 0.3274, 0.4127,
+  0.3933, 0.3554, 0.3442, 0.3414, 0.3774, 0.3556, 0.3273, 0.3441,
+  0.3186, 0.3622, 0.3286, 0.2964, 0.3170, 0.3171, 0.4115, 0.3448,
+  0.3236, 0.3155, 0.3024, 0.3384, 0.3189, 0.2989, 0.2723, 0.2816,
+  0.3062, 0.2774, 0.2942, 0.2994, 0.2702, 0.3217, 0.3032, 0.2808,
+  0.2779, 0.2797, 0.3027, 0.2951, 0.2887, 0.2829, 0.2640, 0.2688,
+  0.2538, 0.2447, 0.2387, 0.2279, 0.4060, 0.3430, 0.3118, 0.3026,
+  0.2789, 0.3098, 0.3076, 0.2751, 0.2545, 0.2439, 0.2915, 0.2943,
+  0.2590, 0.2597, 0.2408, 0.2850, 0.2672, 0.2665, 0.2598, 0.2496,
+  0.2757, 0.2588, 0.2547, 0.2504, 0.2301, 0.2653, 0.2430, 0.2365,
+  0.2254, 0.2189, 0.3174, 0.2891, 0.2719, 0.2512, 0.2375, 0.2666,
+  0.2559, 0.2401, 0.2411, 0.2361, 0.2681, 0.2481, 0.2268, 0.2270,
+  0.2146, 0.2705, 0.2553, 0.2478, 0.2418, 0.2269, 0.2758, 0.2595,
+  0.2364, 0.2353, 0.2298, 0.2535, 0.2594, 0.2237, 0.2246, 0.2234,
+  0.4469, 0.3413, 0.2855, 0.2819, 0.2635, 0.2908, 0.2842, 0.2741,
+  0.2615, 0.2462, 0.3047, 0.2798, 0.2465, 0.2468, 0.2434, 0.2577,
+  0.2649, 0.2435, 0.2275, 0.2367, 0.2883, 0.2549, 0.2434, 0.2395,
+  0.2425, 0.2824, 0.2597, 0.2390, 0.2335, 0.2351, 0.3574, 0.3081,
+  0.2917, 0.2845, 0.2855, 0.2888, 0.2903, 0.2672, 0.2668, 0.2461,
+  0.2801, 0.2722, 0.2420, 0.2518, 0.2381, 0.2709, 0.2655, 0.2657,
+  0.2566, 0.2431, 0.2764, 0.2572, 0.2748, 0.2471, 0.2436, 0.2706,
+  0.2561, 0.2607, 0.2537, 0.2973, 0.7971, 0.5040, 0.4694, 0.4269,
+  0.3942, 0.4640, 0.3914, 0.3645, 0.3400, 0.3497, 0.3795, 0.3587,
+  0.3344, 0.3313, 0.3418, 0.4013, 0.3899, 0.3229, 0.3501, 0.3175,
+  0.3996, 0.3541, 0.3317, 0.3251, 0.3219, 0.3544, 0.3346, 0.3274,
+  0.3332, 0.3154, 0.4699, 0.4303, 0.4138, 0.3524, 0.3568, 0.3841,
+  0.3821, 0.3684, 0.3461, 0.3559, 0.3963, 0.3643, 0.3660, 0.3556,
+  0.3676, 0.3774, 0.3980, 0.3893, 0.3851, 0.3645, 0.4162, 0.4005,
+  0.3772, 0.3548, 0.3509, 0.3937, 0.3646, 0.3691, 0.3462, 0.3563,
+  0.6386, 0.5276, 0.4579, 0.4802, 0.4755, 0.4863, 0.4949, 0.4657,
+  0.4886, 0.4124, 0.4959, 0.4580, 0.4444, 0.4298, 0.4168, 0.5058,
+  0.4802, 0.4634, 0.4936, 0.4357, 0.5406, 0.5413, 0.4828, 0.5004,
+  0.4904, 0.5090, 0.4728, 0.4364, 0.4289, 0.4493, 0.9472, 0.8770,
+  0.7609, 0.7109, 0.6847, 0.7395, 0.7281, 0.6971, 0.6623, 0.6418,
+  0.6919, 0.7008, 0.6964, 0.6182, 0.6190, 0.7416, 0.6766, 0.6911,
+  0.6885, 0.6607, 0.7380, 0.6660, 0.6985, 0.6126, 0.6450, 0.6605,
+  0.6496, 0.6056, 0.5853, 0.6107, 1.2538, 0.9847, 0.8807, 0.8221,
+  0.7833, 0.8103, 0.8652, 0.7977, 0.7261, 0.6783, 0.7964, 0.7402,
+  0.7488, 0.7077, 0.6860, 0.8317, 0.7175, 0.6999, 0.7794, 0.7011,
+  0.7534, 0.7218, 0.6939, 0.6572, 0.6931, 1.4952, 0.8730, 1.3631,
+  1.5797, 1.8321, 9.5046, 7.3787, 6.6519, 5.9964, 5.8734, 6.7188,
+  6.2682, 5.9101, 5.4659, 5.2538, 6.2079, 5.7141, 5.2172, 4.8022,
+  4.7226, 6.5600, 5.4600, 5.0585, 5.0285, 4.7866, 5.6706, 5.3238,
+  4.8067, 4.5762, 4.4692, 5.0633, 4.4555, 4.1932, 3.7574, 3.7498,
+  6.3607, 4.7475, 4.6664, 4.1738, 4.2048, 4.5996, 4.7300, 4.0996,
+  3.9168, 3.7707, 4.4938, 4.2178, 4.0664, 3.8248, 3.6070, 4.3298,
+  4.1092, 3.6402, 3.8651, 3.4782, 4.0732, 3.9829, 3.9610, 3.8383,
+  3.6039, 4.1148, 3.7213, 3.6220, 3.4922, 3.3017, 4.5101, 3.6735,
+  3.6423, 3.3164, 3.3767, 3.7987, 3.6825, 3.4596, 3.2038, 2.9999,
+  3.6559, 3.2163, 3.1397, 3.0444, 2.9121, 3.5370, 3.4168, 3.3395,
+  3.1318, 2.8869, 3.5077, 3.1740, 3.0949, 2.8507, 2.7482, 3.3248,
+  3.0675, 2.8420, 2.6307, 2.5387, 3.9574, 2.9994, 2.9280, 2.6729,
+  2.6012, 3.0205, 2.9143, 2.6064, 2.5326, 2.4032, 2.7574, 2.6331,
+  2.6216, 2.3997, 2.2783, 2.8239, 2.4585, 2.4211, 2.2547, 2.1898,
+  2.7843, 2.5267, 2.3909, 2.3530, 2.2194, 2.6348, 2.4014, 2.3121,
+  2.2945, 2.2618, 3.1545, 2.5206, 2.3267, 2.2637, 2.3511, 2.5648,
+  2.2669, 2.2274, 2.1686, 1.9543, 2.3429, 2.2185, 2.1541, 1.9684,
+  1.9224, 2.4553, 2.2645, 2.1073, 2.1258, 2.0282, 2.5055, 2.2653,
+  2.0395, 1.9244, 1.8304, 2.1765, 2.0139, 1.8765, 1.7995, 1.7703,
+  2.7382, 2.2411, 2.0271, 1.8683, 1.7967, 1.9660, 1.9347, 1.7919,
+  1.7476, 1.6043, 1.9519, 1.8650, 1.6912, 1.5847, 1.4950, 2.0034,
+  1.8184, 1.5979, 1.5954, 1.5395, 1.9910, 1.7798, 1.6871, 1.7424,
+  1.5875, 1.8473, 1.6421, 1.5622, 1.5115, 1.3417, 2.1208, 1.7751,
+  1.6026, 1.5913, 1.4981, 1.8158, 1.6452, 1.6428, 1.5616, 1.4676,
+  1.7009, 1.6018, 1.5171, 1.4384, 1.3552, 1.8556, 1.5426, 1.4229,
+  1.5936, 1.3453, 1.7985, 1.7007, 1.5702, 1.4055, 1.3418, 1.6100,
+  1.5080, 1.3817, 1.4055, 1.2432, 2.0544, 1.5903, 1.5916, 1.4965,
+  1.3600, 1.5793, 1.6169, 1.4515, 1.3659, 1.2848, 1.7360, 1.4700,
+  1.4431, 1.3599, 1.2641, 1.6187, 1.5072, 1.4631, 1.3620, 1.3002,
+  1.6198, 1.4486, 1.4635, 1.3955, 1.3190, 1.5799, 1.4865, 1.3933,
+  1.3113, 1.2073, 1.7817, 1.4620, 1.4893, 1.4260, 1.2801, 1.4681,
+  1.3865, 1.4484, 1.3043, 1.1936, 1.5156, 1.3188, 1.3673, 1.2568,
+  1.1525, 1.5219, 1.3462, 1.2650, 1.3165, 1.1630, 1.4598, 1.3155,
+  1.2804, 1.2318, 1.1609, 1.4278, 1.2714, 1.1489, 1.1763, 1.1183,
+  1.9919, 1.5006, 1.4196, 1.3843, 1.3279, 1.4466, 1.4527, 1.3178,
+  1.2778, 1.1692, 1.4106, 1.2660, 1.2768, 1.2474, 1.1505, 1.5132,
+  1.3689, 1.2753, 1.3274, 1.2305, 1.4391, 1.2804, 1.2533, 1.1553,
+  1.1206, 1.2934, 1.2222, 1.1581, 1.2144, 1.0752, 1.7156, 1.3899,
+  1.2590, 1.2368, 1.1228, 1.3183, 1.2373, 1.1854, 1.1374, 1.1100,
+  1.3797, 1.3441, 1.2808, 1.2126, 1.1121, 1.3858, 1.2079, 1.1618,
+  1.1781, 1.1289, 1.4314, 1.2454, 1.2355, 1.2095, 1.0964, 1.3455,
+  1.2282, 1.2011, 1.1788, 1.1453, 1.9644, 1.4522, 1.3831, 1.2507,
+  1.1453, 1.4289, 1.3752, 1.3332, 1.2932, 1.1231, 1.4245, 1.2730,
+  1.2664, 1.1782, 1.1787, 1.5226, 1.3836, 1.2768, 1.2384, 1.1326,
+  1.4038, 1.3075, 1.2564, 1.2465, 1.1212, 1.3381, 1.1978, 1.1544,
+  1.1334, 1.0871, 1.9513, 1.5591, 1.4137, 1.2848, 1.2596, 1.5318,
+  1.4966, 1.2838, 1.2614, 1.2639, 1.5811, 1.4302, 1.3198, 1.2777,
+  1.2229, 1.7152, 1.4593, 1.3943, 1.3107, 1.3271, 3.9064, 2.1123,
+  1.8750, 2.0130, 3.1178, 3.2420, 1.6631, 1.8225, 1.9515, 6.3006,
+  3.5044, 1.6720, 1.1233, 0.8958, 0.7953, 0.9350, 0.7370, 0.6798,
+  0.6111, 0.6191, 0.6289, 0.5335, 0.4887, 0.4966, 0.5231, 0.5572,
+  0.4221, 0.3640, 0.3689, 0.3081, 0.3301, 0.3161, 0.2964, 0.2742,
+  0.2513, 0.2706, 0.2500, 0.2374, 0.2489, 0.2355, 0.3070, 0.2629,
+  0.2575, 0.2466, 0.2557, 0.2702, 0.2523, 0.2373, 0.2293, 0.2196,
+  0.2251, 0.2241, 0.2089, 0.2244, 0.2586, 0.3717, 0.2320, 0.2207,
+  0.1970, 0.1955, 0.2470, 0.1913, 0.1611, 0.1573, 0.1716, 0.2630,
+  0.1493, 0.1491, 0.1644, 0.2904,
+]
+range = [
+  3.1395, 1.8095, 1.5122, 1.4054, 1.3043, 1.3714, 1.3077, 1.1034,
+  1.1277, 1.0435, 1.0556, 1.0000, 0.9429, 0.8824, 0.8537, 0.9500,
+  0.9020, 0.8750, 0.8780, 0.9000, 0.9375, 0.8750, 0.8431, 0.7857,
+  0.8148, 0.8387, 0.7805, 0.7143, 0.7805, 0.7451, 0.9250, 0.8372,
+  0.8261, 0.7674, 0.8049, 0.7292, 0.7931, 0.7647, 0.6923, 0.7059,
+  0.7879, 0.7241, 0.7255, 0.6977, 0.6667, 0.8125, 0.7647, 0.7059,
+  0.6667, 0.6875, 0.7500, 0.7308, 0.6800, 0.6667, 0.6739, 0.7222,
+  0.6765, 0.6667, 0.6471, 0.6739, 1.2000, 1.0488, 0.9375, 0.8529,
+  0.8235, 0.8409, 0.8125, 0.8077, 0.8056, 0.8113, 0.8519, 0.7895,
+  0.7541, 0.7647, 0.7407, 0.8462, 0.8372, 0.7500, 0.7879, 0.7273,
+  0.7308, 0.7941, 0.7692, 0.7273, 0.6538, 0.7857, 0.7529, 0.7200,
+  0.6923, 0.6667, 0.9333, 0.8077, 0.8000, 0.7391, 0.7500, 0.7949,
+  0.6944, 0.7222, 0.7308, 0.6842, 0.6923, 0.7347, 0.6923, 0.7237,
+  0.6875, 1.0566, 0.9375, 0.8125, 0.8387, 0.7778, 0.9091, 0.8333,
+  0.8039, 0.7317, 0.7250, 0.7647, 0.7229, 0.7609, 0.7333, 0.8333,
+  1.7879, 1.5152, 1.2632, 1.1765, 1.0732, 1.3148, 1.3125, 1.2037,
+  1.1379, 1.0952, 1.2162, 1.1667, 1.1463, 1.0088, 1.0270, 1.3846,
+  1.2353, 1.1154, 1.0513, 1.0000, 1.0909, 1.0845, 1.0000, 0.9419,
+  0.9565, 1.0000, 1.0000, 0.9500, 0.9167, 0.8710, 1.1509, 1.1132,
+  1.0000, 0.9750, 0.9714, 1.0000, 0.9492, 0.9231, 0.8974, 0.8889,
+  0.9722, 0.9318, 0.9000, 0.8333, 0.8462, 1.0000, 0.9375, 0.8788,
+  0.8421, 0.8205, 0.9032, 0.9032, 0.8485, 0.8400, 0.7917, 0.8750,
+  0.8788, 0.8235, 0.7910, 0.7308, 1.2812, 1.1373, 1.0667, 1.0238,
+  0.9412, 1.0714, 0.9706, 0.9500, 0.9062, 0.8889, 1.0000, 0.8571,
+  0.8710, 0.8333, 0.8261, 1.0000, 0.9500, 0.8571, 0.8525, 0.8788,
+  0.9048, 0.8667, 0.9048, 0.8056, 0.7778, 0.8421, 0.8372, 0.8205,
+  0.8142, 0.7609, 1.0645, 0.9677, 0.8909, 0.8462, 0.8250, 0.9153,
+  0.8667, 0.9231, 0.8421, 0.7895, 0.8824, 0.8571, 0.8485, 0.7826,
+  0.7742, 0.8679, 0.8571, 0.7600, 0.8235, 0.7500, 0.8684, 0.7586,
+  0.7931, 0.7308, 0.7500, 0.7826, 0.7778, 0.7317, 0.7297, 0.6667,
+  1.0000, 0.9348, 0.8594, 0.7917, 0.7500, 0.7826, 0.8043, 0.7778,
+  0.7174, 0.7179, 0.7895, 0.7619, 0.7778, 0.7368, 0.6829, 0.8077,
+  0.7765, 0.7561, 0.7917, 0.7059, 0.7879, 0.7674, 0.7333, 0.6977,
+  0.6970, 0.7500, 0.7143, 0.7059, 0.6604, 0.6250, 0.8537, 0.8293,
+  0.8000, 0.7576, 0.7209, 0.7727, 0.7586, 0.7059, 0.7059, 0.6842,
+  0.7059, 0.7000, 0.6531, 0.6364, 0.6389, 0.7333, 0.7419, 0.6875,
+  0.6667, 0.6604, 0.6667, 0.6765, 0.6571, 0.6275, 0.6154, 0.6500,
+  0.6667, 0.6585, 0.5926, 0.5814, 0.8302, 0.7619, 0.6923, 0.6471,
+  0.6190, 0.7059, 0.7174, 0.6780, 0.6538, 0.6389, 0.6667, 0.6471,
+  0.6410, 0.5926, 0.6154, 0.7143, 0.6667, 0.6250, 0.6341, 0.6250,
+  0.7000, 0.6216, 0.6296, 0.6184, 0.6038, 0.6538, 0.6341, 0.6154,
+  0.5854, 0.5556, 0.8462, 0.7500, 0.6923, 0.6341, 0.6190, 0.6829,
+  0.7000, 0.6429, 0.6154, 0.5714, 0.6444, 0.6222, 0.6250, 0.6176,
+  0.5672, 0.6818, 0.6207, 0.6118, 0.6200, 0.5588, 0.6296, 0.6071,
+  0.6111, 0.5833, 0.5789, 0.6102, 0.5714, 0.5714, 0.5312, 0.5294,
+  0.7619, 0.7391, 0.7143, 0.6452, 0.6667, 0.7174, 0.6923, 0.6604,
+  0.6250, 0.6190, 0.6944, 0.6604, 0.6053, 0.5946, 0.6098, 0.6628,
+  0.6765, 0.6250, 0.6034, 0.5500, 0.6957, 0.6667, 0.6400, 0.5882,
+  0.5625, 0.6471, 0.6000, 0.6098, 0.5769, 0.5294, 0.7209, 0.6829,
+  0.6250, 0.6774, 0.5882, 0.6327, 0.6500, 0.6078, 0.6038, 0.5526,
+  0.6304, 0.5882, 0.5909, 0.5686, 0.5432, 0.6316, 0.5909, 0.6197,
+  0.5789, 0.5455, 0.6512, 0.5946, 0.5676, 0.5652, 0.5417, 0.6111,
+  0.6061, 0.5789, 0.5385, 0.5217, 0.9412, 0.8378, 0.8056, 0.7143,
+  0.7037, 0.7917, 0.7547, 0.7188, 0.7143, 0.7447, 0.8333, 0.7308,
+  0.7170, 0.6897, 0.6735, 0.7273, 0.7358, 0.6800, 0.6792, 0.6623,
+  0.7931, 0.7059, 0.6774, 0.6914, 0.6774, 0.7778, 0.7174, 0.6552,
+  0.6923, 0.7273, 1.0408, 0.8750, 0.8438, 0.8000, 0.7647, 0.8000,
+  0.7879, 0.7442, 0.7500, 0.7317, 0.8400, 0.7353, 0.6667, 0.7308,
+  0.6800, 0.7879, 0.7391, 0.6774, 0.6667, 0.6538, 0.7500, 0.7619,
+  0.7143, 0.6923, 0.6923, 0.7250, 0.6667, 0.6471, 0.6129, 0.5857,
+  1.2105, 1.0000, 0.9623, 0.9111, 0.8750, 0.9184, 0.8710, 0.8421,
+  0.7647, 0.7901, 0.8511, 0.8286, 0.8333, 0.7941, 0.7586, 0.8462,
+  0.8475, 0.7619, 0.8039, 0.7059, 0.8421, 0.8289, 0.7931, 0.7419,
+  0.7619, 0.8824, 0.8148, 0.7500, 0.7838, 0.7917, 1.0882, 0.9211,
+  0.8667, 0.8056, 0.7949, 0.8333, 0.7692, 0.8000, 0.7647, 0.7500,
+  0.8305, 0.7826, 0.7895, 0.6970, 0.7069, 0.8462, 0.7917, 0.8043,
+  0.7667, 0.7097, 0.8276, 0.7647, 0.7358, 0.7069, 0.6970, 0.7727,
+  0.7188, 0.6875, 0.7576, 0.8000, 1.6111, 1.3333, 1.1858, 1.1522,
+  1.1333, 1.1818, 1.1765, 1.0909, 1.0526, 1.0435, 1.1364, 1.0952,
+  1.0513, 1.0345, 1.0000, 1.1111, 1.0930, 1.0377, 1.0000, 0.9773,
+  1.0400, 1.0500, 1.0294, 1.0000, 1.0000, 1.0588, 1.0000, 1.0000,
+  0.9375, 0.8780, 1.1333, 1.0435, 0.9882, 0.9444, 0.9310, 1.0256,
+  1.0000, 0.9783, 0.9429, 0.8846, 0.9062, 0.9487, 0.9048, 0.8974,
+  0.8148, 0.9600, 0.9697, 0.8780, 0.9048, 0.9565, 1.0000, 0.9655,
+  0.9437, 0.8710, 0.8431, 0.8919, 0.8864, 0.8333, 0.7692, 0.7500,
+  1.6346, 1.3871, 1.4091, 1.2917, 1.2308, 1.3125, 1.2424, 1.1143,
+  1.1395, 1.0833, 1.1169, 1.1333, 1.0894, 1.0385, 1.0000, 1.1084,
+  1.1176, 1.0256, 1.0556, 1.0323, 1.1111, 1.0566, 0.9688, 1.0370,
+  1.0000, 1.0000, 1.0000, 0.9583, 0.9286, 0.9231, 1.1373, 1.0385,
+  1.0000, 0.9730, 0.9444, 1.0000, 0.9744, 0.8788, 0.9593, 0.8837,
+  0.9434, 0.9143, 0.8750, 0.9231, 0.8462, 0.9091, 0.9048, 0.8788,
+  0.9032, 0.8571, 0.9062, 0.9348, 0.9130, 0.8649, 0.8276, 0.8657,
+  0.8723, 0.8372, 0.7778, 0.7692, 1.1154, 1.0000, 1.0000, 0.9259,
+  0.8889, 0.9783, 0.9512, 0.8864, 0.8621, 0.8421, 0.9259, 0.8824,
+  0.8421, 0.8333, 0.8077, 0.8913, 0.8750, 0.8667, 0.8750, 0.8442,
+  0.9231, 0.8788, 0.8485, 0.8235, 0.7941, 0.8462, 0.7931, 0.7857,
+  0.7647, 0.7500, 1.0000, 0.8750, 0.8571, 0.8431, 0.8043, 0.8611,
+  0.8387, 0.8235, 0.8125, 0.7647, 0.8750, 0.8000, 0.7692, 0.7647,
+  0.7500, 0.8889, 0.8600, 0.7805, 0.7941, 0.7500, 0.8333, 0.8605,
+  0.7879, 0.7778, 0.7692, 0.7857, 0.7917, 0.7222, 0.7179, 0.7188,
+  1.0870, 0.9429, 0.8611, 0.8649, 0.8222, 0.9375, 0.8684, 0.8475,
+  0.8095, 0.8049, 0.9091, 0.8571, 0.8085, 0.8235, 0.7529, 0.8485,
+  0.8158, 0.7895, 0.8065, 0.7692, 0.8667, 0.8333, 0.7846, 0.8039,
+  0.7959, 0.8182, 0.8214, 0.7593, 0.7377, 0.7353, 0.9697, 0.8889,
+  0.9375, 0.8485, 0.8182, 0.8462, 0.8857, 0.8438, 0.8182, 0.7931,
+  0.7857, 0.8387, 0.7692, 0.7843, 0.7937, 0.8333, 0.8235, 0.8043,
+  0.8214, 0.7500, 0.8571, 0.7941, 0.7714, 0.8000, 0.7222, 0.7674,
+  0.8077, 0.7895, 0.7692, 0.8049, 1.6667, 1.2174, 1.1633, 1.1364,
+  1.0000, 1.0714, 1.0000, 1.0000, 0.9655, 0.9608, 1.0000, 1.0000,
+  0.9677, 0.8684, 0.8776, 0.9756, 0.9111, 0.9310, 0.9412, 0.8916,
+  1.0000, 0.9375, 0.9118, 0.8873, 0.8824, 0.9130, 0.9355, 0.8704,
+  0.8333, 0.8125, 1.0727, 1.1000, 0.9706, 0.9412, 0.9412, 1.0000,
+  1.0000, 0.9535, 0.9412, 0.8889, 1.0000, 0.9706, 0.9756, 0.9500,
+  0.9032, 0.9706, 0.9500, 0.9444, 0.9186, 0.8837, 1.0000, 1.0000,
+  0.9348, 0.8667, 0.8333, 0.9189, 0.8846, 0.8800, 0.8302, 0.8125,
+  1.3077, 1.1500, 1.1034, 1.0435, 1.0333, 1.0811, 1.0588, 1.0345,
+  1.0294, 0.9231, 1.0244, 1.0312, 0.9730, 1.0000, 0.9744, 1.0625,
+  1.0882, 1.0000, 1.1071, 1.0244, 1.1364, 1.1373, 1.0435, 1.1250,
+  1.0746, 1.1154, 1.0588, 0.9630, 0.9394, 1.0294, 1.9375, 1.6190,
+  1.4179, 1.3704, 1.2593, 1.3333, 1.3220, 1.2941, 1.2593, 1.1667,
+  1.2778, 1.2075, 1.2105, 1.1667, 1.1190, 1.2857, 1.1951, 1.1515,
+  1.1739, 1.0732, 1.1333, 1.1400, 1.1176, 1.0000, 1.0370, 1.0545,
+  1.0714, 1.0000, 1.0233, 0.9714, 1.5778, 1.3696, 1.2381, 1.2286,
+  1.1250, 1.1538, 1.2195, 1.1500, 1.1111, 1.0000, 1.0930, 1.0652,
+  1.0476, 1.0000, 0.9811, 1.1094, 1.0476, 1.0588, 1.0769, 1.0000,
+  1.0500, 1.0727, 1.0000, 1.0312, 1.0000, 1.7826, 1.1250, 1.7000,
+  1.7500, 1.7647, 6.2083, 4.8710, 4.0256, 3.8462, 3.5312, 3.9167,
+  3.7778, 3.6923, 3.4375, 3.1724, 3.8529, 3.5882, 3.4412, 3.3462,
+  3.0222, 3.9070, 3.4706, 3.3889, 3.1944, 3.3333, 3.7500, 3.4000,
+  3.2083, 3.0606, 3.0349, 3.2051, 2.9697, 2.9355, 2.7059, 2.7647,
+  4.1379, 3.1220, 3.0526, 2.9697, 2.8276, 3.0000, 3.2000, 2.8235,
+  2.8039, 2.5882, 2.9744, 2.8491, 2.7600, 2.6585, 2.5000, 2.8667,
+  2.7333, 2.5714, 2.6667, 2.5882, 2.7750, 2.8644, 2.7778, 2.7333,
+  2.4211, 2.6923, 2.5424, 2.4872, 2.4792, 2.2586, 2.8710, 2.4615,
+  2.5200, 2.3636, 2.3043, 2.5854, 2.4773, 2.5789, 2.3429, 2.1667,
+  2.4776, 2.4242, 2.3529, 2.2667, 2.1111, 2.2857, 2.5294, 2.3784,
+  2.1905, 2.0465, 2.4872, 2.3902, 2.3333, 2.1212, 2.0882, 2.2941,
+  2.3281, 2.0857, 2.0714, 1.9074, 2.5667, 2.1034, 2.1429, 2.0513,
+  1.9231, 2.1724, 2.2500, 2.1250, 1.9773, 1.8462, 2.0500, 2.0385,
+  2.0857, 1.9322, 1.8125, 2.0769, 1.9259, 1.8750, 1.8333, 1.8077,
+  2.1017, 1.9823, 1.7778, 1.7692, 1.8235, 1.9615, 1.9375, 1.8667,
+  1.8364, 1.7647, 2.2241, 2.0208, 1.8261, 1.7561, 1.8049, 1.9524,
+  1.8750, 1.8636, 1.8667, 1.6818, 1.9737, 1.9286, 1.8065, 1.7037,
+  1.6452, 1.9310, 1.7949, 1.8302, 1.8056, 1.6250, 2.0000, 1.9216,
+  1.7593, 1.7333, 1.5926, 1.7794, 1.7586, 1.5714, 1.6154, 1.4151,
+  2.1212, 1.7619, 1.6429, 1.5581, 1.5789, 1.6667, 1.6944, 1.7000,
+  1.6486, 1.4375, 1.7143, 1.7143, 1.5556, 1.4688, 1.4118, 1.7097,
+  1.5970, 1.5357, 1.4643, 1.4545, 1.7241, 1.6977, 1.5854, 1.6136,
+  1.4340, 1.6216, 1.5581, 1.4643, 1.4375, 1.2674, 1.7500, 1.5758,
+  1.5309, 1.4800, 1.4000, 1.6000, 1.6296, 1.5085, 1.5000, 1.4286,
+  1.5385, 1.5769, 1.4118, 1.4762, 1.3585, 1.6522, 1.5000, 1.4286,
+  1.4535, 1.3600, 1.7027, 1.6341, 1.4706, 1.3684, 1.2414, 1.5116,
+  1.4167, 1.3704, 1.3448, 1.2308, 1.8723, 1.5333, 1.4839, 1.4483,
+  1.3846, 1.5526, 1.5283, 1.3913, 1.4545, 1.3077, 1.5577, 1.4516,
+  1.4390, 1.3529, 1.2381, 1.4872, 1.4615, 1.3235, 1.3864, 1.2917,
+  1.4706, 1.4103, 1.3766, 1.4146, 1.3143, 1.5161, 1.3824, 1.2987,
+  1.3500, 1.2083, 1.5897, 1.4118, 1.4211, 1.3750, 1.2812, 1.4375,
+  1.3846, 1.3721, 1.2391, 1.2250, 1.4634, 1.3333, 1.3571, 1.3000,
+  1.1667, 1.4167, 1.3438, 1.2535, 1.3462, 1.1556, 1.4098, 1.3462,
+  1.3333, 1.2353, 1.2549, 1.3621, 1.2105, 1.2162, 1.2222, 1.0943,
+  1.7632, 1.5000, 1.4286, 1.3750, 1.2941, 1.4151, 1.4237, 1.3846,
+  1.2500, 1.2143, 1.3676, 1.3333, 1.3333, 1.2857, 1.2000, 1.4118,
+  1.3158, 1.3158, 1.3462, 1.2069, 1.4091, 1.2500, 1.2821, 1.2414,
+  1.1695, 1.2778, 1.2222, 1.1957, 1.2778, 1.0667, 1.5882, 1.3500,
+  1.2941, 1.2593, 1.1224, 1.2969, 1.2500, 1.1765, 1.2195, 1.1321,
+  1.3214, 1.3333, 1.2500, 1.2000, 1.1200, 1.3333, 1.2712, 1.2353,
+  1.1818, 1.0588, 1.3750, 1.3023, 1.2600, 1.1765, 1.1429, 1.3023,
+  1.2439, 1.2121, 1.2273, 1.1290, 1.7391, 1.4211, 1.3200, 1.2353,
+  1.1538, 1.3529, 1.4634, 1.3256, 1.3023, 1.0833, 1.3043, 1.2973,
+  1.2195, 1.1481, 1.1034, 1.4231, 1.2903, 1.2041, 1.2542, 1.1071,
+  1.3158, 1.2895, 1.2373, 1.1591, 1.1282, 1.2881, 1.1765, 1.1791,
+  1.1857, 1.1875, 1.6512, 1.4231, 1.3462, 1.2188, 1.1923, 1.4375,
+  1.3750, 1.2593, 1.2453, 1.1154, 1.4340, 1.3077, 1.3235, 1.1500,
+  1.1622, 1.5135, 1.3721, 1.2708, 1.2549, 1.2373, 3.2545, 1.7097,
+  1.5882, 1.7358, 2.2424, 2.3721, 1.4706, 1.5714, 1.4286, 3.0217,
+  2.4444, 1.6316, 1.3125, 1.1429, 1.0732, 1.3125, 1.1154, 1.0588,
+  0.9512, 0.9512, 1.0000, 0.9286, 0.8333, 0.8846, 0.9048, 1.0732,
+  0.8649, 0.7692, 0.8077, 0.7083, 0.7778, 0.7358, 0.6875, 0.6250,
+  0.6275, 0.6316, 0.6667, 0.6111, 0.5814, 0.5870, 0.6875, 0.6500,
+  0.6341, 0.5938, 0.5769, 0.6500, 0.5789, 0.5882, 0.5714, 0.5424,
+  0.5455, 0.5652, 0.5349, 0.5455, 0.5588, 0.6765, 0.5435, 0.5882,
+  0.5500, 0.5366, 0.6500, 0.5556, 0.5238, 0.5385, 0.5652, 0.6522,
+  0.5472, 0.5366, 0.6000, 0.8696,
+]
+
 [provenance]
 "symbol" = { kind = "declared", rationale = "continuous synthetic contract" }
 "price_precision" = { kind = "declared", rationale = "CME quote convention" }
@@ -187,7 +631,28 @@ open_windows = [
 "generator.symbol" = { kind = "declared", rationale = "generator key matches the instrument" }
 "generator.modal_tick" = { kind = "declared", rationale = "CME contract specification", accepted_diagnostics = ["outside-empirical-corpus-range"] }
 "generator.price_decimals" = { kind = "declared", rationale = "CME quote convention" }
-"generator.mean_event_duration_s" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.mean_event_duration_s" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg; contracts per parent from MNQ.v.0 TBBO 2026-07", window = "2025-08-19 through 2026-09-03, 260 full sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.cascade.texture_tau_minutes" = { kind = "declared", rationale = "five timescales from a quarter of a minute to ninety minutes, the grid the residual autocorrelation was decomposed on" }
+"generator.cascade.texture_weights" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.texture_amplitude" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.texture_exponent" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.level_tau_minutes" = { kind = "declared", rationale = "a session, a week and a month, the grid the day-to-day level autocorrelation was decomposed on" }
+"generator.cascade.level_weights" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.level_log_sd" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.sigma_level_exponent" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.sigma_level_log_sd" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.event_log_sigma" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.student_df" = { kind = "declared", rationale = "the per-parent innovation's tail; the minute tail is set by the jumps, and four is the shipped walk's value kept for the sweep-scale prints" }
+"generator.cascade.gap_median_ratio" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.gap_log_sd" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.gap_log_clamp_sd" = { kind = "declared", rationale = "the lognormal gap fits the real year through p99 and is too heavy past it; the year's largest gap, 56 times the median, is the 2.5-sigma point of the fitted law, so a draw beyond 2.75 describes nothing observed" }
+"generator.cascade.jumps_per_session" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.jump_size" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.jump_log_sd" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.jump_log_clamp_sd" = { kind = "declared", rationale = "the real open's largest minute in a year, 197 points, is the 2.6-sigma point of the fitted jump law; a draw beyond 2.75 describes nothing observed" }
+"generator.cascade.jump_volume_kick" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.jump_local_exponent" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"generator.cascade.side_persistence" = { kind = "declared", rationale = "aggressor sign memory placeholder pending the tbbo sign-autocorrelation fit" }
 "generator.children_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
 "generator.children_single_frac" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
 "generator.levels_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
@@ -215,4 +680,8 @@ open_windows = [
 "session.vol_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; per-parent trimmed mean absolute quote-mid return, median across sessions", window = "2026-07 full month, 22 usable sessions" }
 "calendar.utc_offset_minutes" = { kind = "declared", rationale = "permanent CDT model clock; DST transitions unmodelled, so CST sessions sit one UTC hour later than this table places them" }
 "calendar.settlement_minute_of_day" = { kind = "declared", rationale = "15:00 Central daily settlement" }
-"calendar.open_windows" = { kind = "declared", rationale = "published CME equity index civil hours, 17:00 to 16:00 with the 15:15 to 15:30 halt" }
+"calendar.open_windows" = { kind = "declared", rationale = "CME equity index civil hours, 17:00 to 16:00 Chicago with no intraday halt, as the exchange status feed records them" }
+"calendar.envelope.session_open_minute_of_day" = { kind = "declared", rationale = "17:00 Chicago session open" }
+"calendar.envelope.weekday_weight" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"calendar.envelope.volume" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
+"calendar.envelope.range" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }

@@ -178,9 +178,11 @@ instrument class is not a finding and does not need re-reporting.
 
   The intake half, formerly a separate entry: candidate symbols for the missing
   session classes are a perp like ETHUSDT.P, a second CME future like MGC, and
-  AAPL for cash-equity hours. Terabytes of DBN data are already downloaded on
-  another host, and the Databento account holds about twelve months of MNQ, ES
-  and MES tbbo plus mbp-1 server-side, re-fetchable by job id at no new cost.
+  AAPL for cash-equity hours. The Databento GLBX corpus is on disk on
+  `speilegg` under `/speilelg/databento`: about a year of `mbp-1`, `tbbo` and
+  `bbo`, 46 days of `mbo` and `mbp-10`, and bars since 2010, for 63 CME
+  parents; `analysis/tape-v2` indexes and reads it (see its README and
+  `notes/synthetic-tape-e0.md`).
   Whether BTC and ETH genuinely differ enough to warrant different values is
   unsettled - the measured 2.8x dispersion across three crypto majors suggests
   so, and one month of one venue cannot settle it. The evidence asymmetry stays
@@ -188,6 +190,56 @@ instrument class is not a finding and does not need re-reporting.
   MNQ and MES had 15-second bars and nothing else, so a CME preset's cadence is
   derived arithmetic and its clustering comes from nowhere. Re-derive the
   asymmetry from the DBN bulk download now on disk before repeating it.
+
+- **The lab's session frame carves a halt the exchange does not have.**
+  `mogwai_lab::session` and the `subcontract` constants put a 15:15 to 15:30
+  Chicago halt in every session and assert it is exactly fifteen minutes. The
+  exchange's `status` feed for ES on 2026-08-18 shows four transitions and no
+  halt; real MNQ prints through those minutes. The venue's MNQ calendar dropped
+  it at tape protocol 31. The lab frame did not: its observed pass drops the
+  real prints in that window as belonging to no usable session, and since 31
+  the generated pass (`measure12a::generated`) drops generated prints there for
+  symmetry, so every lab measurement excludes fifteen real minutes a session.
+  Fixing the frame moves the `overnight` and `post_halt` segment boundary and
+  every artifact keyed on it, which is the closed-arc deletion question above
+  in another form; do it with that ruling, not before. `reference/corpus-
+  formats.md` records the limit.
+
+- **The activity cascade (tape protocol 32) leaves these owed.** The MNQ
+  tape now matches the real year on volume texture, level, minute-return
+  sd, martingale behaviour, the largest moves per session and the reopen
+  gap distribution (`notes/synthetic-tape-e0.md` has the tables). What is
+  declared rather than fitted, or measured light, in order of what the eye
+  would meet first:
+  - The largest 20-minute move per session reads a tenth under real at
+    every quantile while the 2-minute one matches: the open's sustained
+    moves are slightly short. A weekend versus daily split of the real
+    reopen gaps has not been measured either; the pooled gap matches.
+  - `side_persistence` is a declared 0.6: the aggressor sign memory has a
+    TBBO fit waiting (`mogwai_lab::stream` reads it). Tier 2.
+  - Everything below a second is unverified against TBBO and mbo:
+    parents are placed uniformly inside a second, sweeps keep the July
+    child mixture, and no inter-event or sweep statistic has been compared.
+    Tier 1, and the programme's E2 and E5.
+  - The day-to-day level autocorrelation (0.78 at one session, 0.48 at
+    ten) is transcribed from the measurement but cannot be checked on
+    four-week seeds; a 52-week seed's level series against the real one
+    is the check.
+  - ES has its envelope measured and no cascade fit; its residuals and
+    price targets need the same two scripts run on its bars.
+  - On a cascade preset `vol_scalar`, the hourly session arrays and the
+    old walk's constants are inert but still required by the schema; an
+    override of `vol_scalar` is refused, the arrays are not. Retiring them
+    is part of the closed-arc ruling below.
+  - The closed-arc 12a measurement reads a synthetic `VolTrace` from the
+    cascade (no recursion, no rails); its numbers on MNQ describe the
+    cascade's per-parent sigma, not a GARCH state.
+
+- **ES has no preset and its envelope is measured.** The same E0 pass fitted
+  the ES envelope (`analysis/tape-v2/data/profile/ES-real-envelope.json`);
+  its shape differs from MNQ's, sharper open and a settlement spike three
+  times larger relative to its close phase. A preset needs the rest of the
+  intake sequence, not only L0.
 
 - **The 86 MB and 57 MB build tax, and the dead protocol code.**
   `analysis/mnq-measure-12a.json` is 86,147,079 bytes and is `include_str!`d at

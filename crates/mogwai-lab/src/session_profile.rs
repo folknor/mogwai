@@ -967,12 +967,14 @@ mod tests {
     }
 
     #[test]
-    fn the_mnq_calendar_merges_across_the_halt_but_not_the_break() {
+    fn the_mnq_calendar_has_five_unbroken_sessions_split_by_the_break() {
         let cal = Calendar::from_preset("MNQ").expect("the shipped preset");
-        // Five weekday cycles, each 17:00 -> 16:00 with the halt inside.
+        // Five weekday cycles, each 17:00 -> 16:00 with nothing carved out:
+        // the 15:15 halt left the preset at tape protocol 31, after the
+        // exchange's status feed showed it was never there.
         assert_eq!(cal.sessions().len(), 5);
         for minutes in cal.session_open_minutes() {
-            assert_eq!(minutes, 23 * 60 - 15);
+            assert_eq!(minutes, 23 * 60);
         }
     }
 

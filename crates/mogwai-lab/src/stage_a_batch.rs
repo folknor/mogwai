@@ -1164,18 +1164,19 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 30, which the manifest hashes over: the
+        // Re-blessed at tape protocol 31, which the manifest hashes over: the
         // constant is an input to the plan identity, so a bump moves this by
         // construction and the artifact and this literal move together. No
         // cell moved in that re-bless - the whole diff was the version field
-        // and the digest taken over it - which is the evidence that the panel
-        // itself is untouched even though the tape identity is not. The line
-        // below is the check that makes that claim falsifiable: the digest is
-        // recomputed from the parsed panel, so a cell that had moved could
-        // not agree with a literal transcribed from the old artifact.
+        // and the digest taken over it, written by the
+        // `rebless_stage_a_manifest` example - which is the evidence that the
+        // panel itself is untouched even though the tape identity is not. The
+        // line below is the check that makes that claim falsifiable: the
+        // digest is recomputed from the parsed panel, so a cell that had moved
+        // could not agree with a literal transcribed from the old artifact.
         assert_eq!(
             manifest.plan_sha256,
-            "e1322b89232c9072bfad1d32cc4d3d21510261394c4412d10fe4b5cd71d35e39"
+            "85d9b189f411b7e7a570def8f3e75885658c77f3b8ac2fe9d3c1d7e540ed0308"
         );
         assert_eq!(
             manifest.plan_sha256,

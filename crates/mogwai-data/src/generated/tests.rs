@@ -911,6 +911,7 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
         utc_offset_minutes: 0,
         open_windows: Vec::new(),
         settlement_minute_of_day: None,
+        envelope: None,
     };
     assert_eq!(
         GeneratedSource::try_new_with_session_profile(
@@ -1725,6 +1726,7 @@ fn cme_calendar() -> SessionCalendar {
         utc_offset_minutes: 0,
         open_windows,
         settlement_minute_of_day: Some(960),
+        envelope: None,
     }
 }
 

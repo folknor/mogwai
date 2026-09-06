@@ -313,6 +313,13 @@ pub struct GeneratorScalars {
     /// the generator retains the protocol-11 main-stream path byte for byte.
     #[serde(default)]
     pub arrival: Option<super::arrival::ArrivalConfig>,
+    /// The activity cascade, the synthetic tape v2 walk (tape protocol 32).
+    /// Present, it replaces the arrival clock, the GARCH mid and the
+    /// bounce/drift process for this instrument and requires a calendar with
+    /// an activity envelope. Absent, the fingerprint-fitted walk runs byte
+    /// for byte.
+    #[serde(default)]
+    pub cascade: Option<super::cascade::CascadeConfig>,
 }
 
 impl GeneratorScalars {
@@ -345,6 +352,7 @@ impl GeneratorScalars {
             depth_growth: super::quote::DepthGrowth::default(),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
+            cascade: None,
         }
     }
 
@@ -373,6 +381,7 @@ impl GeneratorScalars {
             depth_growth: super::quote::DepthGrowth::default(),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
+            cascade: None,
         }
     }
 
@@ -406,6 +415,7 @@ impl GeneratorScalars {
             depth_growth,
             trade_displacement_ticks,
             arrival: _,
+            cascade: _,
         } = self;
         [
             ("quoted_width", quoted_width.provenance()),
@@ -429,6 +439,17 @@ impl GeneratorScalars {
         }
         if self.arrival.is_some_and(|arrival| !arrival.is_valid()) {
             return Err(ScalarError::field("arrival"));
+        }
+        if let Some(cascade) = &self.cascade {
+            cascade.validate()?;
+            // The two mechanisms own the same clock; a preset that names both
+            // has not said which it means.
+            if self.arrival.is_some() {
+                return Err(ScalarError::detailed(
+                    "cascade",
+                    "cannot be combined with an arrival kernel",
+                ));
+            }
         }
         // A `Fitted` provenance whose corpus is blank claims a fit and names
         // nothing, so it is refused. The set of fields checked is fixed by

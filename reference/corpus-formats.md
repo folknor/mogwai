@@ -26,14 +26,25 @@ format is a defect to fix here, not a historical note to leave standing.
 ## CME session calendar
 
 The corrected calendar, established after an earlier one described a session CME
-does not publish: the session closes 16:00 Central, not 17:00; there is a halt
-from 15:15 to 15:30; the settlement minute is 900.
+does not publish: the session closes 16:00 Central, not 17:00; the settlement
+minute is 900.
+
+The lab's session frame (`mogwai_lab::session`) still carves a 15:15 to 15:30
+halt out of every session and asserts it is exactly fifteen minutes long. The
+exchange's own `status` feed shows no such halt: for ES on 2026-08-18 it records
+trading from 17:00, closed at 16:00, pre-open quoting at 16:45 and the
+no-cancel period at 16:59:30, and nothing between; real MNQ prints in every one
+of those fifteen minutes. The venue's MNQ preset dropped the halt at tape
+protocol 31. The lab frame is owed the same correction; until it lands, the
+lab's `overnight` and `post_halt` segments meet at a boundary the exchange
+does not have, and fifteen real minutes a session are excluded from every
+lab measurement.
 
 Two consequences that bite anything sampling real sessions:
 
-- A window overlapping the 15:15 halt carries the halt's hole. Nothing downstream
-  can detect it once the window is cut, so the refusal belongs at the window
-  table.
+- A window overlapping the lab frame's 15:15 halt carries the halt's hole.
+  Nothing downstream can detect it once the window is cut, so the refusal
+  belongs at the window table.
 - Civil-day arithmetic admits every day including weekends and holidays. What
   removes them is that they collect no prints, which means emptiness is doing a
   calendar's job. That fails on thin sessions: 2026-04-03 ny-morning is Good

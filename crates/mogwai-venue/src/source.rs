@@ -442,6 +442,19 @@ impl RiverKey {
                 window.end_minute.hash(&mut digest);
             }
             calendar.settlement_minute_of_day.hash(&mut digest);
+            if let Some(envelope) = &calendar.envelope {
+                envelope.session_open_minute_of_day.hash(&mut digest);
+                for value in envelope
+                    .weekday_weight
+                    .iter()
+                    .chain(&envelope.volume)
+                    .chain(&envelope.range)
+                {
+                    hash_f64(*value, &mut digest);
+                }
+            } else {
+                0_u8.hash(&mut digest);
+            }
         } else {
             0_u8.hash(&mut digest);
         }

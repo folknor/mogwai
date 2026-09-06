@@ -148,7 +148,18 @@ impl GeneratedAcc {
     }
 
     pub fn push_trade(&mut self, t: &TradeTick) -> LabResult<()> {
-        let in_window = t.ts_event >= self.start && t.ts_event < self.end;
+        // Measured means inside the window and inside a segment of the lab's
+        // session frame. The frame carves a 15:15 to 15:30 Chicago halt that
+        // the exchange does not have (its status feed shows none, and the
+        // venue's MNQ calendar stopped carving it at tape protocol 31), so a
+        // generated print can now land in a minute the frame calls closed.
+        // The observed pass drops the real prints in that minute because they
+        // resolve to no usable session; this pass drops the generated ones
+        // for the same reason, so the two sides of the measurement exclude
+        // the same fifteen minutes rather than one side refusing the tape.
+        let in_window = t.ts_event >= self.start
+            && t.ts_event < self.end
+            && session_segment_at(t.ts_event, self.offset).is_some();
         // Session rotation on the trade's own instant.
         if in_window && let Some(seg) = session_segment_at(t.ts_event, self.offset) {
             let rotate = self
@@ -259,11 +270,11 @@ impl GeneratedAcc {
         if parent.first_ts < self.start || parent.first_ts >= self.end {
             return Ok(());
         }
+        // A parent that opened in a minute the lab frame calls closed (its
+        // 15:15 halt, which the exchange does not have; see `push_trade`) is
+        // unmeasured, exactly as one that opened outside the window is.
         let Some(seg) = session_segment_at(parent.first_ts, self.offset) else {
-            return Err(LabError::refusal(format!(
-                "a measured parent at {} maps to no open segment",
-                parent.first_ts
-            )));
+            return Ok(());
         };
         let index = u8::from(seg.segment_origin_ns != seg.session_start_ns);
         let minute = parent.first_ts / NS_PER_MIN;

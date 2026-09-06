@@ -1581,6 +1581,7 @@ mod tests {
                 end_minute: 0,
             }],
             settlement_minute_of_day: Some(960),
+            envelope: None,
         };
         calendar.validate().expect("a valid always-open calendar");
         let start = 0u64;

@@ -771,6 +771,7 @@ mod reset_tests {
                 end_minute: 1_380,
             }],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         let refusal = daily_reset_refusal("WYRD-1", "ASIA", Some(&calendar), 1_020)
             .expect("the absent boundary must refuse");

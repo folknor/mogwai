@@ -1337,6 +1337,7 @@ mod tests {
                 end_minute: 120,
             }],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         let environment = env(Some(&calendar));
         let kernel = ArrivalKernel::WallMmpp(WallMmppParams {
@@ -1812,6 +1813,7 @@ mod tests {
                 },
             ],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         // The vector must describe a world the venue can hold. Version 1's V6
         // named a three-second closure on a minute-granular calendar and
@@ -1974,6 +1976,7 @@ mod tests {
                 },
             ],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         // Same reason as V6: version 1 named a `next_open_ns` of 100 ns, which
         // no calendar can produce, and only a re-implementation ever read it.
@@ -2416,6 +2419,7 @@ mod tests {
                 end_minute: 8_520,
             }],
             settlement_minute_of_day: None,
+            envelope: None,
         };
         calendar.validate().expect("valid weekly trading session");
         let environment = env(Some(&calendar));

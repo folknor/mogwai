@@ -39,6 +39,7 @@ use super::arrival::{
     ArrivalEnv, ArrivalKernel, ArrivalState, CadenceWalk, PendingReopen, RuntimeModifiers,
 };
 use super::calendar::SessionCalendar;
+use super::cascade::{CascadeRefusal, CascadeState, CascadeTables, SecondModifiers};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -74,6 +75,11 @@ pub struct GeneratedSource {
     arrival_state: Option<ArrivalState>,
     arrival_env: Option<ArrivalEnv>,
     cadence_rng: Option<ChaCha12Rng>,
+    // The activity cascade (tape protocol 32), present when the scalars carry
+    // `cascade`. The tables are immutable and shared with every checkpoint;
+    // the state is the walk's own and clones with it.
+    cascade: Option<Arc<CascadeTables>>,
+    cascade_state: Option<CascadeState>,
     fault: Option<TickFault>,
     pub(super) vol: GarchVol,
     session: SessionModulator,
@@ -478,6 +484,21 @@ impl GeneratedSource {
                 .validate()
                 .map_err(GeneratedSourceError::Calendar)?;
         }
+        let cascade = match (&scalars.cascade, &calendar) {
+            (Some(config), Some(calendar)) => Some(Arc::new(
+                CascadeTables::new(config, calendar, scalars.mean_event_duration_s)
+                    .map_err(GeneratedSourceError::Scalar)?,
+            )),
+            (Some(_), None) => {
+                return Err(GeneratedSourceError::Scalar(
+                    super::fingerprint::ScalarError::detailed(
+                        "cascade",
+                        "requires a calendar with an activity envelope",
+                    ),
+                ));
+            }
+            (None, _) => None,
+        };
         // Contextual, per the calendar-conditional contract. Without a calendar
         // the profile must still be the fraction/per-mean shares the legacy
         // arithmetic assumes, because that arithmetic is what runs. With one,
@@ -533,7 +554,7 @@ impl GeneratedSource {
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         let symbol = Arc::from(scalars.symbol.as_str());
-        Ok(Self {
+        let mut this = Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars: Arc::new(scalars),
             symbol,
@@ -552,6 +573,8 @@ impl GeneratedSource {
             arrival_state: cadence.state,
             arrival_env: cadence.env,
             cadence_rng: cadence.rng,
+            cascade,
+            cascade_state: None,
             fault: None,
             vol,
             session: SessionModulator::new(session, calendar.as_ref()),
@@ -597,7 +620,14 @@ impl GeneratedSource {
             rejected_repeat_draws: 0,
             #[cfg(test)]
             draw_stages: Vec::new(),
-        })
+        };
+        // The cascade's components start from their stationary law, which
+        // costs draws only on a cascade source: a calendar-less source takes
+        // exactly the draws it always did.
+        if let Some(tables) = this.cascade.clone() {
+            this.cascade_state = Some(CascadeState::new(&tables, &mut this.rng, start_ts));
+        }
+        Ok(this)
     }
 
     /// The simulated instant the generator has reached: the `ts_event` of the
@@ -1157,6 +1187,124 @@ impl GeneratedSource {
         };
     }
 
+    /// One parent under the activity cascade: the next parent the cascade
+    /// owes, the mid moved by its log move, the book placed on the mid, the
+    /// side the cascade drew, and the sweep from the declared child mixture.
+    /// No GARCH step, no bounce regime, no drift, no price repeat: the mid is
+    /// a martingale on the tick grid and the book follows it exactly.
+    fn begin_cascade_event(&mut self, materialize_quote: bool, rate_mult: f64, children_mult: f64) {
+        let tables = Arc::clone(self.cascade.as_ref().expect("cascade branch has tables"));
+        let mut state = self.cascade_state.take().expect("cascade branch has state");
+        if !state.has_parent() {
+            // A filled bucket owes at least one parent by construction, so
+            // one fill is one parent.
+            let modifiers = SecondModifiers {
+                rate_mult,
+                arrival_thin: self.regime.arrival_thin,
+                vol_mult: self.regime.vol_mult(self.clock_ns),
+            };
+            if let Err(CascadeRefusal::ClockExhausted) =
+                state.fill_next_bucket(&tables, &mut self.rng, self.clock_ns, modifiers)
+            {
+                self.cascade_state = Some(state);
+                self.fault = Some(TickFault::CascadeClockExhausted {
+                    clock_ns: self.clock_ns,
+                });
+                return;
+            }
+        }
+        let parent = state.draw_parent(&tables, &mut self.rng, self.clock_ns);
+        self.clock_ns = parent.ts_ns;
+        let mut log_move = parent.log_move;
+        // An armed `ReopenGap` is the unscheduled jump on top of the
+        // cascade's own scheduled ones: the halt moves the clock, the gap
+        // moves the mid, and the calendar stays authoritative over whether
+        // the halt's end may print.
+        if let Some(reopen) = self
+            .regime
+            .take_reopen_crossed(self.reopen_frontier_ns, self.clock_ns)
+        {
+            self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
+            log_move += reopen.gap_frac;
+            if let Some(calendar) = &self.calendar
+                && !calendar.is_open(self.clock_ns)
+            {
+                self.clock_ns = calendar.next_open_ns(self.clock_ns);
+            }
+            state.reset_bucket(self.clock_ns);
+        }
+        self.reopen_frontier_ns = self.clock_ns;
+        self.cascade_state = Some(state);
+        let mid_before = self.vol.mid;
+        self.vol.mid = (self.vol.mid * log_move.exp())
+            .max(self.tick_f64)
+            .min(MID_CEILING);
+        if self.vol_trace_enabled {
+            // The observation-only record, in the cascade's terms: there is
+            // no GARCH recursion, so the candidate and realized variances are
+            // both the second's per-parent variance and no rail can be hit;
+            // the session multiplier is the sigma shape the second carried,
+            // and the realized return is the whole move, jump and gap
+            // included, which is what moved the mid.
+            let sigma2 = parent.sigma * parent.sigma;
+            self.vol_trace = Some(VolTrace {
+                innovation_raw: parent.innovation,
+                innovation_std: parent.innovation,
+                sigma2_candidate: sigma2,
+                sigma2_realized: sigma2,
+                sigma_cap_hit: false,
+                garch_scale: parent.sigma,
+                base_return_unclipped: parent.sigma * parent.innovation,
+                base_return: parent.sigma * parent.innovation,
+                feedback_clamp_hit: false,
+                session_vol_mult: 1.0,
+                regime_vol_mult: self.regime.vol_mult(self.clock_ns),
+                pre_realized_return: log_move,
+                realized_return: log_move,
+                realized_clamp_hit: false,
+                mid_before,
+                mid_after: self.vol.mid,
+            });
+        }
+        let book = place_book(
+            self.vol.mid / self.tick_f64,
+            &self.scalars.quoted_width,
+            &self.scalars.top_sizes,
+        );
+        let aggressor = parent.side;
+        let price_ticks = match aggressor {
+            AggressorSide::Buyer => {
+                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::Seller => {
+                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::NoAggressor => unreachable!("the cascade only draws buyer or seller"),
+        }
+        .max(1.0);
+        let count = if children_mult == 1.0 {
+            self.shape.next_count(&mut self.rng)
+        } else {
+            self.shape.next_count_scaled(children_mult, &mut self.rng)
+        };
+        self.pending_quote = materialize_quote.then(|| QuoteTick {
+            symbol: Arc::clone(&self.symbol),
+            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
+            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_sz: book.bid_size,
+            ask_sz: book.ask_size,
+            ts_event: self.clock_ns,
+        });
+        self.last_book = Some(book);
+        self.burst = SweepBurst {
+            remaining: count,
+            emitted: 0,
+            parent_ts_ns: self.clock_ns,
+            side: aggressor,
+            price_ticks,
+        };
+    }
+
     fn begin_event(&mut self, materialize_quote: bool) {
         #[cfg(test)]
         self.draw_stages.clear();
@@ -1167,6 +1315,10 @@ impl GeneratedSource {
             .map_or((1.0, 1.0), |window| {
                 (window.rate_mult, window.children_mult)
             });
+        if self.cascade.is_some() {
+            self.begin_cascade_event(materialize_quote, rate_mult, children_mult);
+            return;
+        }
         if self.arrival_kernel.is_some() {
             self.begin_integrated_event(materialize_quote, rate_mult, children_mult);
             return;

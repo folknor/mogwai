@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 30; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 32; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -78,7 +78,51 @@ generator arms into river identity, so an arm forks water instead of mutating
 water already being read. Version 25 made composer termination a typed source
 fault while centralizing the route and divergence-kind registries. Version 26
 added named tape-window placement without putting the window coordinates into
-river identity.
+river identity. Version 27 made market-taking fills walk a synthetic depth
+ladder; 28 moved the default preset to a USD cash equity; 29 published the
+perpetual funding rate on the tape; 30 let a preset state only the generator
+scalars it knows.
+
+Version 31 is the first landing of tape research v2: the activity envelope. A
+calendar may carry a per-minute-of-session shape, `volume` and `range` arrays
+in the calendar's local frame with a weekday weight, and the modulator reads
+it in place of the hourly session curves wherever one is declared; the
+per-parent volatility multiplier is derived as range over the square root of
+volume, because a minute's range grows with the root of its arrivals. The MNQ
+preset declares one, fitted as the per-session-normalised median over 260 full
+sessions of the front month from Databento `ohlcv-1m`, so its cash open ignites
+at minute scale with the measured burst and decay, its reopens ramp, its
+settlement minute spikes, and its overnight sits at the measured share of the
+session. The same preset's calendar drops the 15:15 to 15:30 Chicago halt: the
+exchange's `status` feed records no such halt and real MNQ prints through those
+minutes. Level is not in the envelope; it is a slow regime that moves by a
+factor of several across months and belongs to the driver layer, which is why
+the generated level still runs above the real median while the shape matches.
+Overriding a hourly session curve on an enveloped bundle is refused at the
+config door, since the knob would be wired to nothing. Calendar-less presets
+are byte-identical: the hourly arithmetic is unchanged.
+
+Version 32 is the second landing of tape research v2: the activity cascade,
+a second walk inside `GeneratedSource` that a preset selects by carrying
+`[instrument.generator.cascade]`, which requires the envelope. On it the
+arrival clock, the GARCH mid and the bounce and drift process do not run.
+Arrivals are a Poisson count per second at a rate the envelope shapes and a
+multiplicative log-Gaussian cascade textures: independent
+Ornstein-Uhlenbeck components at timescales from fifteen seconds to a month,
+the minute-scale group carrying an amplitude that shrinks with activity, the
+day-scale group carrying the session level that moves by a factor of several
+across months. Each parent moves the log mid by a Student-t innovation whose
+scale is the envelope's range shape over the root of its volume shape, times
+a slow sigma level, so the minute variance follows the count; there is no
+drift, so the mid is a martingale at every horizon, as the real close series
+is. A jump component at a rate proportional to the parent rate makes the
+largest minute of a session, and every scheduled reopen applies a
+heavy-tailed gap at its first parent. The mechanism and every number's
+provenance are stated in `mogwai_data::generated::cascade` and in the MNQ
+preset, which declares it with its parent gap refit to the year's median
+session. Overriding `generator.vol_scalar` on a cascade bundle is refused at
+the config door for the same reason a session curve is under an envelope.
+Presets without the table keep the fingerprint-fitted walk byte for byte.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are
@@ -144,6 +188,11 @@ twice in one day before it was corrected.
 
 ## The generator's volatility process and its three rails
 
+This section describes the fingerprint-fitted walk, which every preset
+without `[instrument.generator.cascade]` runs. A cascade preset has no GARCH
+recursion and no bounce regime; its one rail is a bound on a single parent's
+log move, and its tails are the fitted jump and gap laws.
+
 The volatility innovation is standardized to unit variance before it reaches
 that recursion. The `a0` derivation has always assumed this, but the innovation
 was a raw Student-t whose variance is `df / (df - 2)`, so the true condition was
@@ -162,22 +211,27 @@ against a measured maximum-strength envelope, not a fitted market quantity: as a
 log return it permits about +5.13 and -4.88 percent in a single event, and it
 does not bound cumulative movement over many events.
 
-## Two structural fidelity limits no parameter can remove
+## Two structural fidelity limits of the fingerprint-fitted walk
 
-Two structural fidelity limits of the generated futures river are stated here
-because no parameter can remove them. First, the calendar-driven baseline has
-no automatic reopen jump: a real session reopen prints a discrete gap where
-the closed-hours information arrives at once, while the generated mid resumes
-its random walk from where it halted. An explicitly armed `ReopenGap`
-divergence can inject such a jump on a subscription's view, but the clean
-baseline river never produces one, so on it overnight gaps are absent and any
-large single-minute range the river does produce is a volatility-cluster tail
+Two structural fidelity limits of a futures river on the fingerprint-fitted
+walk are stated here because no parameter of that walk can remove them; the
+activity cascade removes both, and a cascade preset is not subject to either.
+First, the calendar-driven baseline of that walk has no automatic reopen
+jump: a real session reopen prints a discrete gap where the closed-hours
+information arrives at once, while that walk's mid resumes its random walk
+from where it halted. An explicitly armed `ReopenGap` divergence can inject
+such a jump on a subscription's view, but the clean baseline river of that
+walk never produces one, so on it overnight gaps are absent and any large
+single-minute range the river does produce is a volatility-cluster tail
 inside a session, not a reopen - a different phenomenology occurring at a
-different time of day. Second, the session profile modulates intensity and
-volatility by hourly factors, so within-hour structure (the opening minutes'
-concentration at the cash open, the settlement flurry) is smeared uniformly
-across each hour; the profile reproduces hour-scale contour, not
-minute-scale texture.
+different time of day. The cascade applies a fitted gap at every scheduled
+reopen, and `ReopenGap` on a cascade river is an unscheduled jump on top of
+the scheduled ones. Second, without an envelope the session profile
+modulates intensity and volatility by hourly factors, so within-hour
+structure (the opening minutes' concentration at the cash open, the
+settlement flurry) is smeared uniformly across each hour; the profile
+reproduces hour-scale contour, not minute-scale texture. An enveloped
+calendar carries the minute-of-session shape, on either walk.
 
 ## Fingerprint ranges diagnose; mechanism validation gates
 

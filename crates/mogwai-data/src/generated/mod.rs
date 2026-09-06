@@ -13,6 +13,10 @@
 //! - `regime` - the optional per-subscription market-regime overlay.
 //! - `dynamics` - the stateful arrival clock, GARCH latent vol and bounce/drift
 //!   price process the walk composes each tick.
+//! - `cascade` - the activity cascade, the synthetic tape v2 walk a preset
+//!   selects with `[instrument.generator.cascade]`; it replaces the arrival
+//!   clock, the GARCH mid and the bounce/drift process on that preset and
+//!   leaves every other preset on `dynamics`.
 //! - `numeric` - small numeric helpers (range checks, saturating decimal
 //!   conversion, round-lot snapping).
 //! - `source` - `GeneratedSource` itself, the `TickSource` the running venue
@@ -26,6 +30,7 @@
 
 mod arrival;
 mod calendar;
+mod cascade;
 mod checkpoint;
 mod consts;
 mod dynamics;
@@ -45,7 +50,8 @@ pub use arrival::{
     ParentDraw, PendingReopen, RuntimeModifiers, SelfExcitingParams, ShotNoiseParams,
     WallMmppParams,
 };
-pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
+pub use calendar::{CalendarError, SessionCalendar, SessionEnvelope, WeeklyWindow};
+pub use cascade::{CascadeConfig, MAX_CASCADE_COMPONENTS};
 pub use checkpoint::CheckpointIndex;
 /// The price-level ceiling, shared with `crate::segment` so the generator and
 /// the composer clamp against one constant rather than two encodings of one

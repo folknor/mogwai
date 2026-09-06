@@ -958,6 +958,19 @@ impl ParentSource for ParentWalk {
                     canonical_params: None,
                     seed: None,
                 },
+                // The screen drives the arrival families, never a cascade
+                // preset, so this is unreachable by construction too; named
+                // so the next source fault still breaks this build.
+                TickFault::CascadeClockExhausted { clock_ns } => ScreenRefusal {
+                    variant: "cascade.clock_exhausted".to_string(),
+                    clock_ns,
+                    detail: "an activity-cascade fault reached the arrival screen, which \
+                             drives only the arrival families"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
             }),
             Self::Kernel(walk) => {
                 let stride = walk.child_stride_ns();
@@ -1574,6 +1587,11 @@ fn project_walk(
         ));
     }
     scalars.arrival = Some(config);
+    // The screen ranks arrival families on the fingerprint-fitted walk. A
+    // preset that has moved to the activity cascade (MNQ, tape protocol 32)
+    // would refuse the pairing, so the cascade is set aside here: the walk
+    // under screen is the one the kernel drives, never the cascade.
+    scalars.cascade = None;
     let offset = i32::from(
         profile
             .calendar

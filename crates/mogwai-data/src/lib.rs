@@ -51,13 +51,14 @@ pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, AbsReturnAcf, AnchorRange, ArrivalConfig,
     ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk,
-    CalendarError, CalibrationProvenance, CheckpointIndex, DepthGrowth, DepthLevels,
+    CalendarError, CalibrationProvenance, CascadeConfig, CheckpointIndex, DepthGrowth, DepthLevels,
     EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars,
-    GoldenTargets, LogOuParams, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax,
-    ParentDraw, ParentSummary, PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers,
-    ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar, SessionProfile,
-    SessionProfileError, ShotNoiseParams, SizeGrid, SweepShape, TickTraversal, TopOfBookSizes,
-    TradeDisplacement, VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks, place_book,
+    GoldenTargets, LogOuParams, MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y,
+    MAX_MEAN_EVENT_DURATION_S, MinMedianMax, ParentDraw, ParentSummary, PendingReopen,
+    PublishedBook, QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError,
+    SelfExcitingParams, SessionCalendar, SessionEnvelope, SessionProfile, SessionProfileError,
+    ShotNoiseParams, SizeGrid, SweepShape, TickTraversal, TopOfBookSizes, TradeDisplacement,
+    VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
@@ -165,7 +166,28 @@ pub use trigger::{
 /// rather than owed - it costs one integer, no tape identity has ever been
 /// depended on, and a spent identity is cheaper than an argument about whether
 /// the next reader will agree the placement analysis was exhaustive.
-pub const TAPE_PROTOCOL_VERSION: u32 = 30;
+/// 31 gives a calendar an optional activity envelope: a per-minute-of-session
+/// arrival shape and range shape in the calendar's local frame, with a weekday
+/// weight, fitted from the corpus and standing in for the hourly session
+/// curves wherever a preset declares one. The MNQ preset declares one, and its
+/// calendar drops the 15:15 to 15:30 Chicago halt that the exchange's own
+/// status feed shows it never had, so every MNQ and MES tape moves: arrivals
+/// are shaped by minute of session instead of by UTC hour, the per-parent
+/// volatility follows range over the square root of volume, and seventy-five
+/// minutes a week that were closed now trade. Calendar-less presets are
+/// byte-identical: the hourly path's arithmetic is unchanged and the crypto
+/// lineage's protocol-9 oracle still holds.
+/// 32 lands the activity cascade, the synthetic tape v2 walk, as a second
+/// walk inside `GeneratedSource` selected by `[instrument.generator.cascade]`.
+/// Arrivals are a Poisson count per second at a rate the envelope shapes and
+/// a multi-scale log-Gaussian cascade textures; the mid is a martingale moved
+/// per parent by a Student-t innovation whose scale follows the count, with a
+/// jump component and a gap at every scheduled reopen; no GARCH state, no
+/// bounce regime, no drift. The MNQ preset declares it, so every MNQ and MES
+/// tape moves, and its `mean_event_duration_s` is refit to the year's median
+/// session. Presets without the table keep the fingerprint-fitted walk byte
+/// for byte, so the crypto lineage's protocol-9 oracle still holds.
+pub const TAPE_PROTOCOL_VERSION: u32 = 32;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -221,6 +243,11 @@ pub enum TickFault {
     /// Distance never produces this: a far target is a cost, not a fault.
     SegmentSeekUnreachable {
         target_ns: u64,
+    },
+    /// The activity cascade could not advance its clock: the calendar never
+    /// opens again, or the nanosecond epoch is exhausted.
+    CascadeClockExhausted {
+        clock_ns: u64,
     },
 }
 
