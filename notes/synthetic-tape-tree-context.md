@@ -522,6 +522,18 @@ document.
     that retired log-OU as an arrival mechanism is withdrawn at the minute
     scale: the v1 cells that failed carried a single timescale at the
     second level with a sigma several times the fitted one.
+12. Added 2026-09-06, tape protocol 33: the Tier 1 layer below the second
+    that amendment 11 left open is measured on the year's tbbo and landed.
+    The real placement inside a second is a branching process, a fifth of
+    all parent gaps under a millisecond at every hour and 100 ms bins
+    dispersed 2.7 to 4.0 times uniform, which a Hawkes-type excitation
+    under the cascade's rate gives and a Poisson count cannot; the real
+    sign memory is a power law, not a Markov chain, and the order-splitting
+    picture (Lillo, Mike and Farmer) lands it; and a CME multi-print sweep
+    is a multi-level sweep nine times in ten. What the measurement found
+    and did not land: the signed mid move after a parent is 0.48 ticks at
+    one parent and 0.66 at a hundred, permanent, and the cascade's mid is
+    independent of the side. `notes/synthetic-tape-micro.md` is the record.
 
 ---
 

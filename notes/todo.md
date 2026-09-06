@@ -205,22 +205,81 @@ instrument class is not a finding and does not need re-reporting.
   in another form; do it with that ruling, not before. `reference/corpus-
   formats.md` records the limit.
 
-- **The activity cascade (tape protocol 32) leaves these owed.** The MNQ
-  tape now matches the real year on volume texture, level, minute-return
-  sd, martingale behaviour, the largest moves per session and the reopen
-  gap distribution (`notes/synthetic-tape-e0.md` has the tables). What is
-  declared rather than fitted, or measured light, in order of what the eye
-  would meet first:
+- **The activity cascade (tape protocols 32 and 33) leaves these owed.**
+  The MNQ tape matches the real year on volume texture, level,
+  minute-return sd, martingale behaviour, the largest moves per session
+  and the reopen gap distribution (`notes/synthetic-tape-e0.md` has the
+  tables), and since protocol 33 on the layer below the second: the
+  sub-millisecond and hundred-millisecond clustering, the seconds inside
+  a minute, the aggressor sign memory and the sweep's level structure
+  (`notes/synthetic-tape-micro.md`, measured on the year's tbbo with
+  `analysis/tape-v2` micro-stats). What is declared rather than fitted,
+  or measured and left, in order of what a fill would meet first:
+  - The impact of a parent on the mid landed at protocol 34 as a
+    propagator (0.45, 0.63, 0.67 ticks at one, ten and a hundred parents
+    against 0.48, 0.65, 0.66 real). What it left: Asia and London carry
+    0.59 and 0.65 ticks at one parent where the tape gives 0.45 in every
+    phase, because a depletion moves the mid by half the spread and the
+    real spread is wider overnight (1 tick 21 percent of the time in Asia,
+    45 at the open) while the tape's book is two ticks always. Spread
+    dynamics is the item.
+  - The per-parent price change is more dispersed than real: the last
+    print moves zero ticks between consecutive parents 21 percent of the
+    time against 31 real, and three or more ticks 28 percent against 11.
+    A Student-t innovation on a continuous mid rounded to the grid is not
+    how a real touch moves; the real change is one tick or none because
+    the mid only moves when a level is depleted. A heavier tail at the same
+    variance was tried and does nothing (degrees of freedom three, one
+    seed: 22 and 27 percent); a discrete mid with the spread dynamics is
+    the mechanism.
+  - Inside a second the tape clusters at half the real strength at 10 ms
+    and 100 ms (dispersion 1.65 and 1.9 against 2.1 and 3.5) while it
+    matches the sub-millisecond share and the seconds inside a minute; the
+    normalised gap's consecutive autocorrelation is 0.14 against 0.31, its
+    tail runs long (p99 7.6 against 7.1), and the 10 s in 1 m dispersion
+    is a quarter high; the visible symptom is 48 silent 15-second bars
+    in a generated week's quiet hours where the real week has none, so
+    the fast texture or the one-second kernel is a little too willing
+    to go quiet. A fourth kernel between 10 ms and 100 ms and a
+    shorter fast texture are the next things to try; the grids in
+    `analysis/tape-v2/micro-grids/` show the scores.
+  - The sweep's print-count mixture has the wrong shape: two-print parents
+    are 5.2 percent against 6.3 real, three-print 2.2 against 1.2. The
+    two-parameter geometric mixture cannot carry a fast-falling pmf; a
+    direct pmf per child count would. The parent size's single-lot share
+    is 0.57 against 0.61 and its p99 12 against 15, the declared size law.
   - The largest 20-minute move per session reads a tenth under real at
     every quantile while the 2-minute one matches: the open's sustained
     moves are slightly short. A weekend versus daily split of the real
     reopen gaps has not been measured either; the pooled gap matches.
-  - `side_persistence` is a declared 0.6: the aggressor sign memory has a
-    TBBO fit waiting (`mogwai_lab::stream` reads it). Tier 2.
-  - Everything below a second is unverified against TBBO and mbo:
-    parents are placed uniformly inside a second, sweeps keep the July
-    child mixture, and no inter-event or sweep statistic has been compared.
-    Tier 1, and the programme's E2 and E5.
+  - The open's session-to-session spread is narrower than real at the
+    owner's scale (`analysis/tape-v2/open15.py`, the first cash hour on
+    15-second bars): the year's median 15-second bar runs 7.2 to 18.8
+    points from the p10 to the p90 session and the tape's 8.7 to 15.9,
+    travel 900 to 2400 against 1100 to 2000, while the medians, the p90
+    bar, the largest bar and the variance ratios all agree. Twenty
+    generated sessions against 270, so a 52-week seed is the check before
+    the sigma level's spread is touched.
+  - The `mbo` questions are still open: fills per level inside a sweep,
+    queue depletion at the touch, and the 46 days of order-level data have
+    not been read. The tbbo touch numbers stand in for now: a parent's
+    size reaches the touch it hit 54 percent of the time and walks through
+    it 8 percent, with a median touch of two to three contracts, none of
+    which the constant three-by-three book models.
+  - The corpus: speilegg, under `/speilelg/databento`, 2.4 TB indexed by
+    `tape-v2 index`: for 63 CME parents (the equity index, rates, FX,
+    energy, metals, ag and crypto futures), a year of `mbp-1`, `tbbo`,
+    `bbo-1s` and `bbo-1m` from 2025-08-19; 46 days of `mbo` and `mbp-10`
+    from 2026-07-20; `ohlcv-1s` through `ohlcv-1d`, `statistics`,
+    `status` and `definition` back to 2010; and a top-up daemon adding
+    each day. Every day file carries every parent, so a one-product read
+    decodes the whole day (three seconds for a tbbo day). The
+    `analysis/tape-v2` package runs there over ssh (its README) and
+    `sync.py pull` brings an artifact back; the host has 12 cores and 62
+    GB. The local `research/market-data/databento/mnqv/` copy is one
+    product's `tbbo` and `mbp-1` only, a fixture for `mogwai_lab::stream`,
+    not the corpus. The extracted MNQ prints and the month targets live on
+    speilegg under `Claude/tape-v2/data/micro/`.
   - The day-to-day level autocorrelation (0.78 at one session, 0.48 at
     ten) is transcribed from the measurement but cannot be checked on
     four-week seeds; a 52-week seed's level series against the real one

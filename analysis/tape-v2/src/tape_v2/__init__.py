@@ -75,6 +75,42 @@ def main(argv: list[str] | None = None) -> None:
     probe.add_argument("--parent", required=True)
     probe.add_argument("--day", required=True)
 
+    micro_extract = sub.add_parser(
+        "micro-extract",
+        help="cache a parent's front-month tbbo prints per day under data/micro",
+    )
+    micro_extract.add_argument("--parent", required=True)
+    micro_extract.add_argument("--first", required=True)
+    micro_extract.add_argument("--last", required=True)
+    micro_extract.add_argument("--workers", type=int, default=6)
+
+    micro_stats = sub.add_parser(
+        "micro-stats",
+        help="sub-minute targets from extracted tbbo (real) or a gen trades CSV",
+    )
+    micro_stats.add_argument("--parent", required=True)
+    micro_stats.add_argument(
+        "--label",
+        default="real",
+        help="`real` reads the extracted tbbo; anything else names a "
+        "candidate and needs --csv",
+    )
+    micro_stats.add_argument("--csv", nargs="*", type=Path)
+    micro_stats.add_argument("--first", default=None)
+    micro_stats.add_argument("--last", default=None)
+    micro_stats.add_argument(
+        "--tick", type=float, default=None, help="tick size of a candidate's prices"
+    )
+
+    micro_bars = sub.add_parser(
+        "micro-bars",
+        help="real bars at any interval from extracted tbbo, chart CSV shape",
+    )
+    micro_bars.add_argument("--parent", required=True)
+    micro_bars.add_argument("--first", required=True)
+    micro_bars.add_argument("--last", required=True)
+    micro_bars.add_argument("--interval", type=int, default=15, help="seconds")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "index":
@@ -121,3 +157,19 @@ def main(argv: list[str] | None = None) -> None:
         from .status_probe import status_probe
 
         status_probe(args.parent, args.day)
+    elif args.cmd == "micro-extract":
+        from .micro import extract_tbbo
+
+        extract_tbbo(args.parent, args.first, args.last, args.workers)
+    elif args.cmd == "micro-bars":
+        from .micro_bars import write_bars
+
+        write_bars(args.parent, args.first, args.last, args.interval)
+    elif args.cmd == "micro-stats":
+        from .micro_stats import run_stats
+
+        if args.label != "real" and not args.csv:
+            parser.error("a candidate needs --csv")
+        run_stats(
+            args.parent, args.label, args.csv or [], args.first, args.last, args.tick
+        )

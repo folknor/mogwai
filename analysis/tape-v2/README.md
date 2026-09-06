@@ -56,6 +56,24 @@ That folder is gitignored on both.
   preset's `[instrument.calendar.envelope]` block and its provenance
   entries from the real profile, to `data/profile/P-envelope.toml`;
   `splice_envelope.py PRESET BLOCK` puts it into a venue preset.
+- `micro-extract --parent P --first D --last D` caches the front month's
+  `tbbo` prints per day under `data/micro/tbbo/P/`, with the pre-trade
+  touch beside each print and prices on the tick grid. A day is three
+  seconds; the year is minutes with six workers.
+- `micro-bars --parent P --first D --last D --interval S` writes real
+  bars at any interval from the extracted prints in the chart CSV shape,
+  so `compare.py --interval S` can stack a 15-second real week beside a
+  generated one.
+- `micro-stats --parent P [--label L --csv ... --tick T]` computes the
+  sub-minute targets: the inter-parent gap law and the gap normalised by
+  the minute's own rate, the within-window dispersion at 10 ms, 100 ms,
+  1 s and 10 s, the sweep (children, levels, size, touch depletion), the
+  aggressor sign memory and run lengths, the per-parent price change,
+  the spread and the signed mid move after a parent. The real side runs
+  per calendar month, a candidate per seed CSV (gen trades, with `--tick`
+  and the preset's fixed clock), and a candidate run prints the real
+  median with its month-to-month p10 to p90 beside the candidate median,
+  flagged where the candidate sits outside the band.
 
 ## Scripts beside the package
 
@@ -83,4 +101,18 @@ That folder is gitignored on both.
 - `proto_engine.py` is the one-second prototype of the activity cascade
   the Rust engine transcribes, with `proto_martingale_probe.py` and
   `proto_efficiency_probe.py` as its component-by-component probes.
+- `proto_micro.py` is the prototype of the layer below the second: the
+  branching placement under the cascade's rate, the fast texture and the
+  order-splitting sign model, measured by `micro-stats`' own function and
+  scored against the real medians as a mean absolute log miss; `--grid`
+  scores a JSON list of placement configurations in one run, and
+  `micro-grids/` holds the two grids the protocol 33 fit was chosen from.
+- `proto_impact.py` fits the propagator, a parent's permanent and
+  transient impact on the mid, on the splitting sign model against the
+  real signed mid move at one, ten and a hundred parents; `--grid` scores
+  the parameter grid the protocol 34 values came from.
+- `open15.py` is the owner's-scale gate for the cash open: the first hour
+  on 15-second bars, per session, bar range quantiles, travel, hour range
+  and the variance ratios from 15 seconds to 15 minutes, real across the
+  year (`--real`, on the run host) or a gen 15-second bars CSV (`--csv`).
 - `sync.py` moves the project between the tree and the run host.

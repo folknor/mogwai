@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 32; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 34; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -123,6 +123,47 @@ preset, which declares it with its parent gap refit to the year's median
 session. Overriding `generator.vol_scalar` on a cascade bundle is refused at
 the config door for the same reason a session curve is under an envelope.
 Presets without the table keep the fingerprint-fitted walk byte for byte.
+
+Version 33 takes the cascade below the second, fitted on a year of MNQ
+`tbbo` (fourteen month blocks, 260 million prints) by `analysis/tape-v2`'s
+`micro-stats`, which measures real and generated prints by one definition:
+a parent is one `(ts_event, side)` run of prints. Three things changed. The
+placement: parents are a branching process under the cascade's rate, the
+immigrants a Poisson count per second at the rate times one minus the
+branching ratio, every parent spawning Poisson children at three
+exponential kernels (a fifth of a millisecond, thirty milliseconds, a
+second), plus a fast texture component at three seconds; the mean rate
+stays on the envelope, and the tape now carries the real sub-second
+clustering, a fifth of all parent gaps under a millisecond and
+hundred-millisecond bins dispersed two to four times uniform, where the
+protocol 32 placement was uniform inside a second by construction. The
+side: order splitting across live metaorders with a Pareto print count, in
+place of the declared Markov persistence, which gives the real sign
+autocorrelation of 0.15 at one parent that is still 0.01 at fifty. The
+sweep: the level step inside a multi-print sweep takes its solved
+probability, where the bounce regime's low multiplier, which never stepped
+on this path, had pinned it at a third; a multi-print parent now spans more
+than one level nine times in ten, as a CME trade summary does. Every knob's
+provenance is in the MNQ preset; the fit and its comparison tables are in
+`notes/synthetic-tape-micro.md`. Every MNQ and MES tape moves;
+calendar-less presets are byte-identical.
+
+Version 34 gives a parent an impact on the mid, a propagator. The real
+signed mid move after a parent, measured on the year's `tbbo`, is half a
+tick one parent later, two thirds at ten and the same at a hundred, in
+every phase: a buy lifts the mid, the lift grows as the same side keeps
+coming, and then it stays. The cascade's mid had ignored the side. Now a
+parent kicks the mid `impact_permanent_ticks + impact_transient_ticks` in
+its own direction and the transient part decays at
+`impact_transient_decay` per later parent; the growth of the response is
+the sign memory the splitting model carries, and its flatness past ten
+parents is the transient decaying against that memory. Below a minute the
+mid is therefore not a martingale, as the real one is not (the real
+variance ratio from fifteen seconds to fifteen minutes is 1.18); from a
+minute up it is, as before. The variance the term supplies over a minute
+is given up by `event_log_sigma`. The fit is `analysis/tape-v2/
+proto_impact.py` and the comparison is in `notes/synthetic-tape-micro.md`.
+Every MNQ and MES tape moves; calendar-less presets are byte-identical.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

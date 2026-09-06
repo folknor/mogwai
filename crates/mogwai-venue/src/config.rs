@@ -1918,11 +1918,21 @@ fn arrival_family_keys(family: &str) -> Option<&'static [&'static str]> {
 /// The keys of the `[instrument.generator.cascade]` table. Its type denies
 /// unknown fields itself, but the check here runs before the resolved
 /// instrument deserializes and names the table the operator wrote.
-const CASCADE_KEYS: [&str; 21] = [
+const CASCADE_KEYS: [&str; 30] = [
     "texture_tau_minutes",
     "texture_weights",
     "texture_amplitude",
     "texture_exponent",
+    "fast_texture_tau_s",
+    "fast_texture_log_sd",
+    "excitation_ratio",
+    "excitation_tau_s",
+    "sign_slots",
+    "sign_alpha",
+    "sign_repeat",
+    "impact_permanent_ticks",
+    "impact_transient_ticks",
+    "impact_transient_decay",
     "level_tau_minutes",
     "level_weights",
     "level_log_sd",
@@ -1939,7 +1949,6 @@ const CASCADE_KEYS: [&str; 21] = [
     "jump_log_clamp_sd",
     "jump_volume_kick",
     "jump_local_exponent",
-    "side_persistence",
 ];
 
 fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result<()> {
@@ -3662,9 +3671,15 @@ mod tests {
         // session (747 parents a minute at 1.98 contracts a parent) and no
         // longer the July artifact's 0.0609, which was the 1.7x level defect.
         assert_eq!(s.mean_event_duration_s, 0.08032128514056225);
-        assert_eq!(s.children_mean, 1.1711127211559897);
-        assert_eq!(s.children_single_frac, 0.9048983982868222);
-        assert_eq!(s.levels_mean, 1.1215513514243831);
+        // Tape protocol 33: the sweep shape is refit on the year's tbbo
+        // (median across fourteen month blocks, analysis/tape-v2
+        // micro-stats) and no longer the July artifact's 1.171, 0.905 and
+        // 1.122; levels_mean encodes the nine-in-ten multi-level share of a
+        // multi-print parent, which the July value understated by the
+        // bounce regime's low multiplier the cascade never stepped.
+        assert_eq!(s.children_mean, 1.159);
+        assert_eq!(s.children_single_frac, 0.914);
+        assert_eq!(s.levels_mean, 1.143);
         assert_eq!(s.start_price, Decimal::new(2828400, 2));
         assert_eq!(s.quoted_width.ticks().get(), 2);
         assert_eq!(s.top_sizes.bid, Decimal::from(3));
@@ -3731,9 +3746,6 @@ mod tests {
                 .contains("260 full sessions")
         );
         for path in [
-            "generator.children_mean",
-            "generator.children_single_frac",
-            "generator.levels_mean",
             "generator.start_price",
             "generator.quoted_width.ticks",
             "generator.top_sizes.bid",
@@ -3757,6 +3769,40 @@ mod tests {
             assert_eq!(
                 entry.get("window").and_then(toml::Value::as_str),
                 Some(window),
+                "{path}"
+            );
+        }
+        // Tape protocol 33: the sweep shape is fitted on the year's tbbo in
+        // month blocks, so its provenance names that corpus and window
+        // rather than the July job.
+        for path in [
+            "generator.children_mean",
+            "generator.children_single_frac",
+            "generator.levels_mean",
+        ] {
+            let entry = provenance
+                .get(path)
+                .and_then(toml::Value::as_table)
+                .unwrap();
+            assert_eq!(
+                entry.get("kind").and_then(toml::Value::as_str),
+                Some("fitted"),
+                "{path}"
+            );
+            assert!(
+                entry
+                    .get("corpus")
+                    .and_then(toml::Value::as_str)
+                    .unwrap()
+                    .contains("tbbo with definition"),
+                "{path}"
+            );
+            assert!(
+                entry
+                    .get("window")
+                    .and_then(toml::Value::as_str)
+                    .unwrap()
+                    .contains("fourteen month blocks"),
                 "{path}"
             );
         }

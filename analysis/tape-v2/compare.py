@@ -87,7 +87,7 @@ for (const pane of PANES) {
     rightPriceScale: { borderColor: '#2a2e39',
       scaleMargins: { top: 0.06, bottom: 0.28 } },
     timeScale: { borderColor: '#2a2e39', timeVisible: true,
-      secondsVisible: false },
+      secondsVisible: __SECONDS__ },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
   const candles = chart.addCandlestickSeries({
@@ -131,7 +131,8 @@ const pad = (n) => String(n).padStart(2, '0');
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function stamp(secs) {
   const d = new Date(secs * 1000);
-  return DAYS[d.getUTCDay()] + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+  const hm = DAYS[d.getUTCDay()] + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+  return __SECONDS__ ? hm + ':' + pad(d.getUTCSeconds()) : hm;
 }
 function describe(index) {
   if (index < 0 || index >= grid.length) return '';
@@ -164,6 +165,12 @@ def main(argv: list[str]) -> None:
     p.add_argument("--out", required=True, help="HTML to write")
     p.add_argument("--title", default="Tape comparison")
     p.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="bar interval in seconds; the shared grid steps by it",
+    )
+    p.add_argument(
         "panes",
         nargs="+",
         metavar="LABEL=CSV",
@@ -193,7 +200,7 @@ def main(argv: list[str]) -> None:
     # neighbouring bars and the hour that passed is invisible.
     first = min(traded[0][0]["time"] for _, traded in loaded if traded)
     last = max(traded[-1][0]["time"] for _, traded in loaded if traded)
-    grid = list(range(first, last + 60, 60))
+    grid = list(range(first, last + args.interval, args.interval))
     payload = []
     for label, traded in loaded:
         by_time = {c["time"]: (c, v) for c, v in traded}
@@ -232,6 +239,7 @@ def main(argv: list[str]) -> None:
         ("__META__", html.escape(meta)),
         ("__UP__", UP),
         ("__DOWN__", DOWN),
+        ("__SECONDS__", "true" if args.interval < 60 else "false"),
     ):
         page = page.replace(token, value)
     page = page.replace("__DATA__", json.dumps(payload, separators=(",", ":")))

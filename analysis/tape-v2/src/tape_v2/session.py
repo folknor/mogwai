@@ -66,17 +66,30 @@ def phase_expr(minute: pl.Expr) -> pl.Expr:
 
 
 def session_columns(
-    frame: pl.DataFrame, ts_col: str = "ts_event"
+    frame: pl.DataFrame,
+    ts_col: str = "ts_event",
+    utc_offset_minutes: int | None = None,
 ) -> pl.DataFrame:
     """Add session_date, weekday (1 = Monday), session_minute and phase.
 
-    `ts_col` is nanoseconds since the epoch, UTC.
+    `ts_col` is nanoseconds since the epoch, UTC. Real data is framed
+    through the Chicago zone; a generated tape is framed by the fixed
+    offset its preset's calendar declares (`utc_offset_minutes`, the
+    permanent CDT clock of the futures presets), because the generator
+    does not model the DST transition and its dates are the 1970 origin
+    where the zone would place the sessions an hour off.
     """
-    local = (
-        pl.from_epoch(pl.col(ts_col), time_unit="ns")
-        .dt.replace_time_zone("UTC")
-        .dt.convert_time_zone(CHICAGO)
-    )
+    if utc_offset_minutes is None:
+        local = (
+            pl.from_epoch(pl.col(ts_col), time_unit="ns")
+            .dt.replace_time_zone("UTC")
+            .dt.convert_time_zone(CHICAGO)
+        )
+    else:
+        local = pl.from_epoch(
+            pl.col(ts_col) + utc_offset_minutes * 60 * 1_000_000_000,
+            time_unit="ns",
+        )
     # `dt.hour()` and `dt.minute()` are Int8 in polars; hour * 60 overflows
     # it silently, so widen before any arithmetic.
     hour = local.dt.hour().cast(pl.Int32)

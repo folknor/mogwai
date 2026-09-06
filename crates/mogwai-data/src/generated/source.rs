@@ -39,7 +39,9 @@ use super::arrival::{
     ArrivalEnv, ArrivalKernel, ArrivalState, CadenceWalk, PendingReopen, RuntimeModifiers,
 };
 use super::calendar::SessionCalendar;
-use super::cascade::{CascadeRefusal, CascadeState, CascadeTables, SecondModifiers};
+use super::cascade::{
+    CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
+};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -1236,6 +1238,12 @@ impl GeneratedSource {
         self.reopen_frontier_ns = self.clock_ns;
         self.cascade_state = Some(state);
         let mid_before = self.vol.mid;
+        // The propagator (tape protocol 34): the parent's impact move in
+        // ticks, converted to a log move at the current mid and added to
+        // the cascade's diffusive move, jump and gap. The variance it adds
+        // over a minute is fitted out of `event_log_sigma` in the preset.
+        let impact_log = parent.impact_ticks * self.tick_f64 / mid_before.max(self.tick_f64);
+        log_move = (log_move + impact_log).clamp(-MAX_EVENT_LOG_MOVE, MAX_EVENT_LOG_MOVE);
         self.vol.mid = (self.vol.mid * log_move.exp())
             .max(self.tick_f64)
             .min(MID_CEILING);
@@ -1519,7 +1527,15 @@ impl GeneratedSource {
     }
 
     fn step_child(&mut self) -> ChildDraw {
-        let level_step_prob = if self.bounce.high_regime {
+        // The bounce regime never steps on the cascade path, so its low
+        // multiplier would pin the level step at a third of the fitted
+        // probability for good; the cascade takes the solved probability as
+        // it is (tape protocol 33). A real multi-print parent on CME is a
+        // multi-level parent nine times in ten, because a trade summary is
+        // one print per level.
+        let level_step_prob = if self.cascade.is_some() {
+            self.shape.level_step_prob
+        } else if self.bounce.high_regime {
             (self.shape.level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)
         } else {
             self.shape.level_step_prob * LOW_REGIME_LEVEL_STEP_MULT

@@ -45,9 +45,15 @@ price_decimals = 2
 # parents. The July value of 0.0609 was the protocol-31 level defect: a
 # tape 1.7 times the year's median in every phase.
 mean_event_duration_s = 0.08032128514056225
-children_mean = 1.1711127211559897
-children_single_frac = 0.9048983982868222
-levels_mean = 1.1215513514243831
+# Tape protocol 33: the sweep refit on the year's tbbo, median across
+# fourteen month blocks (`analysis/tape-v2` micro-stats). A parent is one
+# `(ts_event, side)` run of prints; 91.4 percent are one print, the mean
+# is 1.159, and a multi-print parent spans more than one level nine
+# times in ten (a CME trade summary is one print per level), which is
+# what levels_mean encodes: 1 + 0.9 * (children_mean - 1).
+children_mean = 1.159
+children_single_frac = 0.914
+levels_mean = 1.143
 # Structurally unidentifiable on the whole-contract grid at a one-lot
 # median (integral_lot is 1, both size arms materialize identically), so
 # it remains declared; the fit artifact records the moot branch with its
@@ -122,17 +128,63 @@ trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "
 #   63 at p90, 316 at p99, and the largest in the year is 541; the draw is
 #   clamped at 2.75 sds so the law's tail past what a year shows is not
 #   printed.
+# - Below the minute, tape protocol 33, fitted on the year's tbbo (260
+#   million prints in fourteen month blocks, `analysis/tape-v2` micro-stats
+#   and proto_micro.py). The real seconds inside a minute are dispersed 5.5
+#   times Poisson in Asia and 15 at the cash open, which a fast texture at
+#   three seconds with log-sd 0.45 gives on top of the minute texture (the
+#   prototype wanted 0.55 at a cash-open rate it had set a third low; the
+#   dispersion of a multiplicative texture grows with the rate, and the
+#   engine at the real rate lands the open's 15 at 0.45); and
+#   inside a second the real tape clusters where a Poisson placement is flat:
+#   a fifth of all parent gaps are under a millisecond at every hour, and
+#   100 ms bins are dispersed 2.7 to 4.0 times uniform. The branching below
+#   supplies that: every parent spawns children at a fifth of a millisecond
+#   (the engine's follow-on prints), thirty milliseconds and a second, with a
+#   total branching ratio of 0.6, so immigrants are 40 percent of parents.
+#   The fit is the mean absolute log miss over twelve gap, normalised-gap
+#   and dispersion statistics across Asia, London, the cash open and the
+#   close: 0.26 at this point, against 1.0 for the uniform placement of
+#   protocol 32, whose within-second dispersion is one by construction.
+# - The aggressor side has a slow memory: autocorrelation 0.147 at lag 1,
+#   0.069 at 2, 0.026 at 5, 0.018 at 10, 0.010 at 50, 0.007 at 100, a run
+#   of ten or more one time in ninety where the Markov chain at the same
+#   lag-1 gives one in a hundred and forty. Five live metaorders with a
+#   Pareto print count of exponent 2.2 and an 8 percent outright repeat
+#   land every one of those within the month-to-month spread.
 [instrument.generator.cascade]
 texture_tau_minutes = [0.25, 1.0, 5.0, 25.0, 90.0, 180.0]
 texture_weights = [0.46, 0.12, 0.16, 0.11, 0.03, 0.12]
 texture_amplitude = 0.54
 texture_exponent = 0.24
+fast_texture_tau_s = 3.0
+fast_texture_log_sd = 0.45
+excitation_ratio = [0.22, 0.08, 0.3]
+excitation_tau_s = [0.0002, 0.03, 1.0]
+sign_slots = 5
+sign_alpha = 2.2
+sign_repeat = 0.08
+# - Tape protocol 34: a parent's impact on the mid, a propagator. The
+#   real signed mid move after a parent is 0.48 ticks one parent later,
+#   0.65 at ten and 0.66 at a hundred, in every phase; before this the
+#   tape's mid ignored the side. A parent now kicks the mid 0.45 ticks its
+#   own way, of which 0.30 stays and 0.15 decays at 0.98 per later parent
+#   (`proto_impact.py` on the splitting sign model: response 0.45, 0.63
+#   and 0.68 at those lags). The growth from one to ten parents is the
+#   sign memory, the flatness past ten the transient decaying against it.
+#   The term supplies about a quarter of the open's minute variance and a
+#   sixth of Asia's, which event_log_sigma gives up below.
+impact_permanent_ticks = 0.3
+impact_transient_ticks = 0.15
+impact_transient_decay = 0.98
 level_tau_minutes = [420.0, 8640.0, 47520.0]
 level_weights = [0.2, 0.3, 0.5]
 level_log_sd = 0.34
 sigma_level_exponent = 0.57
 sigma_level_log_sd = 0.207
-event_log_sigma = 0.00000742
+# Protocol 34: 0.00000742 less the share the propagator supplies over a
+# minute, a tenth of the sd.
+event_log_sigma = 0.0000067
 student_df = 4.0
 gap_median_ratio = 1.2
 gap_log_sd = 1.6
@@ -143,7 +195,6 @@ jump_log_sd = 0.7
 jump_log_clamp_sd = 2.75
 jump_volume_kick = 1.5
 jump_local_exponent = 0.5
-side_persistence = 0.6
 # Intraday shape, refitted at protocol 11 from the July 2026 MNQ TBBO
 # month in the units the runtime actually applies (the protocol-8 NQ-bar
 # curves were per-minute quantities applied per parent event, which made
@@ -652,10 +703,19 @@ range = [
 "generator.cascade.jump_log_clamp_sd" = { kind = "declared", rationale = "the real open's largest minute in a year, 197 points, is the 2.6-sigma point of the fitted jump law; a draw beyond 2.75 describes nothing observed" }
 "generator.cascade.jump_volume_kick" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
 "generator.cascade.jump_local_exponent" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 ohlcv-1m with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, 260 full sessions" }
-"generator.cascade.side_persistence" = { kind = "declared", rationale = "aggressor sign memory placeholder pending the tbbo sign-autocorrelation fit" }
-"generator.children_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
-"generator.children_single_frac" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
-"generator.levels_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.cascade.fast_texture_tau_s" = { kind = "declared", rationale = "three seconds, the timescale between the branching kernels and the fifteen-second texture component; the seconds-in-a-minute dispersion selects the amplitude, not the timescale" }
+"generator.cascade.fast_texture_log_sd" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.excitation_ratio" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.excitation_tau_s" = { kind = "declared", rationale = "a fifth of a millisecond, thirty milliseconds and a second: the matching engine's follow-on, the reaction band and the second-scale cluster; the ratios were fitted on this grid" }
+"generator.cascade.sign_slots" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.sign_alpha" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.sign_repeat" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.impact_permanent_ticks" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.impact_transient_ticks" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.cascade.impact_transient_decay" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
+"generator.children_mean" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.children_single_frac" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.levels_mean" = { kind = "fitted", corpus = "MNQ front month, GLBX.MDP3 tbbo with definition, Databento batch corpus on speilegg", window = "2025-08-19 through 2026-09-03, fourteen month blocks" }
 "generator.size_round_frac" = { kind = "declared", rationale = "structurally unidentifiable on the whole-contract grid at a one-lot median; the fit artifact records the moot branch" }
 "generator.size_log_sigma" = { kind = "declared", rationale = "the joint size solve's best candidate; the family missed one frozen gate, generated p99 10 vs observed 8 with bound 9.6, so it cannot claim fitted" }
 "generator.start_price" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }

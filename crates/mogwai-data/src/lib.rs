@@ -187,7 +187,26 @@ pub use trigger::{
 /// tape moves, and its `mean_event_duration_s` is refit to the year's median
 /// session. Presets without the table keep the fingerprint-fitted walk byte
 /// for byte, so the crypto lineage's protocol-9 oracle still holds.
-pub const TAPE_PROTOCOL_VERSION: u32 = 32;
+/// 33 takes the cascade below the second, fitted on a year of MNQ `tbbo`
+/// (fourteen months, 260 million prints, measured by `analysis/tape-v2`'s
+/// `micro-stats`). Parents are a branching process under the cascade's
+/// rate: immigrants at the rate times one minus the branching ratio, every
+/// parent spawning children at three exponential kernels from a third of a
+/// millisecond to a second, plus a fast texture component at seconds; the
+/// aggressor side is order splitting across live metaorders with a Pareto
+/// print count in place of the declared Markov persistence; and the level
+/// step inside a sweep takes its fitted probability instead of the bounce
+/// regime's low multiplier, which never stepped on this path. Every MNQ and
+/// MES tape moves; calendar-less presets are byte-identical.
+/// 34 gives a parent an impact on the mid, a propagator: a parent kicks the
+/// mid a fitted number of ticks in its own direction, part of which stays
+/// and part decays at a fitted rate per later parent, so with the sign
+/// memory the splitting model carries the response grows from half a tick
+/// at one parent to two thirds at ten and stays there, as the year's `tbbo`
+/// shows; the protocol 33 tape's response was zero. The variance the term
+/// supplies over a minute is given up by `event_log_sigma`. Every MNQ and
+/// MES tape moves; calendar-less presets are byte-identical.
+pub const TAPE_PROTOCOL_VERSION: u32 = 34;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

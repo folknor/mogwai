@@ -24,17 +24,44 @@
 //!   one month twice as busy as another.
 //! - The parent rate in a second is the envelope's mean rate times
 //!   `exp(s * T - s^2 / 2 + level_sd * L)`, `T` and `L` the two cascade
-//!   sums; the count in the second is Poisson at that rate and the parents
-//!   are placed uniformly inside it. The centring term keeps the mean rate
-//!   on the envelope, and the envelope's median profile is lifted to its
-//!   mean profile by the same texture variance before it is normalised.
+//!   sums, times a fast texture: one more Ornstein-Uhlenbeck component at a
+//!   few seconds with its own log-sd, the swell inside a minute that the
+//!   minute-fitted texture cannot carry (real seconds inside one minute are
+//!   dispersed five to sixteen times Poisson). The centring terms keep the
+//!   mean rate on the envelope, and the envelope's median profile is lifted
+//!   to its mean profile by the texture variance before it is normalised.
+//! - Below the second the parents are a branching process under that rate
+//!   (tape protocol 33): immigrants arrive as a Poisson count per second at
+//!   the rate times `1 - n`, placed uniformly inside it, and every parent,
+//!   immigrant or child, spawns Poisson(`n_j`) children at exponential
+//!   offsets `tau_j` for each declared kernel, `n = sum n_j < 1`. The mean
+//!   rate stays on the envelope; what the branching adds is the clustering
+//!   the real tape shows inside a second, a fifth of all gaps under a
+//!   millisecond at any hour and hundred-millisecond bins dispersed two to
+//!   four times uniform. Children land in time order, may cross into later
+//!   seconds, and are dropped at a closure.
+//! - The aggressor side is order splitting: `sign_slots` metaorders are live
+//!   at once, each with a side and a remaining print count drawn from a
+//!   discrete Pareto tail of exponent `sign_alpha`; a parent repeats the
+//!   previous side with probability `sign_repeat`, else takes a uniformly
+//!   chosen slot's side and decrements it, an exhausted slot redrawing. This
+//!   is what gives the real sign memory, an autocorrelation of 0.13 at one
+//!   parent that is still 0.01 at fifty, which no Markov chain can.
+//! - A parent has an impact on the mid (tape protocol 34), a propagator:
+//!   it kicks the mid `permanent + transient` ticks in its own direction
+//!   and the transient part decays per later parent, which this module
+//!   hands the source as a move in ticks with each parent. With the sign
+//!   memory above, the response to a parent grows from half a tick to two
+//!   thirds over ten parents and stays, as the real one does.
 //! - Each parent moves the log mid by `sigma * t_nu`, a standardised
 //!   Student-t innovation, with `sigma = event_log_sigma * r / sqrt(v) *
 //!   level_sigma`. The minute variance then follows the count, which is the
 //!   time change the real range residual demands: its correlation with the
 //!   volume residual is 0.74 where the square-root law predicts 0.75. No
-//!   drift and no bounce regime: the mid is a martingale, as the real close
-//!   series is at every horizon from a minute to a session.
+//!   drift and no bounce regime: from a minute up the mid is a martingale,
+//!   as the real close series is at every horizon from a minute to a
+//!   session; below a minute the propagator above gives it the real
+//!   tape's short memory.
 //! - Jumps arrive at a rate proportional to the parent rate and move the mid
 //!   by a lognormal multiple of the reference minute sd. They are the news
 //!   component the summed innovations cannot make: the largest minute of a
@@ -42,8 +69,12 @@
 //! - Every scheduled reopen applies a gap, lognormal around the session's
 //!   sigma level, at the first parent after the closure.
 //!
-//! State is a dozen floats plus the current second's bucket, all `Clone`,
-//! so the checkpoint chain and the seek work unchanged.
+//! State is a dozen floats, the current second's bucket, the heap of
+//! children still owed and the sign slots, all `Clone`, so the checkpoint
+//! chain and the seek work unchanged.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use mogwai_protocol::AggressorSide;
 use rand::RngExt;
@@ -69,7 +100,22 @@ const MAX_PARENTS_PER_SECOND: f64 = 1_000_000.0;
 /// Bound on a single parent's log move, jump and gap included. Twenty
 /// percent in one event is far outside anything the fitted tails produce and
 /// keeps the mid finite under any declared configuration.
-const MAX_EVENT_LOG_MOVE: f64 = 0.2;
+pub(super) const MAX_EVENT_LOG_MOVE: f64 = 0.2;
+/// Ceiling on the excitation kernels a preset may declare.
+const MAX_EXCITATION_KERNELS: usize = 4;
+/// Ceiling on the total branching ratio. Past it the cluster sizes, whose
+/// mean is `1 / (1 - n)`, run into the hundreds and the process is a
+/// misconfiguration rather than a market.
+const MAX_BRANCHING_RATIO: f64 = 0.95;
+/// Ceiling on children owed and not yet printed. The stationary backlog at
+/// the busiest configured rate is a few hundred; a heap this deep means a
+/// runaway kernel, and the excess is dropped rather than grown.
+const MAX_PENDING_CHILDREN: usize = 65_536;
+/// Ceiling on a metaorder's print count, so a Pareto draw at a tiny uniform
+/// cannot pin one side for a session.
+const MAX_METAORDER_PRINTS: f64 = 1_000_000.0;
+/// Ceiling on the live metaorder slots.
+const MAX_SIGN_SLOTS: u32 = 64;
 
 /// The `[instrument.generator.cascade]` table. Every field is a knob with
 /// its own provenance entry in the preset.
@@ -86,6 +132,37 @@ pub struct CascadeConfig {
     pub texture_amplitude: f64,
     /// `gamma`: how the amplitude shrinks with the envelope's activity.
     pub texture_exponent: f64,
+    /// Timescale, seconds, of the fast texture: the rate's swell inside a
+    /// minute, independent of the minute-fitted texture above.
+    pub fast_texture_tau_s: f64,
+    /// Log-sd of the fast texture. Zero disables it.
+    pub fast_texture_log_sd: f64,
+    /// Branching ratio per excitation kernel, `n_j`: the mean children a
+    /// parent spawns at that kernel's timescale. Their sum is below one.
+    /// Empty declares no excitation: parents are the immigrants alone.
+    pub excitation_ratio: Vec<f64>,
+    /// Timescale, seconds, of each excitation kernel's exponential offset.
+    pub excitation_tau_s: Vec<f64>,
+    /// Live metaorders whose sides the parents draw from.
+    pub sign_slots: u32,
+    /// Tail exponent of a metaorder's print count, `P(L >= l) = l^-alpha`.
+    pub sign_alpha: f64,
+    /// Probability a parent repeats the previous parent's side outright
+    /// before consulting a slot.
+    pub sign_repeat: f64,
+    /// The propagator: a parent moves the mid by `permanent + transient`
+    /// ticks in its own direction, and the transient part decays at
+    /// `impact_transient_decay` per later parent, so the mid's impact
+    /// component after parent `k` is `permanent * sum(s) + transient * R`,
+    /// `R = decay * R + s`. With the sign memory the splitting model
+    /// carries, this gives the real response: half a tick one parent
+    /// later, growing to two thirds by ten as the same side keeps coming,
+    /// and flat past that as the transient decays against it. The variance
+    /// the term supplies over a minute is a share of the diffusive one and
+    /// is fitted out of `event_log_sigma`.
+    pub impact_permanent_ticks: f64,
+    pub impact_transient_ticks: f64,
+    pub impact_transient_decay: f64,
     /// Level timescales, minutes: a session, a week, a month.
     pub level_tau_minutes: Vec<f64>,
     pub level_weights: Vec<f64>,
@@ -132,8 +209,6 @@ pub struct CascadeConfig {
     /// minutes over 60 points carry twice the phase's median volume at the
     /// median and five times at p90.
     pub jump_volume_kick: f64,
-    /// Probability a parent takes the previous parent's aggressor side.
-    pub side_persistence: f64,
 }
 
 fn finite_nonnegative(value: f64) -> bool {
@@ -173,6 +248,49 @@ impl CascadeConfig {
         }
         if !self.texture_exponent.is_finite() || !(0.0..=2.0).contains(&self.texture_exponent) {
             return Err(ScalarError::detailed("cascade", "texture_exponent"));
+        }
+        if !self.fast_texture_tau_s.is_finite() || self.fast_texture_tau_s <= 0.0 {
+            return Err(ScalarError::detailed("cascade", "fast_texture_tau_s"));
+        }
+        if !finite_nonnegative(self.fast_texture_log_sd) || self.fast_texture_log_sd > 3.0 {
+            return Err(ScalarError::detailed("cascade", "fast_texture_log_sd"));
+        }
+        if self.excitation_ratio.len() != self.excitation_tau_s.len()
+            || self.excitation_ratio.len() > MAX_EXCITATION_KERNELS
+            || !self.excitation_ratio.iter().all(|n| finite_nonnegative(*n))
+            || !self
+                .excitation_tau_s
+                .iter()
+                .all(|tau| tau.is_finite() && *tau > 0.0)
+        {
+            return Err(ScalarError::detailed(
+                "cascade",
+                "excitation kernels need matching non-negative ratios and positive timescales",
+            ));
+        }
+        if self.excitation_ratio.iter().sum::<f64>() > MAX_BRANCHING_RATIO {
+            return Err(ScalarError::detailed(
+                "cascade",
+                "the excitation ratios sum past the branching ceiling",
+            ));
+        }
+        if self.sign_slots == 0 || self.sign_slots > MAX_SIGN_SLOTS {
+            return Err(ScalarError::detailed("cascade", "sign_slots"));
+        }
+        if !self.sign_alpha.is_finite() || self.sign_alpha <= 1.0 || self.sign_alpha > 10.0 {
+            return Err(ScalarError::detailed("cascade", "sign_alpha"));
+        }
+        if !self.sign_repeat.is_finite() || !(0.0..1.0).contains(&self.sign_repeat) {
+            return Err(ScalarError::detailed("cascade", "sign_repeat"));
+        }
+        if !finite_nonnegative(self.impact_permanent_ticks)
+            || self.impact_permanent_ticks > 10.0
+            || !finite_nonnegative(self.impact_transient_ticks)
+            || self.impact_transient_ticks > 10.0
+            || !self.impact_transient_decay.is_finite()
+            || !(0.0..1.0).contains(&self.impact_transient_decay)
+        {
+            return Err(ScalarError::detailed("cascade", "impact"));
         }
         if !finite_nonnegative(self.level_log_sd) || self.level_log_sd > 3.0 {
             return Err(ScalarError::detailed("cascade", "level_log_sd"));
@@ -218,10 +336,12 @@ impl CascadeConfig {
         {
             return Err(ScalarError::detailed("cascade", "jumps"));
         }
-        if !self.side_persistence.is_finite() || !(0.0..1.0).contains(&self.side_persistence) {
-            return Err(ScalarError::detailed("cascade", "side_persistence"));
-        }
         Ok(())
+    }
+
+    /// The total branching ratio: the share of parents that are children.
+    fn branching_ratio(&self) -> f64 {
+        self.excitation_ratio.iter().sum()
     }
 }
 
@@ -245,6 +365,9 @@ pub(super) struct CascadeParent {
     /// diffusive part of `log_move`, for the observation-only trace.
     pub(super) innovation: f64,
     pub(super) sigma: f64,
+    /// The propagator's move for this parent, in ticks: its own kick less
+    /// the decay of what earlier parents left in the transient register.
+    pub(super) impact_ticks: f64,
 }
 
 /// Why the cascade cannot draw another parent.
@@ -394,7 +517,18 @@ pub(super) struct CascadeState {
     /// At least one parent has been drawn, so a closure crossed from here on
     /// is a real reopen rather than the origin sitting inside one.
     started: bool,
+    /// The fast texture component.
+    fast: f64,
+    /// An immigrant drawn by order statistic and not yet printed, because
+    /// a child came first.
+    staged_immigrant_ns: Option<u64>,
+    /// Children owed by parents already printed, earliest first.
+    children: BinaryHeap<Reverse<u64>>,
+    /// The live metaorders: side and prints remaining.
+    slots: Vec<(AggressorSide, u32)>,
     last_side: AggressorSide,
+    /// The propagator's transient register: the decayed sum of past signs.
+    impact_register: f64,
 }
 
 impl CascadeState {
@@ -405,6 +539,15 @@ impl CascadeState {
         let texture = draw(rng, tables.texture_tau_s.len());
         let level = draw(rng, tables.level_tau_s.len());
         let sigma_extra = draw(rng, tables.level_tau_s.len());
+        let fast = tables.normal.sample(rng);
+        let slots = (0..tables.config.sign_slots)
+            .map(|_| {
+                (
+                    random_side(rng),
+                    metaorder_prints(rng, tables.config.sign_alpha),
+                )
+            })
+            .collect();
         let second_ns = start_ts / NS_PER_SECOND * NS_PER_SECOND;
         Self {
             texture,
@@ -419,27 +562,55 @@ impl CascadeState {
             pending_jump: 0.0,
             pending_gap: false,
             started: false,
+            fast,
+            staged_immigrant_ns: None,
+            children: BinaryHeap::new(),
+            slots,
             last_side: AggressorSide::Buyer,
+            impact_register: 0.0,
         }
     }
 
     /// Forget the current bucket: the clock has been moved past it by
-    /// something outside the cascade (an armed halt).
+    /// something outside the cascade (an armed halt). Children owed before
+    /// the new clock would have printed inside the halt, so they are gone.
     pub(super) fn reset_bucket(&mut self, clock_ns: u64) {
         self.remaining = 0;
+        self.staged_immigrant_ns = None;
+        self.drop_children_before(clock_ns);
         self.second_ns = clock_ns / NS_PER_SECOND * NS_PER_SECOND;
         self.filled = false;
     }
 
-    /// Whether a parent is still owed inside the current second.
+    /// Whether a parent is still owed inside the current second: an
+    /// immigrant not yet placed, one staged, or a child landing before the
+    /// second ends.
     pub(super) fn has_parent(&self) -> bool {
         self.remaining > 0
+            || self.staged_immigrant_ns.is_some()
+            || self
+                .next_child_ns()
+                .is_some_and(|ts| ts < self.window_end_ns)
+    }
+
+    fn next_child_ns(&self) -> Option<u64> {
+        self.children.peek().map(|Reverse(ts)| *ts)
+    }
+
+    fn drop_children_before(&mut self, clock_ns: u64) {
+        while self.next_child_ns().is_some_and(|ts| ts < clock_ns) {
+            self.children.pop();
+        }
     }
 
     fn step_components(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng, elapsed_s: f64) {
         for (y, tau) in self.texture.iter_mut().zip(&tables.texture_tau_s) {
             let rho = (-elapsed_s / tau).exp();
             *y = rho * *y + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
+        }
+        {
+            let rho = (-elapsed_s / tables.config.fast_texture_tau_s).exp();
+            self.fast = rho * self.fast + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
         }
         for (y, tau) in self.level.iter_mut().zip(&tables.level_tau_s) {
             let rho = (-elapsed_s / tau).exp();
@@ -510,6 +681,9 @@ impl CascadeState {
                 }
                 let elapsed_s = (reopen - self.second_ns) as f64 / NS_PER_SECOND as f64;
                 self.step_components(tables, rng, elapsed_s);
+                // Children owed inside the closure would print into it;
+                // the closure wins and they are dropped.
+                self.drop_children_before(reopen);
                 self.second_ns = reopen;
                 if self.started {
                     self.pending_gap = true;
@@ -538,10 +712,17 @@ impl CascadeState {
                 * tables.arrival[minute]
                 * tables.weekday[day]
                 * (config.level_log_sd * level_sum).exp();
-            let base_rate = slow_rate * (s * self.texture_sum(tables) - 0.5 * s * s).exp();
+            let fast_s = config.fast_texture_log_sd;
+            let base_rate = slow_rate
+                * (s * self.texture_sum(tables) - 0.5 * s * s + fast_s * self.fast
+                    - 0.5 * fast_s * fast_s)
+                    .exp();
             let rate = base_rate * modifiers.rate_mult / modifiers.arrival_thin;
             let window_s = (window_end - window_start) as f64 / NS_PER_SECOND as f64;
-            let count = poisson(rng, (rate * window_s).min(MAX_PARENTS_PER_SECOND));
+            // The immigrants: the branching fills the rest of the rate with
+            // children, so the mean count stays on the envelope.
+            let immigrant_rate = rate * (1.0 - config.branching_ratio());
+            let count = poisson(rng, (immigrant_rate * window_s).min(MAX_PARENTS_PER_SECOND));
             let level_sigma = self.level_sigma(tables);
             self.second_sigma = config.event_log_sigma
                 * tables.sigma_shape[minute]
@@ -582,10 +763,84 @@ impl CascadeState {
             self.remaining = count;
             self.next_from_ns = window_start;
             self.window_end_ns = window_end;
-            if count > 0 {
+            // A child owed before the window opens is one the clock has
+            // already passed; it prints at the window's first instant.
+            if self.has_parent() {
                 return Ok(());
             }
         }
+    }
+
+    /// The next immigrant's instant inside the current second, staged so a
+    /// child landing earlier can print first without disturbing the order
+    /// statistics that place the immigrants.
+    fn stage_immigrant(&mut self, rng: &mut ChaCha12Rng) -> Option<u64> {
+        if self.staged_immigrant_ns.is_none() && self.remaining > 0 {
+            // Sequential order statistics: with n parents left in the
+            // window, the next lands after a fraction 1 - u^(1/n) of what
+            // remains.
+            let n = f64::from(self.remaining);
+            let span = self.window_end_ns.saturating_sub(self.next_from_ns) as f64;
+            let u: f64 = rng.random();
+            let offset = span * (1.0 - u.powf(1.0 / n));
+            let ts_ns = self.next_from_ns.saturating_add(offset as u64);
+            self.next_from_ns = ts_ns;
+            self.remaining -= 1;
+            self.staged_immigrant_ns = Some(ts_ns);
+        }
+        self.staged_immigrant_ns
+    }
+
+    /// Spawn the children a parent at `ts_ns` owes: Poisson(`n_j`) per
+    /// kernel at exponential offsets. Children past the heap ceiling are
+    /// dropped, which only a runaway kernel reaches.
+    fn spawn_children(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng, ts_ns: u64) {
+        let config = &tables.config;
+        for (ratio, tau) in config.excitation_ratio.iter().zip(&config.excitation_tau_s) {
+            let count = poisson(rng, *ratio);
+            for _ in 0..count {
+                let u: f64 = rng.random();
+                let offset_s = -tau * (1.0 - u).ln();
+                let offset_ns = (offset_s * NS_PER_SECOND as f64).round();
+                if !offset_ns.is_finite() || self.children.len() >= MAX_PENDING_CHILDREN {
+                    continue;
+                }
+                let Some(child_ns) = ts_ns.checked_add(offset_ns as u64) else {
+                    continue;
+                };
+                self.children.push(Reverse(child_ns));
+            }
+        }
+    }
+
+    /// The propagator's move for a parent of `side`, in ticks, and the
+    /// register's step: the kick on its own sign less the decay of the
+    /// transient the earlier parents left.
+    fn impact_move(&mut self, tables: &CascadeTables, side: AggressorSide) -> f64 {
+        let config = &tables.config;
+        let sign = sign_of(side);
+        let decay = config.impact_transient_decay;
+        let previous = self.impact_register;
+        self.impact_register = decay * previous + sign;
+        (config.impact_permanent_ticks + config.impact_transient_ticks) * sign
+            - config.impact_transient_ticks * (1.0 - decay) * previous
+    }
+
+    /// The parent's aggressor side under the order-splitting model.
+    fn draw_side(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng) -> AggressorSide {
+        let config = &tables.config;
+        if config.sign_repeat > 0.0 && rng.random_bool(config.sign_repeat) {
+            return self.last_side;
+        }
+        let k = rng.random_range(0..self.slots.len());
+        let (side, remaining) = &mut self.slots[k];
+        if *remaining == 0 {
+            *side = random_side(rng);
+            *remaining = metaorder_prints(rng, config.sign_alpha);
+        }
+        *remaining -= 1;
+        self.last_side = *side;
+        *side
     }
 
     /// Draw the next parent of the current second. Requires `has_parent`.
@@ -595,20 +850,27 @@ impl CascadeState {
         rng: &mut ChaCha12Rng,
         clock_ns: u64,
     ) -> CascadeParent {
-        debug_assert!(self.remaining > 0, "draw_parent needs a filled bucket");
+        debug_assert!(self.has_parent(), "draw_parent needs a filled bucket");
         let config = &tables.config;
-        // Sequential order statistics: with n parents left in the window,
-        // the next lands after a fraction 1 - u^(1/n) of what remains.
-        let n = f64::from(self.remaining);
-        let span = self.window_end_ns.saturating_sub(self.next_from_ns) as f64;
-        let u: f64 = rng.random();
-        let offset = span * (1.0 - u.powf(1.0 / n));
-        let ts_ns = self
-            .next_from_ns
-            .saturating_add(offset as u64)
-            .max(clock_ns.saturating_add(INTRA_EVENT_STEP_NS));
-        self.next_from_ns = ts_ns;
-        self.remaining -= 1;
+        let immigrant = self.stage_immigrant(rng);
+        let child = self.next_child_ns().filter(|ts| *ts < self.window_end_ns);
+        let raw_ns = match (immigrant, child) {
+            (Some(i), Some(c)) if c <= i => {
+                self.children.pop();
+                c
+            }
+            (None, Some(c)) => {
+                self.children.pop();
+                c
+            }
+            (Some(i), _) => {
+                self.staged_immigrant_ns = None;
+                i
+            }
+            (None, None) => unreachable!("has_parent held"),
+        };
+        let ts_ns = raw_ns.max(clock_ns.saturating_add(INTRA_EVENT_STEP_NS));
+        self.spawn_children(tables, rng, ts_ns);
 
         let innovation =
             draw_student_t(rng, &tables.normal, &tables.chi_squared) / tables.student_scale;
@@ -631,20 +893,40 @@ impl CascadeState {
             log_move += sign * magnitude;
         }
         self.started = true;
-        if !rng.random_bool(config.side_persistence) {
-            self.last_side = match self.last_side {
-                AggressorSide::Buyer => AggressorSide::Seller,
-                AggressorSide::Seller | AggressorSide::NoAggressor => AggressorSide::Buyer,
-            };
-        }
+        let side = self.draw_side(tables, rng);
+        let impact_ticks = self.impact_move(tables, side);
         CascadeParent {
             ts_ns,
             log_move: log_move.clamp(-MAX_EVENT_LOG_MOVE, MAX_EVENT_LOG_MOVE),
-            side: self.last_side,
+            side,
             innovation,
             sigma: self.second_sigma,
+            impact_ticks,
         }
     }
+}
+
+fn sign_of(side: AggressorSide) -> f64 {
+    match side {
+        AggressorSide::Buyer => 1.0,
+        AggressorSide::Seller => -1.0,
+        AggressorSide::NoAggressor => 0.0,
+    }
+}
+
+fn random_side(rng: &mut ChaCha12Rng) -> AggressorSide {
+    if rng.random_bool(0.5) {
+        AggressorSide::Buyer
+    } else {
+        AggressorSide::Seller
+    }
+}
+
+/// A metaorder's print count: discrete Pareto, `P(L >= l) = l^-alpha`.
+fn metaorder_prints(rng: &mut ChaCha12Rng, alpha: f64) -> u32 {
+    let u: f64 = rng.random();
+    let draw = (1.0 - u).powf(-1.0 / alpha).floor();
+    draw.clamp(1.0, MAX_METAORDER_PRINTS) as u32
 }
 
 fn poisson(rng: &mut ChaCha12Rng, lambda: f64) -> u32 {
@@ -669,6 +951,16 @@ mod tests {
             texture_weights: vec![0.52, 0.135, 0.18, 0.15, 0.015],
             texture_amplitude: 0.54,
             texture_exponent: 0.24,
+            fast_texture_tau_s: 3.0,
+            fast_texture_log_sd: 0.55,
+            excitation_ratio: vec![0.2, 0.1, 0.3],
+            excitation_tau_s: vec![0.0003, 0.03, 1.0],
+            sign_slots: 5,
+            sign_alpha: 2.2,
+            sign_repeat: 0.08,
+            impact_permanent_ticks: 0.3,
+            impact_transient_ticks: 0.15,
+            impact_transient_decay: 0.98,
             level_tau_minutes: vec![420.0, 8640.0, 47520.0],
             level_weights: vec![0.2, 0.3, 0.5],
             level_log_sd: 0.34,
@@ -685,7 +977,6 @@ mod tests {
             jump_log_clamp_sd: 2.75,
             jump_volume_kick: 1.5,
             jump_local_exponent: 0.5,
-            side_persistence: 0.6,
         }
     }
 
@@ -777,10 +1068,11 @@ mod tests {
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = CascadeTables::new(&config, &calendar, 0.08).unwrap();
         let mut rng = ChaCha12Rng::seed_from_u64(7);
-        // Thursday 1970-01-01 is local day 4. Start one second before the
-        // Thursday 16:00 close so the first parent lands before it and the
-        // second crosses the maintenance hour.
-        let start = 959 * NS_PER_MINUTE + 59 * NS_PER_SECOND;
+        // Thursday 1970-01-01 is local day 4. Start ten seconds before the
+        // Thursday 16:00 close so parents certainly land before it (a
+        // single second can draw an empty count under a low texture) and
+        // the walk then crosses the maintenance hour.
+        let start = 959 * NS_PER_MINUTE + 50 * NS_PER_SECOND;
         let mut state = CascadeState::new(&tables, &mut rng, start);
         let modifiers = SecondModifiers {
             rate_mult: 1.0,
@@ -788,8 +1080,12 @@ mod tests {
             vol_mult: 1.0,
         };
         let mut clock = start;
-        let mut parents = Vec::new();
-        while parents.len() < 3 {
+        let mut parents: Vec<CascadeParent> = Vec::new();
+        let reopen_ns = 1_020 * NS_PER_MINUTE;
+        // Walk until two parents have printed past the reopen: the last
+        // second before the close holds a dozen parents and their children,
+        // and the closure sits between them and the first reopened one.
+        while parents.iter().filter(|p| p.ts_ns >= reopen_ns).count() < 2 {
             if !state.has_parent() {
                 state
                     .fill_next_bucket(&tables, &mut rng, clock, modifiers)
@@ -802,15 +1098,194 @@ mod tests {
         // The gap is fifty reference sds and the ordinary move is a fraction
         // of one, so the first parent after the reopen is unmistakable.
         let threshold = 10.0 * tables.reference_log_sd;
-        let reopen_ns = 1_020 * NS_PER_MINUTE;
         let after: Vec<_> = parents.iter().filter(|p| p.ts_ns >= reopen_ns).collect();
         let before: Vec<_> = parents.iter().filter(|p| p.ts_ns < reopen_ns).collect();
-        assert!(!after.is_empty() && !before.is_empty());
+        assert!(
+            !after.is_empty() && !before.is_empty(),
+            "before {} after {} first {:?}",
+            before.len(),
+            after.len(),
+            parents.first().map(|p| p.ts_ns)
+        );
         assert!(after[0].log_move.abs() > threshold, "{:?}", after[0]);
         assert!(after[1..].iter().all(|p| p.log_move.abs() < threshold));
         assert!(before.iter().all(|p| p.log_move.abs() < threshold));
         // Nothing printed inside the closure.
         assert!(parents.iter().all(|p| calendar.is_open(p.ts_ns)));
+    }
+
+    /// Walk parents from `start` until `end`, returning them in order.
+    fn walk(config: &CascadeConfig, seed: u64, start: u64, end: u64) -> Vec<CascadeParent> {
+        let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
+        let tables = CascadeTables::new(config, &calendar, 0.08).unwrap();
+        let mut rng = ChaCha12Rng::seed_from_u64(seed);
+        let mut state = CascadeState::new(&tables, &mut rng, start);
+        let modifiers = SecondModifiers {
+            rate_mult: 1.0,
+            arrival_thin: 1.0,
+            vol_mult: 1.0,
+        };
+        let mut clock = start;
+        let mut parents = Vec::new();
+        loop {
+            if !state.has_parent() {
+                state
+                    .fill_next_bucket(&tables, &mut rng, clock, modifiers)
+                    .unwrap();
+            }
+            let parent = state.draw_parent(&tables, &mut rng, clock);
+            if parent.ts_ns >= end {
+                break;
+            }
+            assert!(parent.ts_ns > clock, "{} after {clock}", parent.ts_ns);
+            clock = parent.ts_ns;
+            parents.push(parent);
+        }
+        parents
+    }
+
+    #[test]
+    fn excitation_keeps_the_mean_rate_on_the_envelope() {
+        // Sixty percent of parents are children, and the immigrant rate is
+        // thinned by the same share, so the count over ten hours is the
+        // configured one within the texture's own spread.
+        let mut config = config();
+        config.level_log_sd = 0.0;
+        config.sigma_level_log_sd = 0.0;
+        config.jumps_per_session = 0.0;
+        let start = 1_020 * NS_PER_MINUTE;
+        let parents = walk(&config, 11, start, start + 600 * NS_PER_MINUTE);
+        let expected = 12.5 * 600.0 * 60.0;
+        let ratio = parents.len() as f64 / expected;
+        assert!((0.9..1.1).contains(&ratio), "ratio {ratio}");
+        // And the branching is visible: a fifth of the gaps are under a
+        // millisecond, which a Poisson placement at twelve a second cannot
+        // reach (its share is one percent).
+        let short = parents
+            .windows(2)
+            .filter(|w| w[1].ts_ns - w[0].ts_ns < 1_000_000)
+            .count();
+        let share = short as f64 / parents.len() as f64;
+        assert!(
+            (0.12..0.30).contains(&share),
+            "sub-millisecond share {share}"
+        );
+    }
+
+    #[test]
+    fn children_never_print_inside_a_closure() {
+        // A one-second kernel at a high ratio owes children well past the
+        // Friday close; every parent still lands on an open minute.
+        let mut config = config();
+        config.excitation_ratio = vec![0.9];
+        config.excitation_tau_s = vec![5.0];
+        config.jumps_per_session = 0.0;
+        let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
+        // Friday 1970-01-02 is local day 5: start a minute before its 16:00
+        // close and walk into the Sunday reopen.
+        let start = (1_440 + 959) * NS_PER_MINUTE;
+        let parents = walk(&config, 5, start, start + 3 * 1_440 * NS_PER_MINUTE);
+        assert!(parents.iter().all(|p| calendar.is_open(p.ts_ns)));
+        let reopen = (3 * 1_440 + 1_020) * NS_PER_MINUTE;
+        assert!(
+            parents.iter().any(|p| p.ts_ns >= reopen),
+            "walked past the reopen"
+        );
+    }
+
+    #[test]
+    fn sides_carry_the_splitting_memory() {
+        // Five slots and an eight percent repeat put the same-side share
+        // near 0.57, and runs of ten or more happen more often than the
+        // Markov chain at that share allows.
+        let mut config = config();
+        config.jumps_per_session = 0.0;
+        let start = 1_020 * NS_PER_MINUTE;
+        let parents = walk(&config, 3, start, start + 300 * NS_PER_MINUTE);
+        let same = parents
+            .windows(2)
+            .filter(|w| w[0].side == w[1].side)
+            .count() as f64
+            / (parents.len() - 1) as f64;
+        assert!((0.53..0.62).contains(&same), "same-side share {same}");
+        let mut runs = Vec::new();
+        let mut run = 1_usize;
+        for w in parents.windows(2) {
+            if w[0].side == w[1].side {
+                run += 1;
+            } else {
+                runs.push(run);
+                run = 1;
+            }
+        }
+        let long = runs.iter().filter(|r| **r >= 10).count() as f64 / runs.len() as f64;
+        let markov = same.powi(9);
+        assert!(
+            long > 1.3 * markov,
+            "long runs {long} against markov {markov}"
+        );
+    }
+
+    #[test]
+    fn the_propagator_kicks_with_the_side_and_the_transient_reverts() {
+        // Summed over the walk the transient part cancels, so the impact
+        // component's drift is the permanent kick on the net sign; and a
+        // parent's own move is in its own direction by the full kick less
+        // a bounded decay of what came before.
+        let mut config = config();
+        config.jumps_per_session = 0.0;
+        let start = 1_020 * NS_PER_MINUTE;
+        let parents = walk(&config, 9, start, start + 300 * NS_PER_MINUTE);
+        let kick = config.impact_permanent_ticks + config.impact_transient_ticks;
+        let own = parents
+            .iter()
+            .map(|p| p.impact_ticks * sign_of(p.side))
+            .sum::<f64>()
+            / parents.len() as f64;
+        assert!(
+            (0.8 * kick..=kick).contains(&own),
+            "own-direction move {own} against kick {kick}"
+        );
+        let net_sign: f64 = parents.iter().map(|p| sign_of(p.side)).sum();
+        let total: f64 = parents.iter().map(|p| p.impact_ticks).sum();
+        let permanent = config.impact_permanent_ticks * net_sign;
+        // The transient register is bounded by 1 / (1 - decay), so the
+        // total can differ from the permanent drift by at most that many
+        // transient ticks.
+        let bound = config.impact_transient_ticks / (1.0 - config.impact_transient_decay) + 1.0;
+        assert!(
+            (total - permanent).abs() <= bound,
+            "total {total} permanent {permanent}"
+        );
+        assert!(net_sign.abs() > 100.0, "the sign memory leaves a net sign");
+    }
+
+    #[test]
+    fn excitation_and_sign_configs_are_validated() {
+        let mut bad = config();
+        bad.excitation_ratio = vec![0.5, 0.5];
+        bad.excitation_tau_s = vec![0.1, 1.0];
+        assert!(bad.validate().is_err(), "ratios summing to one");
+        let mut bad = config();
+        bad.excitation_tau_s.pop();
+        assert!(bad.validate().is_err(), "mismatched kernels");
+        let mut bad = config();
+        bad.sign_slots = 0;
+        assert!(bad.validate().is_err(), "no slots");
+        let mut bad = config();
+        bad.sign_alpha = 1.0;
+        assert!(bad.validate().is_err(), "infinite-mean metaorder");
+        let mut bad = config();
+        bad.sign_repeat = 1.0;
+        assert!(bad.validate().is_err(), "repeat forever");
+        let mut fine = config();
+        fine.excitation_ratio.clear();
+        fine.excitation_tau_s.clear();
+        fine.fast_texture_log_sd = 0.0;
+        assert!(
+            fine.validate().is_ok(),
+            "no excitation and no fast texture is a valid preset"
+        );
     }
 
     #[test]

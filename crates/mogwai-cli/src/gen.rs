@@ -1147,6 +1147,127 @@ mod tests {
     }
 
     #[test]
+    fn a_cascade_sweep_steps_levels_at_the_fitted_probability() {
+        // Tape protocol 33: on the cascade path the level step inside a
+        // sweep takes the solved probability as it is. The MNQ preset's
+        // children_mean 1.159 and levels_mean 1.143 solve to a 0.9 step per
+        // extra child, so a multi-print sweep spans more than one level
+        // about nine times in ten, as the real tbbo year shows. Under the
+        // bounce regime's low multiplier, which never steps on this path,
+        // the share sat at 0.27 for good.
+        let args = GenArgs {
+            kind: GenType::Trades,
+            length: "1d".to_string(),
+            interval: None,
+            symbol: "MNQ".to_string(),
+            seed: Some(3),
+            start: 0,
+            start_price: None,
+            config: None,
+            burn_in: None,
+            trace_from: None,
+            trace_until: None,
+            regime: None,
+            havoc: None,
+            out: None,
+        };
+        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        let mut source = build_source(&args, &profile, args.start).expect("MNQ source");
+        // Group the prints into sweeps by the generator's own stamp: a child
+        // sits one microsecond after the previous print of the same side.
+        let mut sweeps: Vec<(u64, mogwai_protocol::AggressorSide, Vec<Decimal>)> = Vec::new();
+        let mut prints = 0;
+        while prints < 60_000 {
+            let Some(mogwai_data::TickEvent::Trade(trade)) = source.next_tick() else {
+                continue;
+            };
+            prints += 1;
+            match sweeps.last_mut() {
+                Some((last_ts, side, prices))
+                    if *side == trade.aggressor && trade.ts_event - *last_ts <= 10_000 =>
+                {
+                    *last_ts = trade.ts_event;
+                    prices.push(trade.price);
+                }
+                _ => sweeps.push((trade.ts_event, trade.aggressor, vec![trade.price])),
+            }
+        }
+        let multi: Vec<_> = sweeps.iter().filter(|(_, _, p)| p.len() > 1).collect();
+        assert!(multi.len() > 500, "{} multi-print sweeps", multi.len());
+        let multi_level = multi
+            .iter()
+            .filter(|(_, _, p)| p.iter().any(|x| *x != p[0]))
+            .count();
+        let share = multi_level as f64 / multi.len() as f64;
+        assert!((0.8..=1.0).contains(&share), "multi-level share {share}");
+    }
+
+    #[test]
+    fn a_cascade_parent_lifts_the_mid_in_its_own_direction() {
+        // Tape protocol 34: the signed mid move after a parent. The mid
+        // before parent k is the mid after parent k - 1, read off the
+        // first print less the touch's half width; a buy must lift it on
+        // average, by the preset's impact less what the side's own
+        // predictability takes back, and the lift must persist a hundred
+        // parents later. Without the term the average is zero at every
+        // lag.
+        let args = GenArgs {
+            kind: GenType::Trades,
+            length: "1d".to_string(),
+            interval: None,
+            symbol: "MNQ".to_string(),
+            seed: Some(5),
+            start: 0,
+            start_price: None,
+            config: None,
+            burn_in: None,
+            trace_from: None,
+            trace_until: None,
+            regime: None,
+            havoc: None,
+            out: None,
+        };
+        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        let mut source = build_source(&args, &profile, args.start).expect("MNQ source");
+        let tick: f64 = profile.def.price_increment.to_string().parse().unwrap();
+        let half_width = f64::from(profile.scalars.quoted_width.ticks().get()) / 2.0;
+        // One row per parent: its sign and the mid after it, in ticks.
+        let mut parents: Vec<(f64, f64)> = Vec::new();
+        let mut last_ts = 0_u64;
+        let mut last_side = None;
+        while parents.len() < 40_000 {
+            let Some(mogwai_data::TickEvent::Trade(trade)) = source.next_tick() else {
+                continue;
+            };
+            let same_sweep =
+                last_side == Some(trade.aggressor) && trade.ts_event - last_ts <= 10_000;
+            last_ts = trade.ts_event;
+            last_side = Some(trade.aggressor);
+            if same_sweep {
+                continue;
+            }
+            let sign = match trade.aggressor {
+                mogwai_protocol::AggressorSide::Buyer => 1.0,
+                mogwai_protocol::AggressorSide::Seller => -1.0,
+                mogwai_protocol::AggressorSide::NoAggressor => continue,
+            };
+            let price: f64 = trade.price.to_string().parse().unwrap();
+            parents.push((sign, price / tick - half_width * sign));
+        }
+        let response = |lag: usize| -> f64 {
+            // pre-mid of parent k is the post-mid of parent k - 1.
+            let moves: Vec<f64> = (1..parents.len() - lag)
+                .map(|k| (parents[k + lag - 1].1 - parents[k - 1].1) * parents[k].0)
+                .collect();
+            moves.iter().sum::<f64>() / moves.len() as f64
+        };
+        let r1 = response(1);
+        let r100 = response(100);
+        assert!(r1 > 0.2, "lag 1 response {r1} ticks");
+        assert!(r100 > 0.2, "lag 100 response {r100} ticks");
+    }
+
+    #[test]
     fn an_unknown_symbol_resolves_through_the_default_bundle() {
         let profile = resolve_profile("NOPE").expect("symbol resolution is total");
         assert_eq!(profile.def.symbol.as_ref(), "NOPE");
@@ -1462,6 +1583,22 @@ mod tests {
             (
                 "jumps_per_session",
                 "\"generator.cascade.jumps_per_session\" = 300.0",
+            ),
+            // Tape protocol 33: the sub-second layer's knobs reach the
+            // summary too - the fast texture, the branching and the sign
+            // slots each move the walk.
+            (
+                "fast_texture_log_sd",
+                "\"generator.cascade.fast_texture_log_sd\" = 1.5",
+            ),
+            (
+                "excitation_ratio",
+                "\"generator.cascade.excitation_ratio\" = [0.0, 0.0, 0.0]",
+            ),
+            ("sign_slots", "\"generator.cascade.sign_slots\" = 1"),
+            (
+                "impact_permanent_ticks",
+                "\"generator.cascade.impact_permanent_ticks\" = 0.0",
             ),
             ("quoted_width", "\"generator.quoted_width.ticks\" = 3"),
             ("top_sizes_bid", "\"generator.top_sizes.bid\" = \"7\""),
