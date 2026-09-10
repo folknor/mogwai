@@ -351,7 +351,7 @@ impl MogwaiDataClient {
             let Some(def) = instrument_def(&self.instruments, &symbol) else {
                 continue;
             };
-            match acc_to_bar(*bar_type, active, &def, self.sim) {
+            match acc_to_bar(*bar_type, active, &def, now_unix_nanos(self.sim)) {
                 Ok(bar) => drop(sink.send(DataEvent::Data(Data::Bar(bar)))),
                 Err(err) => tracing::warn!(
                     %bar_type,
@@ -858,7 +858,7 @@ impl DataClient for MogwaiDataClient {
                 if active.close_ts <= now
                     && let Some(def) = instrument_def(&self.instruments, &symbol)
                 {
-                    match acc_to_bar(cmd.bar_type, &active, &def, self.sim) {
+                    match acc_to_bar(cmd.bar_type, &active, &def, now_unix_nanos(self.sim)) {
                         Ok(bar) => {
                             if let Ok(sink) = self.sink() {
                                 drop(sink.send(DataEvent::Data(Data::Bar(bar))));
@@ -984,21 +984,7 @@ impl DataClient for MogwaiDataClient {
                         "request_trades: history window truncated before its end at the caller's own trade limit; the requested history may not splice contiguously into live"
                     );
                 }
-                trades
-                    .iter()
-                    .filter_map(|t| {
-                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
-                            .map_err(|err| {
-                                tracing::warn!(
-                                    symbol = %t.symbol,
-                                    ts_event = t.ts_event,
-                                    error = %err,
-                                    "dropping historical trade: unrepresentable tick"
-                                );
-                            })
-                            .ok()
-                    })
-                    .collect()
+                historical_trades(&trades, request.instrument_id, &def)
             };
             let response = TradesResponse::new(
                 request.request_id,
@@ -1076,14 +1062,11 @@ impl DataClient for MogwaiDataClient {
                 if truncated {
                     tracing::warn!(%symbol, "quote history truncated at the caller's own limit");
                 }
-                quotes.into_iter().take(limit.unwrap_or(usize::MAX)).filter_map(|quote| {
-                    convert::quote_tick(
-                        &quote,
-                        request.instrument_id,
-                        &def,
-                        now_unix_nanos(sim),
-                    ).map_err(|err| tracing::warn!(%symbol, error = %err, "dropping historical quote: unrepresentable tick")).ok()
-                }).collect()
+                let quotes: Vec<mogwai_protocol::QuoteTick> = quotes
+                    .into_iter()
+                    .take(limit.unwrap_or(usize::MAX))
+                    .collect();
+                historical_quotes(&quotes, request.instrument_id, &def)
             };
             let response = QuotesResponse::new(
                 request.request_id,
@@ -1205,7 +1188,7 @@ impl DataClient for MogwaiDataClient {
                         "request_bars: history window truncated before its end at the caller's own bar limit; the requested history may not splice contiguously into live"
                     );
                 }
-                let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
+                let mut bars = aggregate_bars(&request.bar_type, &trades, &def, end);
                 if let Some(m) = bar_limit {
                     // Paging spans at least `bar_limit` intervals, so it may produce
                     // a few extra bars; trim to the requested count (oldest edge,
@@ -1926,7 +1909,9 @@ fn emit_live_bars(
             if bar_type.instrument_id() != id || state.refs == 0 {
                 continue;
             }
-            if let Some(bar) = update_bar_state(*bar_type, state, trade, def, sim) {
+            if let Some(bar) =
+                update_bar_state(*bar_type, state, trade, def, Some(now_unix_nanos(sim)))
+            {
                 ready.push(bar);
             }
         }
@@ -1968,7 +1953,7 @@ fn update_bar_state(
     state: &mut BarSubState,
     trade: &mogwai_protocol::TradeTick,
     def: &InstrumentDef,
-    sim: SimClock,
+    ts_init: Option<UnixNanos>,
 ) -> Option<Bar> {
     let interval_ns = get_bar_interval_ns(&bar_type).as_u64();
     let interval =
@@ -1985,7 +1970,11 @@ fn update_bar_state(
         trade.ts_event,
         interval,
     )?;
-    match acc_to_bar(bar_type, &closed, def, sim) {
+    // `Some` is the live path's receipt stamp; `None` is the history fold,
+    // where the closed window's own close is the bar's `ts_init` - see
+    // `acc_to_bar` for why history must not stamp the conversion clock.
+    let ts_init = ts_init.unwrap_or_else(|| UnixNanos::from(closed.close_ts));
+    match acc_to_bar(bar_type, &closed, def, ts_init) {
         Ok(bar) => Some(bar),
         Err(err) => {
             tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
@@ -1994,17 +1983,67 @@ fn update_bar_state(
     }
 }
 
+/// Converts a page of historical wire trades for a `TradesResponse`, stamping
+/// each tick `ts_init = ts_event`. History must never stamp the conversion
+/// clock: the response's `end` is pinned before the asynchronous paging runs,
+/// and nautilus's `DataResponse::trim_to_bounds` trims vector payloads on
+/// `ts_init` - so a conversion-time stamp lands past `end` and every history
+/// request comes back empty at the data engine.
+fn historical_trades(
+    trades: &[mogwai_protocol::TradeTick],
+    instrument_id: InstrumentId,
+    def: &InstrumentDef,
+) -> Vec<nautilus_model::data::TradeTick> {
+    trades
+        .iter()
+        .filter_map(|t| {
+            convert::trade_tick(t, instrument_id, def, UnixNanos::from(t.ts_event))
+                .map_err(|err| {
+                    tracing::warn!(
+                        symbol = %t.symbol,
+                        ts_event = t.ts_event,
+                        error = %err,
+                        "dropping historical trade: unrepresentable tick"
+                    );
+                })
+                .ok()
+        })
+        .collect()
+}
+
+/// The quote twin of `historical_trades`, for the same reason.
+fn historical_quotes(
+    quotes: &[mogwai_protocol::QuoteTick],
+    instrument_id: InstrumentId,
+    def: &InstrumentDef,
+) -> Vec<nautilus_model::data::QuoteTick> {
+    quotes
+        .iter()
+        .filter_map(|quote| {
+            convert::quote_tick(quote, instrument_id, def, UnixNanos::from(quote.ts_event))
+                .map_err(|err| {
+                    tracing::warn!(
+                        symbol = %quote.symbol,
+                        ts_event = quote.ts_event,
+                        error = %err,
+                        "dropping historical quote: unrepresentable tick"
+                    );
+                })
+                .ok()
+        })
+        .collect()
+}
+
 fn aggregate_bars(
     bar_type: &BarType,
     trades: &[mogwai_protocol::TradeTick],
     def: &InstrumentDef,
-    sim: SimClock,
     end: Option<UnixNanos>,
 ) -> Vec<Bar> {
     let mut state = BarSubState::default();
     let mut out = Vec::new();
     for trade in trades {
-        if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def, sim) {
+        if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def, None) {
             out.push(bar);
         }
     }
@@ -2020,7 +2059,7 @@ fn aggregate_bars(
     if let (Some(acc), Some(end)) = (&state.active, end)
         && end.as_u64() >= acc.close_ts
     {
-        match acc_to_bar(*bar_type, acc, def, sim) {
+        match acc_to_bar(*bar_type, acc, def, UnixNanos::from(acc.close_ts)) {
             Ok(bar) => out.push(bar),
             Err(err) => {
                 tracing::warn!(%bar_type, error = %err, "dropping unrepresentable trailing bar");
@@ -2030,11 +2069,16 @@ fn aggregate_bars(
     out
 }
 
+/// `ts_init` is the caller's decision because the two producers mean different
+/// things by it: the live subscription path stamps receipt time (the clock at
+/// conversion), while a history response stamps the bar's own close - a
+/// conversion-time stamp there lands past the response's pinned `end` and
+/// nautilus's trim-on-`ts_init` empties the response.
 fn acc_to_bar(
     bar_type: BarType,
     acc: &BarAcc,
     def: &InstrumentDef,
-    sim: SimClock,
+    ts_init: UnixNanos,
 ) -> anyhow::Result<Bar> {
     Ok(Bar::new(
         bar_type,
@@ -2044,7 +2088,7 @@ fn acc_to_bar(
         convert::price(acc.close, def.price_precision)?,
         convert::quantity(acc.volume, def.size_precision)?,
         UnixNanos::from(acc.close_ts),
-        now_unix_nanos(sim),
+        ts_init,
     ))
 }
 
@@ -2128,6 +2172,131 @@ mod quote_cache_tests {
             ..MogwaiDataClientConfig::default()
         };
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client")
+    }
+
+    fn trade_for(symbol: &str, ts_event: u64) -> mogwai_protocol::TradeTick {
+        mogwai_protocol::TradeTick {
+            symbol: symbol.into(),
+            price: Decimal::from(100),
+            size: Decimal::ONE,
+            aggressor: mogwai_protocol::AggressorSide::Buyer,
+            ts_event,
+        }
+    }
+
+    /// The warmup-killing defect: a history response's `end` is pinned before
+    /// the asynchronous paging runs, and the payload used to be stamped
+    /// `ts_init = now` at conversion - strictly after that `end` - so
+    /// nautilus's `DataResponse::trim_to_bounds`, which trims vector payloads
+    /// on `ts_init` (not `ts_event`), removed every item and the data engine
+    /// delivered an empty response to the session. These three tests run the
+    /// actual nautilus trim over the actual builders, because a test that
+    /// inspected the response before the trim was exactly the vacuous
+    /// coverage that let the defect ship.
+    #[test]
+    fn historical_bars_survive_the_nautilus_trim_on_a_pinned_end() {
+        let def = mogwai_protocol::default_instruments().remove(0);
+        let minute = 60_000_000_000u64;
+        let trades: Vec<mogwai_protocol::TradeTick> = [10, 70, 130]
+            .iter()
+            .map(|s| trade_for(&def.symbol, s * 1_000_000_000))
+            .collect();
+        let bar_type =
+            BarType::from(format!("{}.MOGWAI-1-MINUTE-LAST-EXTERNAL", def.symbol).as_str());
+        let end = UnixNanos::from(3 * minute);
+        let bars = aggregate_bars(&bar_type, &trades, &def, Some(end));
+        assert_eq!(bars.len(), 3, "three closed minute windows");
+        let response = BarsResponse::new(
+            nautilus_core::UUID4::new(),
+            ClientId::from("MOGWAI-DATA"),
+            bar_type,
+            bars,
+            Some(UnixNanos::from(0u64)),
+            Some(end),
+            // The response-time stamp the paging produces: far past `end`.
+            UnixNanos::from(10 * minute),
+            None,
+        );
+        let mut response = DataResponse::Bars(response);
+        response.trim_to_bounds();
+        let DataResponse::Bars(trimmed) = response else {
+            unreachable!()
+        };
+        assert_eq!(
+            trimmed.data.len(),
+            3,
+            "historical bars must carry ts_init within the pinned window or nautilus trims them all"
+        );
+        for bar in &trimmed.data {
+            assert_eq!(
+                bar.ts_init, bar.ts_event,
+                "a historical bar's ts_init is its own close"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_trades_survive_the_nautilus_trim_on_a_pinned_end() {
+        let def = mogwai_protocol::default_instruments().remove(0);
+        let id = InstrumentId::from(format!("{}.MOGWAI", def.symbol).as_str());
+        let end = UnixNanos::from(100_000_000_000u64);
+        let trades: Vec<mogwai_protocol::TradeTick> = [10u64, 40, 90]
+            .iter()
+            .map(|s| trade_for(&def.symbol, s * 1_000_000_000))
+            .collect();
+        let data = historical_trades(&trades, id, &def);
+        let response = TradesResponse::new(
+            nautilus_core::UUID4::new(),
+            ClientId::from("MOGWAI-DATA"),
+            id,
+            data,
+            Some(UnixNanos::from(0u64)),
+            Some(end),
+            UnixNanos::from(500_000_000_000u64),
+            None,
+        );
+        let mut response = DataResponse::Trades(response);
+        response.trim_to_bounds();
+        let DataResponse::Trades(trimmed) = response else {
+            unreachable!()
+        };
+        assert_eq!(
+            trimmed.data.len(),
+            3,
+            "event-stamped ts_init keeps history inside the window"
+        );
+    }
+
+    #[test]
+    fn historical_quotes_survive_the_nautilus_trim_on_a_pinned_end() {
+        let def = mogwai_protocol::default_instruments().remove(0);
+        let id = InstrumentId::from(format!("{}.MOGWAI", def.symbol).as_str());
+        let end = UnixNanos::from(100_000_000_000u64);
+        let quotes: Vec<mogwai_protocol::QuoteTick> = [10u64, 40, 90]
+            .iter()
+            .map(|s| quote_for(&def.symbol, s * 1_000_000_000))
+            .collect();
+        let data = historical_quotes(&quotes, id, &def);
+        let response = QuotesResponse::new(
+            nautilus_core::UUID4::new(),
+            ClientId::from("MOGWAI-DATA"),
+            id,
+            data,
+            Some(UnixNanos::from(0u64)),
+            Some(end),
+            UnixNanos::from(500_000_000_000u64),
+            None,
+        );
+        let mut response = DataResponse::Quotes(response);
+        response.trim_to_bounds();
+        let DataResponse::Quotes(trimmed) = response else {
+            unreachable!()
+        };
+        assert_eq!(
+            trimmed.data.len(),
+            3,
+            "event-stamped ts_init keeps history inside the window"
+        );
     }
 
     #[test]

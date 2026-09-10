@@ -1365,6 +1365,9 @@ pub fn venue_order_row(
         price: Some(rust_decimal::Decimal::from(100)),
         trigger_price: None,
         ts_triggered: None,
+        trail_offset: None,
+        limit_offset: None,
+        activation_price: None,
         reduce_only: false,
         post_only: false,
         ts_accepted: 10,
@@ -1554,9 +1557,10 @@ pub fn cached_stop_limit(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::
     order
 }
 
-/// Seeds a BTCUSDT sell `TrailingStopMarketOrder` `O-TRAIL` into the cache. The
-/// venue models no trailing state, so this is the shape that must still be
-/// refused by name after conditionals landed.
+/// Seeds a BTCUSDT sell `TrailingStopMarketOrder` `O-TRAIL` into the cache
+/// with a `PriceTier` offset type, which is the part of the shape that stays
+/// refused: the venue trails by an absolute price distance, so an offset
+/// stated in anything but price cannot be read.
 pub fn cached_trailing_stop(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
     let mut factory = order_factory();
     let order = factory.trailing_stop_market(
@@ -1579,6 +1583,39 @@ pub fn cached_trailing_stop(cache: &Rc<RefCell<Cache>>) -> nautilus_model::order
         None,
         None,
         Some(ClientOrderId::from("O-TRAIL")),
+    );
+    cache_order(cache, &order);
+    order
+}
+
+/// Seeds a BTCUSDT sell `TrailingStopMarketOrder` `O-TRAIL-ACT` into the
+/// cache in the shape broadarrow actually submits: a price-typed trailing
+/// offset, a stated activation price, and no trigger - nautilus's
+/// deferred-activation trail, whose trigger the venue seeds at activation.
+pub fn cached_activation_trailing_stop(
+    cache: &Rc<RefCell<Cache>>,
+) -> nautilus_model::orders::OrderAny {
+    let mut factory = order_factory();
+    let order = factory.trailing_stop_market(
+        instrument_id(),
+        OrderSide::Sell,
+        Quantity::from("1"),
+        rust_decimal::Decimal::from(1),
+        Some(TrailingOffsetType::Price),
+        Some(Price::from("105.00")),
+        None,
+        Some(TriggerType::LastPrice),
+        Some(TimeInForce::Gtc),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-TRAIL-ACT")),
     );
     cache_order(cache, &order);
     order
@@ -1660,6 +1697,9 @@ pub fn venue_stop_order_row(
         price,
         trigger_price: Some(trigger_price),
         ts_triggered,
+        trail_offset: None,
+        limit_offset: None,
+        activation_price: None,
         reduce_only: true,
         post_only: false,
         ts_accepted: 10,

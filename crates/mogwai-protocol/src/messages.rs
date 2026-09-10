@@ -1027,6 +1027,31 @@ pub struct OrderStatusInfo {
     /// non-conditional order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_triggered: Option<u64>,
+    /// The trailing distances and the activation level, echoed from the
+    /// submit so an external reconstruction can rebuild the trailing order.
+    /// Nautilus's trailing order types cannot be built from a report without
+    /// their offset, so a snapshot that dropped these fields made every
+    /// trailing order irreconstructible. An unactivated trailing order is the
+    /// shape that reports `trigger_price: None` beside a stated
+    /// `trail_offset`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
+    pub trail_offset: Option<Decimal>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
+    pub limit_offset: Option<Decimal>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
+    pub activation_price: Option<Decimal>,
     #[serde(default)]
     pub reduce_only: bool,
     #[serde(default)]
@@ -1111,6 +1136,22 @@ pub struct SubmitOrder {
         with = "crate::decimal::str_option"
     )]
     pub limit_offset: Option<Decimal>,
+    /// The level the tape must touch before a trailing order starts trailing.
+    /// Legal only on `TrailingStopMarket` and `TrailingStopLimit`, and only
+    /// in place of `trigger_price`: a trailing order states exactly one of the
+    /// two. With `trigger_price` the trail is armed on arrival at that stated
+    /// trigger; with `activation_price` it rests unarmed until a print touches
+    /// the level (toward, like a touched order enters), and the venue then
+    /// seeds the trigger `trail_offset` from the activating print. A trailing
+    /// order stating neither is refused: this venue does not support
+    /// activate-at-first-print, so the consumer must say where trailing
+    /// begins.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
+    pub activation_price: Option<Decimal>,
     pub time_in_force: TimeInForce,
     /// Sim instant a `Gtd` order expires at. Required on `Gtd` and refused on
     /// every other time-in-force, including `Day` - a day order's expiry comes
@@ -1134,9 +1175,14 @@ pub struct SubmitOrder {
     pub post_only: bool,
     /// The order list this order belongs to, and what its membership means.
     /// Absent for a standalone order, which is every order this venue served
-    /// before linkage existed.
+    /// before linkage existed. Boxed for the enum variants that carry a whole
+    /// `SubmitOrder` (`Command`, the adapter's dispatch queue): the link is
+    /// the struct's one large, rarely-present field, and inlining it is what
+    /// pushed those variants over `clippy::large_enum_variant`. Serde is
+    /// unaffected - `Option<Box<T>>` reads and writes exactly as
+    /// `Option<T>` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link: Option<OrderLink>,
+    pub link: Option<Box<OrderLink>>,
 }
 
 /// How many orders one linkage may name. A bracket needs two; the cap exists
@@ -1437,8 +1483,45 @@ pub fn validate_submit_order(order: &SubmitOrder, phase: SubmitPhase) -> Result<
         {
             Err("a market-on-trigger order must not carry a price")
         }
-        _ if order.order_type.is_conditional() && order.trigger_price.is_none() => {
+        // A fixed conditional always states its trigger. A trailing order may
+        // instead state an activation level and have the venue seed the
+        // trigger from the activating print - but it must state one of the
+        // two: activate-at-first-print is a nautilus shape this venue
+        // deliberately does not serve, so a trailing order stating neither is
+        // refused with the instruction rather than accepted into a state
+        // nothing could ever arm.
+        _ if order.order_type.is_conditional()
+            && !order.order_type.trails()
+            && order.trigger_price.is_none() =>
+        {
             Err("conditional order must carry trigger_price")
+        }
+        _ if order.order_type.trails()
+            && order.trigger_price.is_none()
+            && order.activation_price.is_none() =>
+        {
+            Err(
+                "a trailing order must carry trigger_price or activation_price: MOGWAI does not \
+                 activate a trail at the first print, so state where trailing begins",
+            )
+        }
+        _ if order.order_type.trails()
+            && order.trigger_price.is_some()
+            && order.activation_price.is_some() =>
+        {
+            Err(
+                "a trailing order must carry trigger_price or activation_price, not both: a \
+                 stated trigger is an armed trail and leaves activation nothing to decide",
+            )
+        }
+        _ if order.activation_price.is_some() && !order.order_type.trails() => {
+            Err("activation_price is legal only on a trailing order")
+        }
+        _ if order
+            .activation_price
+            .is_some_and(|price| price <= Decimal::ZERO) =>
+        {
+            Err("activation_price must be > 0")
         }
         OrderType::StopLimit | OrderType::LimitIfTouched if order.price.is_none() => {
             Err("a limit-on-trigger order must carry a price")
@@ -2519,6 +2602,7 @@ mod tests {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
             reduce_only: false,
@@ -3490,6 +3574,7 @@ mod tests {
             trigger_price: owed(trigger),
             trail_offset: owed(trail),
             limit_offset: owed(limit),
+            activation_price: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,

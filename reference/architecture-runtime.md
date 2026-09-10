@@ -64,8 +64,9 @@ failure would make a consumer's reconnect ladder evict whatever evicted it. By
 default the newcomer resumes that account - positions, order history and risk
 state intact - which is what makes a killed worker able to come back to its own
 book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
-readiness record reports which way the venue is set so a launcher never has to
-infer it.
+readiness record and `GET /health` both report which way the venue is set - the
+record for the launcher that spawned it, the endpoint for a consumer attaching
+to a venue it did not spawn and cannot read a readiness line from.
 
 ## Close codes carry no meaning; close reasons do
 
@@ -222,8 +223,9 @@ A TTL bounds the freeze. `account_ttl_ms` collects an account nobody reclaims,
 in wall time because a frozen account has no simulated clock - the boat that
 carried one wound down with the last socket. Zero, the default, keeps accounts
 for the life of the process, which is what a consumer restarting a worker needs.
-The setting is on the readiness record, so a consumer whose restart takes longer
-than the TTL can assert on the fact rather than discover it as a clean ledger.
+The setting is on the readiness record and on `GET /health`, so a consumer
+whose restart takes longer than the TTL can assert on the fact rather than
+discover it as a clean ledger, whether or not it spawned the venue.
 Collection races the very reconnect it exists to give up on, so the removal
 re-derives "unattended, and no admission pending" under the registry lock
 rather than acting on the sweep's earlier read: an account reclaimed between

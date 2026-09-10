@@ -323,6 +323,16 @@ it is the only route that answers without an identity, so it must not: a caller
 that names no account is told whether the run is alive and faulted, and nothing
 about anybody's boats.
 
+Beside `run_seed` and `oms_type` it publishes the two account-lifecycle boot
+constants, `reset_account_on_reconnect` and `account_ttl_ms`, always present
+and equal to the readiness record's - venue-wide facts, naming no account.
+They are there for the consumer that attached to a venue it did not spawn:
+the readiness line is readable only by the spawning launcher, and a posted
+ledger's survival depends on exactly these two settings, so an attaching
+consumer verifies them here instead of resting on an operator's word. New
+fields on `/health` are additive; a consumer must tolerate ones it does not
+know.
+
 The fill sweeper's progress is reported per account instead. The `GET /account`
 body carries `sweep_passes`, one row per boat the named account is seated on,
 sorted by `symbol` and carrying a monotonic `completed` count. The

@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# fast.toml with both account-lifecycle settings at non-default,
+# distinguishable values, so the gate that compares the readiness record
+# against /health is comparing values the defaults could not have supplied:
+# a venue that ignored the config and reported its defaults would still agree
+# with itself, and only stated values catch that.
+
+seed = 42
+
+# Five simulated minutes of history, materialized at boot.
+warmup_ns = 300000000000
+
+# Unthrottled: the gates assert on WHAT arrives, not on its cadence.
+speed = 0.0
+
+reset_account_on_reconnect = true
+
+# Long enough that nothing is collected while the gate reads two endpoints;
+# the value only has to be nonzero and recognizable.
+account_ttl_ms = 86400000
+
+[balances]
+USD = "1000000"
+USDT = "1000000"

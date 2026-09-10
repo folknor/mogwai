@@ -536,6 +536,14 @@ impl MogwaiExecutionClient {
                 }
                 _ => None,
             },
+            // Where trailing begins. Forwarded as stated: the wire's own
+            // validator below owns the shape rules - exactly one of
+            // trigger_price and activation_price on a trailing type - so a
+            // nautilus trailing order stating both, or neither (nautilus's
+            // activate-at-first-print form, which this venue deliberately
+            // does not serve), is refused here with the venue's reason
+            // rather than silently reshaped.
+            activation_price: init.activation_price.map(|p| p.as_decimal()),
             reduce_only: init.reduce_only,
             post_only: init.post_only,
             time_in_force: convert::wire_time_in_force(init.time_in_force)?,
@@ -949,6 +957,26 @@ fn order_status_report_from_info(
     }
     if let Some(ts) = info.ts_triggered {
         report = report.with_ts_triggered(UnixNanos::from(ts));
+    }
+    // The trailing metadata, without which nautilus cannot rebuild an
+    // external trailing order from this report at all - both trailing order
+    // constructors require the offset and its type. The venue trails by an
+    // absolute price distance (the only offset form `wire_trail_offset`
+    // admits), so the type is always `Price`. An unactivated trailing order
+    // is the shape that legitimately reports no trigger beside a stated
+    // offset and an activation price; reconciliation reads a null trigger as
+    // an omitted field, not a trigger amendment.
+    if let Some(value) = info.trail_offset {
+        report = report
+            .with_trailing_offset(value)
+            .with_trailing_offset_type(nautilus_model::enums::TrailingOffsetType::Price)
+            .with_trigger_type(TriggerType::LastPrice);
+    }
+    if let Some(value) = info.limit_offset {
+        report = report.with_limit_offset(value);
+    }
+    if let Some(value) = info.activation_price {
+        report = report.with_activation_price(convert_px(value, "activation_price")?);
     }
     if let Some(position_id) = &info.position_id {
         let position_id = PositionId::new_checked(position_id)
@@ -2711,6 +2739,38 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
         VenueMessage::OrderTriggered { client_order_id, venue_order_id, ts_event } => {
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else { return; };
             let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else { return; };
+            // The wire message is a real venue transition for every conditional,
+            // but nautilus restricts the `Triggered` lifecycle state to the
+            // limit-on-trigger types (its `TRIGGERABLE_ORDER_TYPES`): a
+            // market-on-trigger order executes the instant it triggers and has
+            // no intermediate state, so applying `OrderTriggered` to one
+            // returns `InvalidOrderEvent` and logs an error-level line on
+            // every normal stop-out. This adapter is the translation boundary, so those
+            // three types consume the message with the mirror untouched -
+            // status and ts_last both, since the fill or cancel arriving at
+            // the same instant advances them through an event nautilus
+            // accepts. The match is exhaustive over the wire enum on purpose:
+            // a future order type must decide its side here rather than fall
+            // through a permissive arm.
+            let triggerable = match with_order_record(&ctx.state, client_order_id, |record| record.order_type) {
+                Some(
+                    OrderType::StopLimit | OrderType::LimitIfTouched | OrderType::TrailingStopLimit,
+                ) => true,
+                Some(
+                    OrderType::StopMarket
+                    | OrderType::MarketIfTouched
+                    | OrderType::TrailingStopMarket,
+                ) => false,
+                Some(OrderType::Market | OrderType::Limit | OrderType::MarketToLimit) => {
+                    tracing::warn!(%client_order_id, "dropping trigger for a non-conditional order type");
+                    return;
+                }
+                None => return,
+            };
+            if !triggerable {
+                tracing::debug!(%client_order_id, "suppressing trigger for a market-on-trigger type: nautilus has no TRIGGERED state for it");
+                return;
+            }
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
                 let stale = record.status.is_closed();
                 if !stale { record.status = OrderStatus::Triggered; record.ts_last = UnixNanos::from(ts_event); }
@@ -4030,6 +4090,90 @@ mod tests {
         ))
     }
 
+    fn mirror_an_order_of(ctx: &ExecContext, order_type: OrderType, status: OrderStatus) {
+        lock_recover(&ctx.state, "test state").orders.insert(
+            ClientOrderId::from("O-1"),
+            OrderRecord {
+                strategy_id: nautilus_model::identifiers::StrategyId::from("S-1"),
+                instrument_id: InstrumentId::from("EURUSD.MOGWAI"),
+                order_side: OrderSide::Buy,
+                order_type,
+                status,
+                venue_order_id: Some(VenueOrderId::from("V-1")),
+                ts_last: UnixNanos::from(20),
+                seen_trades: std::collections::HashSet::new(),
+            },
+        );
+    }
+
+    fn a_wire_trigger() -> VenueMessage {
+        VenueMessage::OrderTriggered {
+            client_order_id: "O-1".into(),
+            venue_order_id: "V-1".into(),
+            ts_event: 30,
+        }
+    }
+
+    /// Nautilus has no `Triggered` state for the market-on-trigger types
+    /// (its `TRIGGERABLE_ORDER_TYPES` excludes them): forwarding the venue's
+    /// `OrderTriggered` for a stop-market made nautilus log an error-level
+    /// "Invalid event for order type" on every normal stop-out. The adapter
+    /// consumes the wire message for those three types, leaving the mirror's
+    /// status and `ts_last` for the same-instant fill or cancel to advance.
+    #[test]
+    fn a_market_on_trigger_wire_trigger_is_consumed_without_event_or_mirror_change() {
+        for order_type in [
+            OrderType::StopMarket,
+            OrderType::MarketIfTouched,
+            OrderType::TrailingStopMarket,
+        ] {
+            let (ctx, mut rx, _generation, _sink_dead) = a_context_on_a_live_channel(Some(1), 1);
+            mirror_an_order_of(&ctx, order_type, OrderStatus::Accepted);
+
+            handle_exec_message(a_wire_trigger(), &ctx);
+
+            assert!(
+                rx.try_recv().is_err(),
+                "{order_type:?}: no nautilus event may be emitted for a type with no TRIGGERED state"
+            );
+            let (status, ts_last) = mirrored_status(&ctx.state);
+            assert_eq!(
+                status,
+                OrderStatus::Accepted,
+                "{order_type:?}: mirror status untouched"
+            );
+            assert_eq!(
+                ts_last,
+                UnixNanos::from(20),
+                "{order_type:?}: mirror ts_last untouched, the fill or cancel advances it"
+            );
+        }
+    }
+
+    /// The limit-on-trigger types keep the full path: nautilus event emitted,
+    /// mirror moved to Triggered at the wire instant.
+    #[test]
+    fn a_limit_on_trigger_wire_trigger_still_reaches_nautilus_and_the_mirror() {
+        for order_type in [
+            OrderType::StopLimit,
+            OrderType::LimitIfTouched,
+            OrderType::TrailingStopLimit,
+        ] {
+            let (ctx, mut rx, _generation, _sink_dead) = a_context_on_a_live_channel(Some(1), 1);
+            mirror_an_order_of(&ctx, order_type, OrderStatus::Accepted);
+
+            handle_exec_message(a_wire_trigger(), &ctx);
+
+            let Ok(ExecutionEvent::Order(OrderEventAny::Triggered(event))) = rx.try_recv() else {
+                panic!("{order_type:?}: the trigger event must reach nautilus");
+            };
+            assert_eq!(event.client_order_id, ClientOrderId::from("O-1"));
+            let (status, ts_last) = mirrored_status(&ctx.state);
+            assert_eq!(status, OrderStatus::Triggered, "{order_type:?}");
+            assert_eq!(ts_last, UnixNanos::from(30), "{order_type:?}");
+        }
+    }
+
     /// The cross-generation guard. The emitter's sender slot is shared and
     /// survives a generation, so without this check a task left over from a
     /// retired connection would emit into whatever runner is current now.
@@ -4253,6 +4397,7 @@ mod tests {
                 trigger_price: None,
                 trail_offset: None,
                 limit_offset: None,
+                activation_price: None,
                 reduce_only: false,
                 post_only: false,
                 time_in_force: mogwai_protocol::TimeInForce::Gtc,
@@ -4467,6 +4612,9 @@ mod tests {
                     price: Some(Decimal::from(100)),
                     trigger_price: None,
                     ts_triggered: None,
+                    trail_offset: None,
+                    limit_offset: None,
+                    activation_price: None,
                     reduce_only: false,
                     post_only: false,
                     ts_accepted: 1,

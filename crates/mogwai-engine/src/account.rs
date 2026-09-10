@@ -145,8 +145,15 @@ impl Engine {
         // parent fills, and holding funds against it would let a bracket's exit
         // legs starve the entry that has to fill before either can do anything.
         // The hold appears at release, through the same `refresh_open_hold`
-        // any other state change goes through.
-        if matches!(order.resting, crate::Resting::Held) {
+        // any other state change goes through. An unactivated trailing order
+        // is the same policy at a different gate: it has no price the hold
+        // could be computed from (the `?` below would decline it anyway, but
+        // the policy is stated rather than incidental), and its hold appears
+        // at activation, after the activation-time funds check passes.
+        if matches!(
+            order.resting,
+            crate::Resting::Held | crate::Resting::Unactivated { .. }
+        ) {
             return None;
         }
         // Covered equity sells share one finite pool of long shares. Their hold
@@ -253,7 +260,10 @@ impl Engine {
     fn is_margin_equity_sell(&self, order: &crate::OpenOrder) -> bool {
         order.submit.side == Side::Sell
             && !order.submit.reduce_only
-            && !matches!(order.resting, crate::Resting::Held)
+            && !matches!(
+                order.resting,
+                crate::Resting::Held | crate::Resting::Unactivated { .. }
+            )
             && self.margin.contains_key(&order.submit.symbol)
             && self
                 .instruments
@@ -395,6 +405,13 @@ impl Engine {
                         order.symbol.as_ref() == symbol
                             && order.side == Side::Sell
                             && !order.reduce_only
+                            // The trigger-less trailing shape is deferred-funded
+                            // (it rests `Unactivated`), so it contributes no
+                            // price here just as `worst_case_leaves` counts no
+                            // quantity for it - the two folds must exclude the
+                            // same members or the requirement and the count
+                            // disagree about one book.
+                            && !(order.order_type.trails() && order.trigger_price.is_none())
                             && order
                                 .link
                                 .as_ref()

@@ -569,6 +569,16 @@ pub fn account_ttl_config() -> String {
     )
 }
 
+/// A venue with both account-lifecycle settings at non-default values, so the
+/// gate comparing the readiness record against `/health` compares values the
+/// defaults could not have supplied.
+pub fn health_lifecycle_config() -> String {
+    format!(
+        "{}/tests/configs/health-lifecycle.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 pub fn two_symbols_config() -> String {
     format!(
         "{}/tests/configs/two-symbols.toml",

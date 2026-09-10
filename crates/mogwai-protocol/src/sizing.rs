@@ -116,11 +116,15 @@ pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURREN
 /// One `OrderStatusInfo` row inside an `OrderStatusSnapshot`:
 /// `client_order_id`, `venue_order_id`, `symbol`, `side`, `order_type`,
 /// `time_in_force`, `status`, `quantity`, `filled_qty`, `price`,
-/// `trigger_price`, `ts_triggered`, `reduce_only`, `post_only`, `ts_accepted`,
-/// `ts_last` - ~180 bytes of key names and punctuation, four decimals (132),
-/// three u64s (60), four short enum spellings (~40) and two bools (10): about
-/// 430, rounded to 512 on top of the charged strings.
-pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_ECHOED_ID_LEN + MAX_SYMBOL_LEN);
+/// `trigger_price`, `ts_triggered`, `trail_offset`, `limit_offset`,
+/// `activation_price`, `reduce_only`, `post_only`, `ts_accepted`, `ts_last` -
+/// ~230 bytes of key names and punctuation, seven decimals (231), three u64s
+/// (60), four short enum spellings (~40) and two bools (10): about 570,
+/// rounded to 640 on top of the charged strings. The three trailing-metadata
+/// decimals are charged unconditionally, same rule as the balance breakdown:
+/// a bound that assumed their absence would under-reserve every trailing
+/// order's row.
+pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 640 + ESC * (3 * MAX_ECHOED_ID_LEN + MAX_SYMBOL_LEN);
 
 /// One fill row inside a `FillSnapshot`, which is an `OrderFilled` verbatim:
 /// FOUR client-id-shaped strings (client, venue, trade and the optional
@@ -440,6 +444,9 @@ mod tests {
             price: Some(Decimal::MIN),
             trigger_price: Some(Decimal::MIN),
             ts_triggered: Some(u64::MAX),
+            trail_offset: Some(Decimal::MIN),
+            limit_offset: Some(Decimal::MIN),
+            activation_price: Some(Decimal::MIN),
             reduce_only: true,
             post_only: true,
             ts_accepted: u64::MAX,
@@ -499,7 +506,7 @@ mod tests {
     /// | balance row 288 | 234 | 1.23 |
     /// | position row 832 | 785 | 1.06 |
     /// | margin row 480 | 405 | 1.19 |
-    /// | order status row 1856 | 1830 | 1.01 |
+    /// | order status row 1984 | 1978 | 1.00 |
     /// | fill row 2208 | 2184 | 1.01 |
     /// | snapshot envelope 512 | 474 | 1.08 |
     /// | account-state envelope 208 | 164 | 1.27 |

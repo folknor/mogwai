@@ -86,6 +86,23 @@ pub enum Resting {
     /// places its hold then. That promotion is the whole of
     /// one-triggers-the-other.
     Held,
+    /// A trailing order that has not started trailing: the consumer stated an
+    /// activation level instead of a trigger, and a print touching
+    /// `activation_px` toward it (the touched-order predicate, both sides)
+    /// is what arms the trail. Until then it shares `Held`'s financial
+    /// posture exactly - accepted, answerable, never holding funds and never
+    /// counted by the exposure folds - because it carries no price the hold
+    /// or the worst-case-short arithmetic could use; the funds question is
+    /// asked once, at activation, and a failing answer cancels the order
+    /// there.
+    ///
+    /// Activation seeds `trigger_price` a `trail_offset` from the activating
+    /// print, derives a `TrailingStopLimit`'s limit from it, places the hold,
+    /// and re-rests the order as an ordinary `Conditional`; the per-pass
+    /// ratchet takes it from there. The trailing shape stating neither a
+    /// trigger nor an activation level is refused at the wire, so this state
+    /// always has a concrete level to scan for.
+    Unactivated { activation_px: Decimal },
 }
 
 /// One funding or rollover instant the venue's sweep crossed, priced at that
@@ -147,6 +164,15 @@ pub struct OpenOrder {
     /// alone is not enough: two overlapping walks can both name a still-resting
     /// order, and applying both double-counts the span they share.
     pub revision: u64,
+    /// Raised by `on_activate` and consumed by `ratchet_trailing_stops`: a
+    /// trail armed during a pass sits out that pass's ratchet, because the
+    /// pass's per-symbol extremes straddle its activation and ratcheting it
+    /// against evidence from before its scan window restarted is exactly what
+    /// the restart disclaimed. The next pass ratchets it normally. A flag
+    /// consumed by the ratchet identifies the pass itself, where comparing
+    /// the activation instant against the pass timestamp would misjudge an
+    /// arrival-path activation that landed between passes.
+    pub skip_next_ratchet: bool,
 }
 
 impl OpenOrder {
@@ -1519,6 +1545,7 @@ impl Engine {
                 trigger_price: None,
                 trail_offset: None,
                 limit_offset: None,
+                activation_price: None,
                 time_in_force: TimeInForce::Ioc,
                 expire_time: None,
                 reduce_only: true,
@@ -1594,6 +1621,7 @@ impl Engine {
                 trigger_price: None,
                 trail_offset: None,
                 limit_offset: None,
+                activation_price: None,
                 time_in_force: TimeInForce::Ioc,
                 expire_time: None,
                 reduce_only: true,
@@ -1828,6 +1856,7 @@ impl Engine {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             time_in_force: TimeInForce::Ioc,
             expire_time: None,
             reduce_only: true,
@@ -2351,6 +2380,13 @@ impl Engine {
                         },
                         stop_px,
                     ),
+                    // Activation is a touch toward the level, exactly as a
+                    // touched order enters: a sell trail activates when the
+                    // tape rises to its level, a buy trail when it falls to
+                    // it. The hit arms the trail instead of filling anything.
+                    Resting::Unactivated { activation_px } => {
+                        (ScanKind::TouchedTrigger, activation_px)
+                    }
                     // Neither has a price the tape can decide: an inert
                     // remainder never had one, and a held child has one its
                     // parent has not yet released it to use.
@@ -2628,7 +2664,12 @@ impl Engine {
             if order.submit.symbol.as_ref() != symbol
                 || order.submit.side != side
                 || order.submit.reduce_only
-                || matches!(order.resting, Resting::Held)
+                // An unactivated trailing order is excluded on the same
+                // deferred-funding policy as a held child: it holds nothing
+                // and counts nothing until activation asks the whole funds
+                // question at once. Its activation-time check counts it from
+                // `pending`, which is what keeps it in the fold exactly once.
+                || matches!(order.resting, Resting::Held | Resting::Unactivated { .. })
                 || pending
                     .iter()
                     .any(|member| member.client_order_id == order.submit.client_order_id)
@@ -2639,16 +2680,21 @@ impl Engine {
                 &mut total,
                 &mut exclusive,
                 order.leaves_qty,
-                order.submit.link.as_ref(),
+                order.submit.link.as_deref(),
             );
         }
         for member in pending {
             // A pending member's held-ness is read off its link rather than off
             // a `Resting` it does not have yet: a child naming a parent is
-            // exactly what `on_submit_from` rests as `Resting::Held`.
+            // exactly what `on_submit_from` rests as `Resting::Held`. The
+            // trigger-less trailing shape is read the same way - it is what
+            // rests as `Resting::Unactivated`, deferred-funded, so counting
+            // it from `pending` while its book twin is excluded would refuse
+            // groups the two passes are supposed to judge identically.
             if member.symbol.as_ref() != symbol
                 || member.side != side
                 || member.reduce_only
+                || (member.order_type.trails() && member.trigger_price.is_none())
                 || member
                     .link
                     .as_ref()
@@ -2664,7 +2710,7 @@ impl Engine {
                 &mut total,
                 &mut exclusive,
                 member.quantity,
-                member.link.as_ref(),
+                member.link.as_deref(),
             );
         }
         exclusive
@@ -2839,6 +2885,9 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
         price: order.submit.price,
         trigger_price: order.submit.trigger_price,
         ts_triggered: order.ts_triggered,
+        trail_offset: order.submit.trail_offset,
+        limit_offset: order.submit.limit_offset,
+        activation_price: order.submit.activation_price,
         reduce_only: order.submit.reduce_only,
         post_only: order.submit.post_only,
         ts_accepted: order.ts_accepted,
@@ -2923,6 +2972,7 @@ mod tests {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
@@ -2949,6 +2999,7 @@ mod tests {
             trigger_price: Some(Decimal::from(trigger)),
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
             reduce_only: false,
@@ -6952,6 +7003,7 @@ mod tests {
             trigger_price: Some(Decimal::from(trigger)),
             trail_offset: Some(Decimal::from(offset)),
             limit_offset: None,
+            activation_price: None,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
             reduce_only: false,
@@ -7335,6 +7387,326 @@ mod tests {
         assert!(
             validate_submit_order(&day, SubmitPhase::PreStamp).is_err(),
             "a day order's expiry comes from the calendar, not the consumer"
+        );
+    }
+
+    // --- Trailing activation: the deferred-arming shape ----------------------
+
+    fn unactivated_trail(id: &str, side: Side, activation: i64, offset: i64) -> SubmitOrder {
+        let mut order = trailing_stop(id, side, 0, offset);
+        order.trigger_price = None;
+        order.activation_price = Some(Decimal::from(activation));
+        order
+    }
+
+    /// A trailing order states exactly one of trigger and activation, at the
+    /// wire and in the engine alike; the bare form is refused with the
+    /// instruction rather than accepted into a state nothing could arm.
+    #[test]
+    fn a_trailing_order_states_exactly_one_of_trigger_and_activation() {
+        use mogwai_protocol::{SubmitPhase, validate_submit_order};
+        let armed = trailing_stop("TA0", Side::Sell, 90, 10);
+        assert!(validate_submit_order(&armed, SubmitPhase::PreStamp).is_ok());
+
+        let awaiting = unactivated_trail("TA1", Side::Sell, 110, 10);
+        assert!(
+            validate_submit_order(&awaiting, SubmitPhase::PreStamp).is_ok(),
+            "the activation-stated shape is a legal submit"
+        );
+
+        let mut neither = awaiting.clone();
+        neither.activation_price = None;
+        assert!(
+            validate_submit_order(&neither, SubmitPhase::PreStamp)
+                .is_err_and(|reason| reason.contains("activation_price")),
+            "stating neither is refused with the instruction"
+        );
+
+        let mut both = awaiting.clone();
+        both.trigger_price = Some(Decimal::from(90));
+        assert!(
+            validate_submit_order(&both, SubmitPhase::PreStamp).is_err(),
+            "stating both leaves activation nothing to decide"
+        );
+
+        let mut misplaced = stop_order("TA2", Side::Sell, OrderType::StopMarket, 90, None);
+        misplaced.activation_price = Some(Decimal::from(110));
+        assert!(
+            validate_submit_order(&misplaced, SubmitPhase::PreStamp).is_err(),
+            "activation_price belongs to trailing orders alone"
+        );
+    }
+
+    /// The engine's own admission enforces the trailing distances, not just
+    /// the wire's: `process_with_market` is reachable without the wire
+    /// validator, and the unactivated shape returns from `validate_submit`
+    /// before any price check - so without these arms a trailing order with
+    /// no offset was accepted and then could only be canceled at activation,
+    /// the admission contract inverted.
+    #[test]
+    fn the_engine_path_refuses_a_trailing_order_missing_its_offsets() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        let mut no_offset = unactivated_trail("TA7", Side::Sell, 110, 10);
+        no_offset.trail_offset = None;
+        let out = e.process_with_market(
+            Command::SubmitOrder(no_offset),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        assert!(
+            out.iter().any(
+                |event| matches!(event, VenueMessage::OrderRejected { reason, .. }
+                if reason.contains("trail_offset"))
+            ),
+            "an offset-less trail is refused at admission, not canceled at activation: {out:?}"
+        );
+        let mut no_gap = unactivated_trail("TA8", Side::Sell, 110, 10);
+        no_gap.order_type = OrderType::TrailingStopLimit;
+        let out = e.process_with_market(
+            Command::SubmitOrder(no_gap),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        assert!(
+            out.iter().any(
+                |event| matches!(event, VenueMessage::OrderRejected { reason, .. }
+                if reason.contains("limit_offset"))
+            ),
+            "a gap-less trailing stop limit is refused at admission: {out:?}"
+        );
+        assert!(e.open.is_empty(), "neither malformed shape may rest");
+    }
+
+    /// The awaiting shape rests unarmed and unfunded, and the activation touch
+    /// arms it: the trigger is seeded `trail_offset` from the activating
+    /// print, the transition speaks as `OrderUpdated` (never `OrderTriggered` -
+    /// nothing has fired), and the armed survivor is an ordinary conditional.
+    #[test]
+    fn an_unactivated_trail_arms_at_its_activation_touch() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        // A sell trail activating at 110: the market at 100 has not touched it.
+        e.process_with_market(
+            Command::SubmitOrder(unactivated_trail("TA3", Side::Sell, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        let order = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "TA3")
+            .expect("the awaiting trail rests");
+        assert!(
+            matches!(order.resting, Resting::Unactivated { activation_px } if activation_px == Decimal::from(110)),
+            "expected the awaiting state, got {:?}",
+            order.resting
+        );
+
+        // It is scanned for the activation touch, toward like a touched order.
+        let scan = e
+            .pending_scans()
+            .into_iter()
+            .find(|scan| scan.client_order_id == "TA3")
+            .expect("the awaiting trail is scanned");
+        assert_eq!(scan.kind, ScanKind::TouchedTrigger);
+        assert_eq!(scan.px, Decimal::from(110));
+
+        // The tape rises to 112: activation, not a fill and not a trigger.
+        let (out, _) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit::flat(2, Decimal::from(112))),
+                scanned_to_ns: 3,
+            }],
+            2,
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, VenueMessage::OrderUpdated { client_order_id, trigger_price, .. }
+                    if client_order_id == "TA3" && *trigger_price == Some(Decimal::from(102)))),
+            "activation speaks as OrderUpdated with the seeded trigger: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, VenueMessage::OrderTriggered { .. })),
+            "nothing fired, so nothing may say it did: {out:?}"
+        );
+        assert_eq!(
+            resting_trigger(&e, "TA3"),
+            Decimal::from(102),
+            "the trigger is the activating print less the offset"
+        );
+        let armed = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "TA3")
+            .expect("the armed trail rests");
+        assert_eq!(armed.ts_triggered, None, "activation is not a trigger");
+        assert_eq!(
+            armed.scanned_ns, 2,
+            "the armed survivor resumes from the activating print, not the walk's end"
+        );
+
+        // The pass that armed it may not also ratchet it; the next pass does.
+        e.mark(&[("BTCUSDT".into(), Decimal::from(150))], 3);
+        assert_eq!(
+            resting_trigger(&e, "TA3"),
+            Decimal::from(102),
+            "a trail armed this pass sits the pass's ratchet out"
+        );
+        e.mark(&[("BTCUSDT".into(), Decimal::from(150))], 4);
+        assert_eq!(
+            resting_trigger(&e, "TA3"),
+            Decimal::from(140),
+            "from the next pass it ratchets like any armed trail"
+        );
+    }
+
+    /// An activation level the market is already through arms on arrival,
+    /// exactly as an already-touched conditional triggers on arrival.
+    #[test]
+    fn an_activation_already_touched_arms_on_arrival() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        let out = e.process_with_market(
+            Command::SubmitOrder(unactivated_trail("TA4", Side::Sell, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(120), 1, 0)),
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, VenueMessage::OrderUpdated { .. })),
+            "arrival activation speaks as OrderUpdated: {out:?}"
+        );
+        assert_eq!(
+            resting_trigger(&e, "TA4"),
+            Decimal::from(110),
+            "seeded from the arrival print at 120 less the 10 offset"
+        );
+    }
+
+    /// The deferred funds question is asked at activation, and a failing
+    /// answer cancels there - the order held nothing, so admission had
+    /// nothing to refuse.
+    #[test]
+    fn an_activation_the_account_cannot_fund_cancels_the_order() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            // Half the base the one-unit sell trail needs.
+            balances: HashMap::from([("BTC".to_string(), Decimal::new(5, 1))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            Command::SubmitOrder(unactivated_trail("TA5", Side::Sell, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        assert_eq!(e.open.len(), 1, "admission defers the funds question");
+
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit::flat(2, Decimal::from(112))),
+                scanned_to_ns: 3,
+            }],
+            2,
+        );
+        assert_eq!(canceled_ids(&out), ["TA5"], "{out:?}");
+        assert!(e.open.is_empty(), "the unfundable trail leaves the book");
+    }
+
+    /// A trailing bracket child that stated an activation level is released by
+    /// its parent's fill into the awaiting state - not `Inert`, which is
+    /// never scanned and would strand it forever.
+    #[test]
+    fn a_released_trailing_child_awaits_its_activation() {
+        let mut e = linked_engine();
+        let mut parent = limit_order("P", 1);
+        parent.price = Some(Decimal::from(100));
+        let parent = linked(
+            parent,
+            link_of(mogwai_protocol::Contingency::Oto, &["C"], None),
+        );
+        let child = linked(
+            unactivated_trail("C", Side::Sell, 110, 10),
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
+        );
+        e.process_with_market(Command::SubmitOrder(parent), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(child), 1, Some(away_reading()));
+        let child_state = |e: &Engine| {
+            e.open
+                .iter()
+                .find(|order| order.submit.client_order_id == "C")
+                .expect("the child rests")
+                .resting
+        };
+        assert!(
+            matches!(child_state(&e), Resting::Held),
+            "an unfilled parent holds its child"
+        );
+
+        let scans = e.pending_scans();
+        let parent_scan = scans
+            .iter()
+            .find(|scan| scan.client_order_id == "P")
+            .expect("the parent limit is scanned");
+        e.apply_scans(&[result(parent_scan, true, 5)], 5);
+        assert!(
+            matches!(child_state(&e), Resting::Unactivated { activation_px } if activation_px == Decimal::from(110)),
+            "release maps a trigger-less trailing child to the awaiting state, got {:?}",
+            child_state(&e)
+        );
+    }
+
+    /// An unactivated trail has no trigger to amend, and the refusal names the
+    /// state rather than claiming the order already triggered.
+    #[test]
+    fn a_trigger_amend_of_an_unactivated_trail_is_refused_by_name() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            Command::SubmitOrder(unactivated_trail("TA6", Side::Sell, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        let out = e.process(
+            Command::ModifyOrder {
+                client_order_id: "TA6".into(),
+                price: None,
+                quantity: None,
+                trigger_price: Some(Decimal::from(95)),
+            },
+            2,
+        );
+        assert!(
+            out.iter().any(
+                |event| matches!(event, VenueMessage::OrderModifyRejected { reason, .. }
+                if reason.contains("unactivated"))
+            ),
+            "the refusal names the state: {out:?}"
         );
     }
 
@@ -8012,7 +8384,7 @@ mod tests {
 
     fn linked(order: SubmitOrder, link: mogwai_protocol::OrderLink) -> SubmitOrder {
         SubmitOrder {
-            link: Some(link),
+            link: Some(Box::new(link)),
             ..order
         }
     }
@@ -11247,7 +11619,7 @@ mod tests {
             .map(|id| {
                 let mut leg =
                     order_with(id, Side::Buy, "BTCUSDT", 1, Some(Decimal::from(1_000_000)));
-                leg.link = Some(mogwai_protocol::OrderLink {
+                leg.link = Some(Box::new(mogwai_protocol::OrderLink {
                     order_list_id: esc_id.clone(),
                     contingency: mogwai_protocol::Contingency::Ouo,
                     linked_order_ids: group_ids
@@ -11256,7 +11628,7 @@ mod tests {
                         .cloned()
                         .collect(),
                     parent_order_id: None,
-                });
+                }));
                 leg
             })
             .collect();

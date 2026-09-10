@@ -402,9 +402,14 @@ impl Engine {
         if order.order_type != OrderType::TrailingStopLimit {
             return Ok(());
         }
-        let trigger = order
-            .trigger_price
-            .ok_or_else(|| "conditional order must carry trigger_price".to_string())?;
+        // The unactivated shape has no trigger to derive from yet; the limit
+        // is derived at activation, through this same function, once the
+        // activating print has seeded the trigger. `validate_submit` owns the
+        // refusal of a trailing order stating neither trigger nor activation,
+        // so a bare `Ok` here cannot admit that shape.
+        let Some(trigger) = order.trigger_price else {
+            return Ok(());
+        };
         let offset = order
             .limit_offset
             .ok_or_else(|| "TrailingStopLimit must carry limit_offset".to_string())?;
@@ -490,7 +495,6 @@ impl Engine {
         // strictly through that trigger. Market-taking does not use the band at
         // all - a taking price is the arithmetic consequence of the quoted
         // ladder below, with no draw in it anywhere.
-        let stated_px = risk_px(&order);
         let increment = self.instruments[&order.symbol].price_increment;
         let size_increment = self.instruments[&order.symbol].size_increment;
         let band_ticks = reading.map_or(0, |value| value.band_ticks);
@@ -540,10 +544,72 @@ impl Engine {
                 band_draw: 0,
                 scanned_ns: ts,
                 revision: 0,
+                skip_next_ratchet: false,
             });
             return out;
         }
 
+        // The unactivated trailing shape: an activation level instead of a
+        // trigger. It rests scanning for the activation touch, holding
+        // nothing - the deferred-funding policy stated on
+        // `Resting::Unactivated` - and a reading already through the level
+        // activates it on arrival, exactly as an already-touched conditional
+        // triggers on arrival below.
+        if order.order_type.trails() && order.trigger_price.is_none() {
+            let activation_px = order
+                .activation_price
+                .expect("validated trigger-less trailing carries activation_price");
+            let venue_order_id = self.next_venue_order_id();
+            self.seen_client_order_ids
+                .insert(order.client_order_id.clone(), venue_order_id.clone());
+            let touched = reading.is_some_and(|value| {
+                mogwai_protocol::touches_toward(order.side, activation_px, value.last_px)
+            });
+            let leaves_qty = order.quantity;
+            let mut out = vec![VenueMessage::OrderAccepted {
+                client_order_id: order.client_order_id.clone(),
+                venue_order_id: venue_order_id.clone(),
+                ts_event: ts,
+            }];
+            self.rest_open(OpenOrder {
+                venue_order_id,
+                submit: order,
+                leaves_qty,
+                ts_accepted: ts,
+                ts_last: ts,
+                ts_triggered: None,
+                band_ticks,
+                resting: Resting::Unactivated { activation_px },
+                band_draw: 0,
+                scanned_ns: ts,
+                revision: 0,
+                skip_next_ratchet: false,
+            });
+            if let (true, Some(value)) = (touched, reading) {
+                let pos = self.open.len() - 1;
+                let hit = Hit {
+                    ts_ns: value.ts_ns,
+                    px: value.last_px,
+                    book: Some(HitBook {
+                        bid_px: value.bid_px,
+                        ask_px: value.ask_px,
+                        bid_sz: value.bid_sz,
+                        ask_sz: value.ask_sz,
+                        depth_levels: value.depth.levels,
+                        depth_growth: value.depth.growth,
+                    }),
+                };
+                // The arrival path's frontier is the acceptance instant, not
+                // the reading's own timestamp: the synthesized hit can carry
+                // an older last print, and resuming from that print would
+                // offer this order pre-acceptance history.
+                out.extend(self.on_activate(pos, hit, ts, ts));
+            }
+            self.push_account_snapshot(&mut out, ts, apply_divergences);
+            return out;
+        }
+
+        let stated_px = risk_px(&order);
         let trigger_px = draw_trigger(self.fill_seed, &order, stated_px, increment, band_ticks, 0);
         // A market-to-limit takes the market, and its stated price is the limit
         // that bounds what it will pay and the price its remainder rests at -
@@ -633,6 +699,7 @@ impl Engine {
                 band_draw: 0,
                 scanned_ns: ts,
                 revision: 0,
+                skip_next_ratchet: false,
             };
             let mut out = vec![VenueMessage::OrderAccepted {
                 client_order_id: record.submit.client_order_id.clone(),
@@ -728,6 +795,7 @@ impl Engine {
                 band_draw: 0,
                 scanned_ns: ts,
                 revision: 0,
+                skip_next_ratchet: false,
             };
             match record.submit.time_in_force {
                 // GTC rests and is swept; an IOC is evaluated exactly once,
@@ -852,6 +920,7 @@ impl Engine {
                 band_draw: 0,
                 scanned_ns: ts,
                 revision: 0,
+                skip_next_ratchet: false,
             };
             out.push(VenueMessage::OrderCanceled {
                 client_order_id: record.submit.client_order_id.clone(),
@@ -937,6 +1006,7 @@ impl Engine {
             band_draw: 0,
             scanned_ns: ts,
             revision: 0,
+            skip_next_ratchet: false,
         };
         if leaves_qty > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
             out.push(VenueMessage::OrderCanceled {
@@ -1181,6 +1251,15 @@ impl Engine {
                 .map(|(pos, _)| pos)
                 .collect();
             for pos in positions {
+                // A trail armed during this pass sits the pass out: the
+                // per-symbol extremes straddle its activation, and its scan
+                // window just restarted - ratcheting it against evidence from
+                // before that restart is what the restart disclaimed. The
+                // flag is consumed here so the next pass ratchets normally.
+                if self.open[pos].skip_next_ratchet {
+                    self.open[pos].skip_next_ratchet = false;
+                    continue;
+                }
                 let order = &self.open[pos];
                 let Some(offset) = order.submit.trail_offset else {
                     continue;
@@ -1278,6 +1357,17 @@ impl Engine {
                 // span short must not hand a freshly live limit a span nothing
                 // looked at.
                 out.extend(self.on_trigger(pos, hit, ts, result.scanned_to_ns));
+                emitted += 1;
+                continue;
+            }
+            if let (Resting::Unactivated { .. }, Some(hit)) = (resting, result.hit) {
+                // The activation touch. The armed survivor resumes from the
+                // hit's own instant, not the walk's reached instant: the
+                // seeded trigger was derived from this print, and the span
+                // between it and where the walk stopped was walked against
+                // the activation predicate, which says nothing about the
+                // freshly seeded stop.
+                out.extend(self.on_activate(pos, hit, ts, hit.ts_ns));
                 emitted += 1;
                 continue;
             }
@@ -1640,12 +1730,21 @@ impl Engine {
             .map_or(Decimal::ZERO, |def| def.price_increment);
         let band_draw = before.band_draw.saturating_add(1);
         let resting = if before.submit.order_type.is_conditional() {
-            match before.submit.trigger_price {
-                Some(stop_px) => Resting::Conditional {
+            match (before.submit.trigger_price, before.submit.activation_price) {
+                (Some(stop_px), _) => Resting::Conditional {
                     stop_px,
                     toward: before.submit.order_type.triggers_toward(),
                 },
-                None => Resting::Inert,
+                // A trailing child that stated an activation level instead of
+                // a trigger: its parent's fill releases it into the same
+                // awaiting-activation state a standalone submit would have
+                // rested in. Mapping it to `Inert` - the pre-activation
+                // behaviour of this arm - stranded it forever, since an inert
+                // order is never scanned and activation is a scan.
+                (None, Some(activation_px)) if before.submit.order_type.trails() => {
+                    Resting::Unactivated { activation_px }
+                }
+                (None, _) => Resting::Inert,
             }
         } else {
             match before.submit.price {
@@ -1803,6 +1902,135 @@ impl Engine {
             Side::Buy if qty < Decimal::ZERO => -qty,
             _ => Decimal::ZERO,
         })
+    }
+
+    /// Arm an unactivated trailing order: its activation touch has been
+    /// delivered (a scan hit on the sweep path, the arrival reading in
+    /// `on_submit_from`), and this is the whole transition from
+    /// `Resting::Unactivated` to an ordinary armed `Conditional` - seed the
+    /// trigger `trail_offset` from the activating print, derive a
+    /// `TrailingStopLimit`'s limit from it, ask the deferred admission funds
+    /// question, place the hold, and hand the order to the same scan and
+    /// ratchet machinery every armed trail uses.
+    ///
+    /// Deliberately not routed through `on_trigger`: activation is not the
+    /// stop firing, so nothing here stamps `ts_triggered` or emits the wire
+    /// `OrderTriggered` - for a `TrailingStopLimit` that event would tell the
+    /// consumer its stop had fired while it was only beginning to trail. The
+    /// transition speaks as `OrderUpdated`, which carries the seeded trigger
+    /// and derived limit to the consumer and is what routes the installed
+    /// hold into the batch's snapshot decision (`account_changed` counts
+    /// `OrderUpdated`); the later per-pass ratchet stays silent, as it always
+    /// has.
+    ///
+    /// The seeded trigger follows the ratchet's convention, not the stated
+    /// price's: positive and notional-representable, never grid-checked,
+    /// because `ratchet_trailing_stops` installs `extreme - offset` without a
+    /// grid check every pass and a rule enforced at the seed and waived one
+    /// pass later would be incoherent.
+    ///
+    /// A failing answer anywhere - an offset that drives the trigger or the
+    /// derived limit out of range, an account that cannot fund the armed
+    /// order - cancels through the same `close_out` path as a trigger-time
+    /// funds cancel, with the reap and the snapshot that path already owes.
+    ///
+    /// `frontier` is where the armed survivor resumes scanning: the hit's own
+    /// instant on the sweep path, the acceptance instant on the arrival path
+    /// (the synthesized arrival hit can carry an older print, and resuming
+    /// from it would offer pre-acceptance history).
+    fn on_activate(&mut self, pos: usize, hit: Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
+        let order = self.open[pos].clone();
+        let Some(offset) = order.submit.trail_offset else {
+            // Unreachable through any validator (a trailing order owes its
+            // offset at the wire and in `validate_submit`), kept as a cancel
+            // rather than a panic so a future in-crate caller fails loudly
+            // without taking the engine down.
+            return self.cancel_unactivated(pos, &order, "trailing order has no trail_offset", ts);
+        };
+        let candidate = match order.submit.side {
+            Side::Sell => hit.px.checked_sub(offset),
+            Side::Buy => hit.px.checked_add(offset),
+        };
+        let Some(candidate) = candidate.filter(|px| *px > Decimal::ZERO) else {
+            return self.cancel_unactivated(
+                pos,
+                &order,
+                "trail_offset puts the seeded trigger at or below zero",
+                ts,
+            );
+        };
+        let mut submit = order.submit.clone();
+        submit.trigger_price = Some(candidate);
+        if let Err(reason) = self.derive_trailing_limit(&mut submit) {
+            return self.cancel_unactivated(pos, &order, &reason, ts);
+        }
+        // The deferred admission funds question, asked against this order's
+        // actual reservation of zero. The pending copy clears its parent
+        // provenance and nothing else: a released bracket child retains
+        // `parent_order_id`, and both `worst_case_leaves` and the aggregate
+        // sell fold exclude parented pending members - so without this the
+        // activating order would be counted zero times (its `Unactivated`
+        // book entry is excluded too) and a short-sale or margin requirement
+        // would be waved through unexamined. The contingency half of the
+        // link stays, so exclusive-group accounting still folds it with its
+        // siblings. The stored submit keeps its full link.
+        let mut eligible = submit.clone();
+        if let Some(link) = eligible.link.as_mut() {
+            link.parent_order_id = None;
+        }
+        if let Err(reason) =
+            self.validate_admission_funds(&submit, risk_px(&submit), ts, true, &[eligible])
+        {
+            return self.cancel_unactivated(pos, &order, &reason, ts);
+        }
+        let before = order.clone();
+        {
+            let live = &mut self.open[pos];
+            let toward = live.submit.order_type.triggers_toward();
+            live.submit = submit;
+            live.resting = Resting::Conditional {
+                stop_px: candidate,
+                toward,
+            };
+            live.scanned_ns = frontier;
+            live.revision = live.revision.saturating_add(1);
+            live.ts_last = ts;
+            live.skip_next_ratchet = true;
+        }
+        self.refresh_open_hold(pos, &before);
+        let live = &self.open[pos];
+        vec![VenueMessage::OrderUpdated {
+            client_order_id: live.submit.client_order_id.clone(),
+            venue_order_id: live.venue_order_id.clone(),
+            quantity: live.submit.quantity,
+            price: live.submit.price,
+            trigger_price: live.submit.trigger_price,
+            leaves_qty: live.leaves_qty,
+            ts_event: ts,
+        }]
+    }
+
+    /// The activation-time twin of `cancel_triggered`: an unactivated trail
+    /// whose activation found it unservable - an out-of-range seed or an
+    /// account that cannot fund the armed order - leaves through `close_out`
+    /// with the reason said out loud. It held nothing, so the cancel frees
+    /// nothing; the reap and the terminal record are what matter.
+    fn cancel_unactivated(
+        &mut self,
+        pos: usize,
+        order: &OpenOrder,
+        reason: &str,
+        ts: u64,
+    ) -> Vec<VenueMessage> {
+        tracing::warn!(client_order_id = %order.submit.client_order_id, %reason, "unactivated trailing order canceled at activation");
+        let reaped = self.close_out(pos, order, WireOrderStatus::Canceled, ts);
+        let mut out = vec![VenueMessage::OrderCanceled {
+            client_order_id: order.submit.client_order_id.clone(),
+            venue_order_id: order.venue_order_id.clone(),
+            ts_event: ts,
+        }];
+        out.extend(reaped);
+        out
     }
 
     /// The triggered conditional's transition, under the engine lock: emits
@@ -2510,8 +2738,62 @@ impl Engine {
             {
                 return Err("a market-on-trigger order must not carry a price".into());
             }
-            _ if order.order_type.is_conditional() && order.trigger_price.is_none() => {
+            // The same trailing shape rules as the wire validator, restated
+            // here because `process_with_market` is reachable without the
+            // wire: a fixed conditional states its trigger, a trailing order
+            // states exactly one of trigger and activation, and activation
+            // belongs to trailing types alone.
+            _ if order.order_type.is_conditional()
+                && !order.order_type.trails()
+                && order.trigger_price.is_none() =>
+            {
                 return Err("conditional order must carry trigger_price".into());
+            }
+            _ if order.order_type.trails()
+                && order.trigger_price.is_none()
+                && order.activation_price.is_none() =>
+            {
+                return Err("a trailing order must carry trigger_price or activation_price".into());
+            }
+            _ if order.order_type.trails()
+                && order.trigger_price.is_some()
+                && order.activation_price.is_some() =>
+            {
+                return Err(
+                    "a trailing order must carry trigger_price or activation_price, not both"
+                        .into(),
+                );
+            }
+            _ if order.activation_price.is_some() && !order.order_type.trails() => {
+                return Err("activation_price is legal only on a trailing order".into());
+            }
+            // The trailing distances, mirrored from the wire validator because
+            // the unactivated shape returns from this function before any
+            // price check runs: without these arms, `process_with_market`
+            // admitted a trailing order with no offset that activation could
+            // only cancel - a malformed submit accepted and refused later,
+            // which is the admission contract inverted.
+            _ if order.order_type.trails()
+                && !order
+                    .trail_offset
+                    .is_some_and(|offset| offset > Decimal::ZERO) =>
+            {
+                return Err("a trailing order must carry a positive trail_offset".into());
+            }
+            _ if order.trail_offset.is_some() && !order.order_type.trails() => {
+                return Err("trail_offset is legal only on a trailing order".into());
+            }
+            OrderType::TrailingStopLimit
+                if !order
+                    .limit_offset
+                    .is_some_and(|offset| offset > Decimal::ZERO) =>
+            {
+                return Err("TrailingStopLimit must carry a positive limit_offset".into());
+            }
+            _ if order.limit_offset.is_some()
+                && order.order_type != OrderType::TrailingStopLimit =>
+            {
+                return Err("limit_offset is legal only on TrailingStopLimit".into());
             }
             OrderType::Limit
             | OrderType::StopLimit
@@ -2523,7 +2805,6 @@ impl Engine {
             }
             _ => {}
         }
-        let price = risk_px(order);
         // The same predicate the wire gate reads, in the same position. This
         // was a hand-rolled `Limit | StopLimit | LimitIfTouched` and it had
         // drifted: the wire admitted a post-only `TrailingStopLimit` and this
@@ -2548,6 +2829,28 @@ impl Engine {
         {
             return Err("conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger".into());
         }
+        // Activation is a consumer-stated level, so it lives on the price grid
+        // like a stated trigger does - unlike the venue-derived trigger the
+        // activation will later seed, which follows the ratchet's convention
+        // and is not grid-checked.
+        if let Some(activation) = order.activation_price {
+            if activation <= Decimal::ZERO {
+                return Err("activation price must be > 0".into());
+            }
+            if !on_increment(activation, instrument.price_increment) {
+                return Err("activation price violates price increment".into());
+            }
+        }
+        // The unactivated trailing shape stops here: it has no price yet, so
+        // every check below - positivity, grid, notional, the funded-account
+        // requirement - is deferred to activation, where `on_activate` asks
+        // them against the seeded trigger and cancels the order on a failing
+        // answer. Deferral is the policy, not an accident: the order holds
+        // nothing until it can execute, exactly like a held bracket child.
+        if order.order_type.trails() && order.trigger_price.is_none() {
+            return Ok(());
+        }
+        let price = risk_px(order);
         // The child form of this rule is not repeated here, deliberately.
         // `mogwai_protocol::validate_order_link` already refuses a `Market`
         // child and an `Ioc`/`Fok` child for exactly these reasons, and
@@ -2577,6 +2880,30 @@ impl Engine {
             return Err("price violates price increment".into());
         }
 
+        self.validate_admission_funds(order, price, ts, apply_divergences, group)
+    }
+
+    /// The financial half of admission - the notional-overflow guard and the
+    /// funded-account requirement - split out of `validate_submit` so
+    /// activation can ask the same question. An unactivated trailing order
+    /// defers exactly this block: at submit it has no price, so
+    /// `validate_submit` returns before reaching here, and `on_activate` calls
+    /// this against the seeded trigger (or the derived trailing limit) with
+    /// the order itself as the one `group` member - which counts it once from
+    /// `pending` in `worst_case_leaves` and the aggregate sell fold while its
+    /// still-`Unactivated` book entry is excluded, and judges it against its
+    /// actual reservation of zero.
+    fn validate_admission_funds(
+        &self,
+        order: &SubmitOrder,
+        price: Decimal,
+        ts: u64,
+        apply_divergences: bool,
+        group: &[SubmitOrder],
+    ) -> Result<(), String> {
+        let Some(instrument) = self.instruments.get(&order.symbol) else {
+            return Err("unknown instrument".into());
+        };
         // No upstream layer bounds order size, and rust_decimal's `Mul` panics
         // on overflow: `apply_fill`'s `last_qty * last_px` runs unconditionally
         // once this order is accepted, so a notional this validator lets
@@ -3011,11 +3338,21 @@ impl Engine {
             // refusing it is the conservative answer while the child holds
             // nothing, and the reason now says which of the two it is.
             let held = conditional && matches!(self.open[pos].resting, Resting::Held);
+            // An unactivated trail has no trigger yet - the venue seeds one at
+            // activation - so a trigger amend is refused with that state
+            // named rather than the false "already triggered". Quantity
+            // amends pass through below and preserve the state.
+            let unactivated =
+                conditional && matches!(self.open[pos].resting, Resting::Unactivated { .. });
             return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: if held {
                     "order-list child is held: its trigger is not live until its parent executes"
+                        .into()
+                } else if unactivated {
+                    "trailing order is unactivated: the venue seeds its trigger at activation, \
+                     so there is no trigger to amend yet"
                         .into()
                 } else if conditional {
                     "order has already triggered".into()

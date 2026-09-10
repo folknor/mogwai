@@ -222,6 +222,21 @@ Configuration is refused the same way and at the same distance from the venue:
 would otherwise expire every dial before a socket could open and report a local
 config error as an unreachable venue.
 
+## A market-on-trigger's wire trigger is consumed, not forwarded
+
+The venue announces `OrderTriggered` for every conditional it fires, market-
+and limit-on-trigger alike. Nautilus's order model restricts the `Triggered`
+lifecycle state to the limit-on-trigger types (`StopLimit`, `LimitIfTouched`,
+`TrailingStopLimit`); a `StopMarket`, `MarketIfTouched` or
+`TrailingStopMarket` executes the instant it triggers and has no intermediate
+state, and applying the event to one logs an error-level "Invalid event for
+order type" on every ordinary stop-out. The adapter is the translation
+boundary, so for those three types it consumes the wire message and emits no
+nautilus event, leaving the mirror untouched for the fill or cancel arriving
+at the same instant. A host therefore sees `Triggered` only on order types
+whose state machine has it; the wire message itself is unchanged for any
+other protocol consumer.
+
 ## The data client has the same shape, without the guard
 
 The data client implements nautilus funding-rate subscriptions for perpetuals.

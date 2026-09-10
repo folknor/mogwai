@@ -107,7 +107,7 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
 /// adapter sent before linkage existed.
 pub(crate) fn wire_order_link(
     init: &nautilus_model::events::OrderInitialized,
-) -> anyhow::Result<Option<mogwai_protocol::OrderLink>> {
+) -> anyhow::Result<Option<Box<mogwai_protocol::OrderLink>>> {
     use nautilus_model::enums::ContingencyType;
 
     let linked: Vec<String> = init
@@ -133,12 +133,12 @@ pub(crate) fn wire_order_link(
         }
         return Ok(None);
     };
-    Ok(Some(mogwai_protocol::OrderLink {
+    Ok(Some(Box::new(mogwai_protocol::OrderLink {
         order_list_id: order_list_id.to_string(),
         contingency,
         linked_order_ids: linked,
         parent_order_id: parent,
-    }))
+    })))
 }
 
 /// The trailing offset a `TrailingStopMarket` carries, if the offset's type is one

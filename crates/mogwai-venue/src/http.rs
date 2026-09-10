@@ -1024,6 +1024,20 @@ pub(crate) struct Health {
     /// Separate from the venue's terminal fault shutdown path: this is what a
     /// poller can see before a run dies, not when it dies.
     fault: Option<HealthFault>,
+    /// The two account-lifecycle boot constants, published for the attaching
+    /// consumer the readiness record cannot reach: a posted ledger's survival
+    /// depends on both (a reset-enabled venue discards it at the first socket;
+    /// a nonzero TTL can collect a posted, never-connected account before the
+    /// socket seats), and only the spawning launcher can read the
+    /// `ReadyRecord` that already reports them. Same names, same meanings, and
+    /// the same `cfg` they are read from at the readiness line - `false`
+    /// means reconnection preserves the ledger. Always present: a consumer
+    /// gates on these, and an absent field must not read as a third state.
+    reset_account_on_reconnect: bool,
+    /// Milliseconds a frozen account may sit unconnected before the reaper
+    /// collects it; `0` means never, which is the default. Published beside
+    /// `reset_account_on_reconnect` for the same attach-time verification.
+    account_ttl_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -1162,6 +1176,11 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
         fault,
+        // From the same `cfg` the readiness record is built from, so the two
+        // surfaces cannot disagree about one run; the socket lifecycle test
+        // asserts the equality end to end.
+        reset_account_on_reconnect: state.cfg.reset_account_on_reconnect,
+        account_ttl_ms: state.cfg.account_ttl_ms,
     })
 }
 
@@ -3470,6 +3489,7 @@ mod calendar_tests {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
@@ -3550,6 +3570,7 @@ mod calendar_tests {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
@@ -3605,16 +3626,17 @@ mod calendar_tests {
             trigger_price: None,
             trail_offset: None,
             limit_offset: None,
+            activation_price: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
-            link: Some(mogwai_protocol::OrderLink {
+            link: Some(Box::new(mogwai_protocol::OrderLink {
                 order_list_id: "OL-1".into(),
                 contingency: mogwai_protocol::Contingency::Ouo,
                 linked_order_ids: siblings.iter().map(|id| (*id).to_string()).collect(),
                 parent_order_id: None,
-            }),
+            })),
         }
     }
 

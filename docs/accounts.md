@@ -238,7 +238,11 @@ continuation. Set it true when a batch reuses ids across independent
 experiments. A socket presenting the callsign of one already on the account
 never resets, because that would discard the ledger the sitting socket is
 trading on. Both keys are reported on the readiness record, so a launcher never
-has to infer which way a venue is set.
+has to infer which way a venue is set - and on `GET /health`, always present,
+so a consumer attaching to a venue it did not spawn (which never sees the
+readiness line) can verify them too. A posted ledger's survival depends on
+both: a reset-enabled venue discards it at the first socket, and a nonzero TTL
+can collect a posted, never-connected account before the socket seats.
 
 ## Risk policies
 

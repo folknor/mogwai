@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{fast_config, http_get, spawn, venue_binary};
+use common::{fast_config, health_lifecycle_config, http_get, spawn, venue_binary};
 use mogwai_protocol::launch::{LaunchError, LaunchSpec, launch};
 
 #[test]
@@ -79,6 +79,39 @@ fn ready_record_reports_the_bound_ephemeral_port() {
     let health: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
     assert_eq!(health["status"], "ok");
     assert_eq!(health["oms_type"], "netting");
+}
+
+/// `/health` publishes the two account-lifecycle boot constants, equal to the
+/// readiness record's, so an attach-mode consumer - which never sees the
+/// readiness line - can verify the settings a posted ledger's survival
+/// depends on instead of resting on an operator attestation. The two surfaces
+/// are read from one `cfg`, and this gate is what pins the equality end to
+/// end: both values are stated non-default in the config, so a venue that
+/// reported its defaults on either surface would disagree with the other or
+/// with the file.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn health_reports_the_account_lifecycle_settings_the_ready_record_reports() {
+    let venue = spawn(&["--config", &health_lifecycle_config()]);
+    assert!(
+        venue.record.reset_account_on_reconnect,
+        "the config states the non-default"
+    );
+    assert_eq!(venue.record.account_ttl_ms, 86_400_000);
+
+    let (status, body) = http_get(&venue.http_base(), "/health");
+    assert_eq!(status, 200);
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
+    assert_eq!(
+        health["reset_account_on_reconnect"],
+        serde_json::Value::Bool(venue.record.reset_account_on_reconnect),
+        "one cfg, two surfaces, one value: {body}"
+    );
+    assert_eq!(
+        health["account_ttl_ms"],
+        serde_json::Value::from(venue.record.account_ttl_ms),
+        "the TTL is a JSON integer equal to the record's: {body}"
+    );
 }
 
 /// The defect this whole lifecycle exists to remove: two runs sharing one

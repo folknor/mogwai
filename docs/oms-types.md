@@ -54,6 +54,20 @@ watching every print does - but a shadow implementation trailing off marks will
 diverge from it on exactly the spikes, and the divergence reads as a parity
 mismatch rather than as an error.
 
+A trailing order states exactly one of `trigger_price` and `activation_price`.
+With a `trigger_price` the trail is armed the moment it is accepted, at the
+trigger you stated. With an `activation_price` it rests unarmed - holding no
+funds, counted by no exposure check - until a print touches the level toward
+it (a sell trail activates when the tape rises to it, a buy trail when the
+tape falls to it, the same direction a touched order enters from); the venue
+then seeds the trigger `trail_offset` from the activating print, asks the
+deferred funds question (a failing answer cancels the order there), and
+reports the seeded trigger back on `OrderUpdated`. Stating both is refused as
+contradictory, and stating neither is refused too: nautilus's
+activate-at-first-print form is a shape this venue deliberately does not
+serve, so say where trailing begins. An activation level the market is
+already through activates on arrival.
+
 A `TrailingStopLimit` carries two offsets and no price. `trail_offset` is how
 far its trigger sits from that extreme, as on a `TrailingStopMarket`. `limit_offset` is how far its limit sits from that
 trigger, on the side the order can fill from - a sell rests at

@@ -25,7 +25,7 @@ use std::{
 };
 
 use common::{
-    StubState, bound_stub, cached_order, cached_stop_market, instrument_id, next_exec_event,
+    StubState, bound_stub, cached_order, cached_stop_limit, instrument_id, next_exec_event,
     next_non_instrument_data_event, submit_command, trade_json,
 };
 use mogwai_adapter::{
@@ -298,9 +298,12 @@ async fn submit_exec_client(
     (client, sink_rx)
 }
 
-/// As `submit_exec_client`, but submits a nautilus `StopMarketOrder` under the
+/// As `submit_exec_client`, but submits a nautilus `StopLimitOrder` under the
 /// supplied inbound havoc. The order shape is what differs: only a conditional
-/// produces an `OrderTriggered` for havoc to reach.
+/// produces an `OrderTriggered` for havoc to reach, and it must be a
+/// limit-on-trigger type - the adapter consumes the wire trigger for the
+/// market-on-trigger types, since nautilus has no `Triggered` state for them,
+/// so a stop-market would leave this test nothing to observe.
 async fn submit_stop_exec_client(
     state: Arc<StubState>,
     havoc: HavocSpec,
@@ -310,7 +313,7 @@ async fn submit_stop_exec_client(
     replace_exec_event_sender(sink_tx);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
-    let order = cached_stop_market(&cache);
+    let order = cached_stop_limit(&cache);
     let config = MogwaiExecClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
@@ -1599,15 +1602,15 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(
-            r#"{"type":"OrderAccepted","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":10}"#
+            r#"{"type":"OrderAccepted","client_order_id":"O-STOPLIMIT","venue_order_id":"V-9","ts_event":10}"#
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderTriggered","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":11}"#
+            r#"{"type":"OrderTriggered","client_order_id":"O-STOPLIMIT","venue_order_id":"V-9","ts_event":11}"#
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":12}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-STOPLIMIT","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.00","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":12}"#
                 .to_string(),
         );
     }

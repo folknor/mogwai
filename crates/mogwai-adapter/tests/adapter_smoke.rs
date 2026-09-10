@@ -18,9 +18,9 @@ use std::{
 };
 
 use common::{
-    StubState, assert_owns_a_fresh_exec_sink, bound_stub, cached_order, cached_stop_limit,
-    cached_stop_market, cached_trailing_stop, connected_exec_client, instrument_id,
-    next_exec_event, submit_command,
+    StubState, assert_owns_a_fresh_exec_sink, bound_stub, cached_activation_trailing_stop,
+    cached_order, cached_stop_limit, cached_stop_market, cached_trailing_stop,
+    connected_exec_client, instrument_id, next_exec_event, submit_command,
 };
 use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
@@ -595,12 +595,15 @@ async fn an_account_labelled_differently_is_still_served() {
 
 /// The one test that proves the conditional refusal is actually gone end to
 /// end: a real nautilus `StopMarketOrder` through the real `ExecutionClient`,
-/// over a real socket, producing `Submitted -> Accepted -> Triggered -> Filled`
-/// on the emitter. Before this landing the submit failed at `wire_order_type`
-/// and no frame ever left the client.
+/// over a real socket, producing `Submitted -> Accepted -> Filled` on the
+/// emitter - and, since the translation-boundary fix, no `Triggered` between
+/// them, because nautilus has no such state for a market-on-trigger type and
+/// forwarding the venue's wire trigger logged "Invalid event for order type"
+/// on every stop-out. Before the type landed at all the submit failed at
+/// `wire_order_type` and no frame ever left the client.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
+async fn adapter_submits_a_stop_market_and_sees_the_fill_with_no_triggered() {
     let state = Arc::new(StubState::default());
     state.serve_account.store(true, Ordering::Relaxed);
     {
@@ -644,14 +647,11 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
         }
         other => panic!("expected an OrderAccepted, got {other:?}"),
     }
-    match next_exec_event(&mut sink_rx, timeout, "the stop-market's OrderTriggered").await {
-        ExecutionEvent::Order(OrderEventAny::Triggered(triggered)) => {
-            assert_eq!(triggered.client_order_id, order.client_order_id());
-            assert_eq!(triggered.venue_order_id, Some(VenueOrderId::from("V-9")));
-            assert_eq!(triggered.instrument_id, instrument_id());
-        }
-        other => panic!("expected an OrderTriggered between accept and fill, got {other:?}"),
-    }
+    // The venue's wire announced OrderTriggered between the accept and the
+    // fill, and it must NOT surface: nautilus has no Triggered state for a
+    // stop-market, so forwarding it logged "Invalid event for order type" on
+    // every ordinary stop-out. The adapter consumes it, and the next event a
+    // host sees after the accept is the fill itself.
     match next_exec_event(&mut sink_rx, timeout, "the fill the trigger produced").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
             assert_eq!(fill.client_order_id, order.client_order_id());
@@ -782,6 +782,57 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
     assert!(
         group.find(r#""client_order_id":"O-1""#) < group.find(r#""client_order_id":"O-STOP""#),
         "the legs keep the list's order: {group}"
+    );
+}
+
+/// The shape broadarrow submits for every bare trailing exit: a price-typed
+/// offset, a stated activation price, and no trigger. This used to die at the
+/// decode boundary ("conditional order must carry trigger_price"), which made
+/// a trailing `strategy.exit` undeployable; the wire now takes the
+/// activation-stated form and the venue seeds the trigger at activation, so
+/// the frame must reach the venue carrying the activation price and no
+/// trigger.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_trigger_less_trailing_stop_with_activation_reaches_the_venue() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_activation_trailing_stop(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("the activation-stated trailing shape is served");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let submits = loop {
+        let seen: Vec<String> = state
+            .ws_client_messages
+            .lock()
+            .expect("ws client messages mutex")
+            .iter()
+            .filter(|text| text.contains(r#""type":"SubmitOrder""#))
+            .cloned()
+            .collect();
+        if !seen.is_empty() || Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(submits.len(), 1, "the submit reaches the wire: {submits:?}");
+    let frame = &submits[0];
+    assert!(
+        frame.contains(r#""activation_price":"105.00""#),
+        "the activation level travels: {frame}"
+    );
+    assert!(
+        !frame.contains("trigger_price"),
+        "no trigger is invented for the venue to refuse or obey: {frame}"
     );
 }
 
