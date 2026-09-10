@@ -414,13 +414,7 @@ pub(crate) fn instrument_any(
             );
             let currency = Currency::from_str(settlement_currency)
                 .with_context(|| format!("unknown settlement currency {settlement_currency}"))?;
-            let asset_class = match asset_class {
-                WireAssetClass::Fx => AssetClass::FX,
-                WireAssetClass::Equity => AssetClass::Equity,
-                WireAssetClass::Commodity => AssetClass::Commodity,
-                WireAssetClass::Index => AssetClass::Index,
-                WireAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
-            };
+            let asset_class = nautilus_asset_class(*asset_class);
             let contract = FuturesContract::builder()
                 .instrument_id(id)
                 .raw_symbol(symbol)
@@ -482,43 +476,187 @@ pub(crate) fn instrument_any(
                 .context("construct equity")?;
             Ok(InstrumentAny::Equity(equity))
         }
-        // Both crypto derivatives are `CryptoPerpetual`, which carries the
-        // `is_inverse` flag the two differ by. An inverse contract settles in
-        // its base asset, which is why the two currency arguments swap.
+        // The nautilus type follows the wire's declared asset class, because
+        // nautilus ships two perpetual types and treats them differently: a
+        // crypto perpetual is `CryptoPerpetual`, the specific type whose
+        // `asset_class()` is definitionally cryptocurrency, and everything
+        // else is `PerpetualContract`, the cross-asset generic that stores
+        // the class and the underlying. Publishing every perpetual as the
+        // generic was considered and rejected: nautilus's risk engine
+        // accepts every inverse `CryptoPerpetual` on its full-position exit
+        // path but an inverse `PerpetualContract` only when linear, so the
+        // uniform arm would have been a silent risk-behavior migration for
+        // crypto inverses, not a type cleanup. Before this split a non-crypto
+        // perpetual was published as `CryptoPerpetual` - a type that cannot
+        // say what it is - and its declared asset class was discarded at
+        // this seam.
+        //
+        // An inverse contract settles in its base asset, which is why the
+        // currency arguments differ between the two wire classes.
         InstrumentClass::Perpetual {
             underlying,
             settlement_currency,
             multiplier,
+            asset_class,
             ..
-        } => crypto_perpetual(
-            def,
-            id,
-            symbol,
-            underlying,
-            settlement_currency,
-            settlement_currency,
-            *multiplier,
-            false,
-            ts_init,
-        ),
+        } => match asset_class {
+            WireAssetClass::Cryptocurrency => crypto_perpetual(
+                def,
+                id,
+                symbol,
+                underlying,
+                settlement_currency,
+                settlement_currency,
+                *multiplier,
+                false,
+                ts_init,
+            ),
+            other => perpetual_contract(
+                def,
+                id,
+                symbol,
+                underlying,
+                *other,
+                // A linear perpetual on a non-currency underlying (an equity
+                // or index perp) has no base currency to name: `underlying`
+                // is the asset identity, not a currency, and nothing on the
+                // linear costing path reads the base - `cost_currency()`
+                // consults it only for an inverse.
+                None,
+                settlement_currency,
+                settlement_currency,
+                *multiplier,
+                false,
+                ts_init,
+            ),
+        },
         InstrumentClass::Inverse {
             underlying,
             settlement_currency,
             quote_currency,
             multiplier,
-            ..
-        } => crypto_perpetual(
-            def,
-            id,
-            symbol,
-            underlying,
-            quote_currency,
-            settlement_currency,
-            *multiplier,
-            true,
-            ts_init,
-        ),
+            asset_class,
+        } => match asset_class {
+            WireAssetClass::Cryptocurrency => crypto_perpetual(
+                def,
+                id,
+                symbol,
+                underlying,
+                quote_currency,
+                settlement_currency,
+                *multiplier,
+                true,
+                ts_init,
+            ),
+            other => perpetual_contract(
+                def,
+                id,
+                symbol,
+                underlying,
+                *other,
+                // An inverse settles in its base, and the costing path reads
+                // the base for exactly that case, so it must be stated: the
+                // wire's settlement currency is that asset by the class's
+                // own definition.
+                Some(settlement_currency),
+                quote_currency,
+                settlement_currency,
+                *multiplier,
+                true,
+                ts_init,
+            ),
+        },
     }
+}
+
+fn nautilus_asset_class(asset_class: WireAssetClass) -> AssetClass {
+    match asset_class {
+        WireAssetClass::Fx => AssetClass::FX,
+        WireAssetClass::Equity => AssetClass::Equity,
+        WireAssetClass::Commodity => AssetClass::Commodity,
+        WireAssetClass::Index => AssetClass::Index,
+        WireAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
+    }
+}
+
+/// The `mogwai_funding_*` metadata a perpetual carries, independent of which
+/// nautilus type publishes it - assembled once so the two perpetual
+/// constructors cannot drift on what survives the seam.
+fn funding_info(def: &InstrumentDef) -> Option<Params> {
+    def.class.funding().map(|terms| {
+        let mut info = Params::new();
+        info.insert(
+            "mogwai_funding_interval_ns".into(),
+            terms.interval_ns.into(),
+        );
+        info.insert(
+            "mogwai_funding_rate".into(),
+            serde_json::Value::String(terms.interest.to_string()),
+        );
+        info.insert(
+            "mogwai_index_symbol".into(),
+            terms
+                .index_symbol
+                .as_ref()
+                .map_or(serde_json::Value::Null, |symbol| symbol.clone().into()),
+        );
+        info.insert(
+            "mogwai_funding_clamp".into(),
+            serde_json::Value::String(terms.clamp.to_string()),
+        );
+        info
+    })
+}
+
+/// The cross-asset perpetual, for every declared asset class but
+/// cryptocurrency. Carries what `CryptoPerpetual` cannot: the asset class and
+/// the underlying's identity. `base` is stated only where the costing path
+/// reads it - the inverse case - and `None` otherwise, because inventing a
+/// currency from a non-currency underlying would be a wrong number where an
+/// absence is an honest one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every value is a distinct instrument fact; bundling them would only move the list"
+)]
+fn perpetual_contract(
+    def: &InstrumentDef,
+    id: InstrumentId,
+    symbol: NautilusSymbol,
+    underlying: &str,
+    asset_class: WireAssetClass,
+    base: Option<&str>,
+    quote: &str,
+    settlement: &str,
+    multiplier: Decimal,
+    is_inverse: bool,
+    ts_init: UnixNanos,
+) -> anyhow::Result<InstrumentAny> {
+    let base = base
+        .map(|base| Currency::from_str(base).with_context(|| format!("unknown base {base}")))
+        .transpose()?;
+    let quote = Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
+    let settlement = Currency::from_str(settlement)
+        .with_context(|| format!("unknown settlement currency {settlement}"))?;
+    let contract = nautilus_model::instruments::PerpetualContract::builder()
+        .instrument_id(id)
+        .raw_symbol(symbol)
+        .underlying(ustr::Ustr::from(underlying))
+        .asset_class(nautilus_asset_class(asset_class))
+        .maybe_base_currency(base)
+        .quote_currency(quote)
+        .settlement_currency(settlement)
+        .is_inverse(is_inverse)
+        .price_precision(def.price_precision)
+        .size_precision(def.size_precision)
+        .price_increment(price(def.price_increment, def.price_precision)?)
+        .size_increment(quantity(def.size_increment, def.size_precision)?)
+        .multiplier(quantity(multiplier, multiplier.scale() as u8)?)
+        .maybe_info(funding_info(def))
+        .ts_event(UnixNanos::from(0))
+        .ts_init(ts_init)
+        .build()
+        .context("construct perpetual contract")?;
+    Ok(InstrumentAny::PerpetualContract(contract))
 }
 
 /// The shared construction for both crypto derivative classes.
@@ -546,29 +684,6 @@ fn crypto_perpetual(
     let quote = Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
     let settlement = Currency::from_str(settlement)
         .with_context(|| format!("unknown settlement currency {settlement}"))?;
-    let info = def.class.funding().map(|terms| {
-        let mut info = Params::new();
-        info.insert(
-            "mogwai_funding_interval_ns".into(),
-            terms.interval_ns.into(),
-        );
-        info.insert(
-            "mogwai_funding_rate".into(),
-            serde_json::Value::String(terms.interest.to_string()),
-        );
-        info.insert(
-            "mogwai_index_symbol".into(),
-            terms
-                .index_symbol
-                .as_ref()
-                .map_or(serde_json::Value::Null, |symbol| symbol.clone().into()),
-        );
-        info.insert(
-            "mogwai_funding_clamp".into(),
-            serde_json::Value::String(terms.clamp.to_string()),
-        );
-        info
-    });
     let contract = nautilus_model::instruments::CryptoPerpetual::builder()
         .instrument_id(id)
         .raw_symbol(symbol)
@@ -584,7 +699,7 @@ fn crypto_perpetual(
         // `info` is already optional here - a perpetual without funding terms
         // carries none - so the absence passes through rather than being
         // spelled as an empty map.
-        .maybe_info(info)
+        .maybe_info(funding_info(def))
         .ts_event(UnixNanos::from(0))
         .ts_init(ts_init)
         .build()
@@ -642,6 +757,117 @@ mod tests {
         assert_eq!(info.get_str("mogwai_funding_rate"), Some("0.000125"));
         assert_eq!(info.get_str("mogwai_index_symbol"), Some("BTCUSDT"));
         assert_eq!(info.get_str("mogwai_funding_clamp"), Some("0.005"));
+    }
+
+    /// A non-crypto perpetual is published as `PerpetualContract`, the
+    /// cross-asset type that can say what it is - before this it wore
+    /// `CryptoPerpetual` and its declared asset class was discarded at the
+    /// seam. The crypto perpetual stays on the specific type (the test above
+    /// pins that), because nautilus's risk engine treats the two types
+    /// differently for inverse contracts and the split by declared class is
+    /// nautilus's own taxonomy.
+    #[test]
+    fn a_non_crypto_perpetual_is_published_as_a_perpetual_contract() {
+        let def = InstrumentDef {
+            symbol: "NVDA.P".into(),
+            class: InstrumentClass::Perpetual {
+                underlying: "NVDA".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Equity,
+                funding_interval_ns: 28_800_000_000_000,
+                funding_rate: Decimal::new(125, 6),
+                index_symbol: None,
+                funding_clamp: Decimal::new(5, 3),
+            },
+            price_precision: 2,
+            size_precision: 3,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::new(1, 3),
+        };
+        let InstrumentAny::PerpetualContract(contract) =
+            instrument_any(&def, UnixNanos::from(7)).expect("equity perpetual converts")
+        else {
+            panic!("a non-crypto perpetual must produce the cross-asset type");
+        };
+        assert_eq!(contract.asset_class, AssetClass::Equity);
+        assert_eq!(contract.underlying.as_str(), "NVDA");
+        assert_eq!(
+            contract.base_currency, None,
+            "an equity underlying is an asset identity, not a currency"
+        );
+        assert_eq!(contract.quote_currency.code.as_str(), "USD");
+        assert_eq!(contract.settlement_currency.code.as_str(), "USD");
+        assert!(!contract.is_inverse);
+        let info = contract
+            .info
+            .expect("the funding metadata survives on the cross-asset type too");
+        assert_eq!(
+            info.get_u64("mogwai_funding_interval_ns"),
+            Some(28_800_000_000_000)
+        );
+        assert_eq!(info.get_str("mogwai_funding_rate"), Some("0.000125"));
+    }
+
+    /// A non-crypto inverse states its base, because the inverse costing path
+    /// reads it - the wire's settlement currency is that asset by the class's
+    /// own definition - and nautilus's checked constructor refuses an inverse
+    /// without one.
+    #[test]
+    fn a_non_crypto_inverse_is_published_with_its_settlement_as_base() {
+        let def = InstrumentDef {
+            symbol: "XAUUSD-INV".into(),
+            class: InstrumentClass::Inverse {
+                underlying: "XAU".into(),
+                settlement_currency: "XAU".into(),
+                quote_currency: "USD".into(),
+                multiplier: Decimal::from(100),
+                asset_class: WireAssetClass::Commodity,
+            },
+            price_precision: 1,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 1),
+            size_increment: Decimal::ONE,
+        };
+        let InstrumentAny::PerpetualContract(contract) =
+            instrument_any(&def, UnixNanos::from(7)).expect("commodity inverse converts")
+        else {
+            panic!("a non-crypto inverse must produce the cross-asset type");
+        };
+        assert_eq!(contract.asset_class, AssetClass::Commodity);
+        assert!(contract.is_inverse);
+        assert_eq!(
+            contract.base_currency.map(|currency| currency.code),
+            Some("XAU".into())
+        );
+    }
+
+    /// The crypto inverse keeps `CryptoPerpetual`: nautilus's risk engine
+    /// accepts every inverse crypto perpetual on its full-position exit path
+    /// but an inverse `PerpetualContract` only when linear, so moving it
+    /// would be a silent risk-behavior migration rather than a type cleanup.
+    #[test]
+    fn a_crypto_inverse_stays_on_the_specific_crypto_type() {
+        let def = InstrumentDef {
+            symbol: "BTCUSD-INV".into(),
+            class: InstrumentClass::Inverse {
+                underlying: "BTC".into(),
+                settlement_currency: "BTC".into(),
+                quote_currency: "USD".into(),
+                multiplier: Decimal::from(100),
+                asset_class: WireAssetClass::Cryptocurrency,
+            },
+            price_precision: 1,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 1),
+            size_increment: Decimal::ONE,
+        };
+        let InstrumentAny::CryptoPerpetual(contract) =
+            instrument_any(&def, UnixNanos::from(7)).expect("crypto inverse converts")
+        else {
+            panic!("a crypto inverse must stay a CryptoPerpetual");
+        };
+        assert!(contract.is_inverse);
     }
 
     #[test]

@@ -37,8 +37,9 @@ what unblocks what.
    ruling 2026-08-26: the standing chart gate covers tape generation, and
    the crossing moved no tape byte. The calibration landing does owe one,
    because its preset constants move generated quote bytes.
-2. **The adapter and consumer surface**: a test pinning the `MarketToLimit`
-   refusal makes that gap loud.
+2. **The adapter and consumer surface**: the named item (a test pinning the
+   `MarketToLimit` refusal) landed in `e908ee1` - the Adapter section below
+   records it - so what remains under this heading is the Product types slate.
 
 Excluded as tape-gated: the segment-sampler gate, the composed-river
 checkpoint chain behind it, and the whole tape-research-v2 cluster. The
@@ -421,16 +422,6 @@ as a unit deliberately named as not a preset, which north-star's preset entry
 forecloses; and its four-product taxonomy, narrower than the glossary's six
 classes.
 
-- **`Perpetual` and `Inverse` are both published as `CryptoPerpetual`.**
-  `convert::instrument_any` maps them onto the crypto-only elder type, while
-  `PerpetualContract` is the newer generic that carries an asset class. Our
-  `Perpetual` takes `asset_class` from the wire, so a non-crypto perp is
-  published wearing a type that cannot express what it is. `PerpetualContract`
-  verified present at the 0.63 pin, which retires the plan's doubt that the
-  generic type might not exist there. It requires `underlying` and
-  `asset_class`, both of which the elder type has no field for, so the move is a
-  widening rather than a rename.
-
 - **What margin to publish when the declared basis has no nautilus rate.** An
   owner decision, not plumbing. The user declares `ConfiguredMargin` -
   `initial_per_contract`, `maintenance_per_contract` and a `basis` - and the
@@ -488,6 +479,29 @@ classes.
   enters `RiverKey`.
 
 ## Engine
+
+- **Trailing-stop fidelity is pass-granular, by documented design - open only
+  if finer trailing ever earns its cost.** Two consequences of
+  `ratchet_trailing_stops` running once per sweep pass against whole-span
+  extremes, both examined and accepted during the 2026-09-10 trailing
+  activation landing (sparred with codex, who withdrew a chronological-replay
+  demand after conceding the limit predates activation and is uniform across
+  armed trails): (a) a print later in a pass than the trigger the same pass's
+  ratchet just advanced is never re-checked against the new trigger - the
+  ratchet's own comment states the rule, a span walked against the old trigger
+  says nothing about the new one - so a trail can survive an intra-pass
+  spike-then-touch sequence a per-tick venue would have stopped out on; (b) a
+  trail accepted or released mid-pass ratchets against extremes that include
+  prints from before it existed (activation is exempt: `skip_next_ratchet`
+  sits a freshly armed trail out of the pass whose extremes straddle its
+  arming). Closing either means per-order span windows on the extremes - the
+  sweeper would carry per-order high/low segmented at acceptance, release and
+  ratchet instants instead of one pair per symbol - and a re-check of the
+  post-ratchet remainder of the span. Priced as not worth it while the sweep
+  cadence keeps passes short; a consumer-visible parity mismatch against a
+  per-tick shadow trail on exactly the spikes is the symptom that would reopen
+  it, and `docs/oms-types.md` already warns shadow implementations about the
+  extremes-versus-marks half of this.
 
 - A zero-price fill is still warned about and booked by `warn_zero_px`, so a
   position can carry `mark_px == 0` if the tape produces one.

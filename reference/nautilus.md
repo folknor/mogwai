@@ -211,9 +211,20 @@ nautilus demands of each, and what it silently gets wrong.
 
 `convert::instrument_any` maps our six classes onto nautilus types: `spot` to
 `CurrencyPair`, `future` to `FuturesContract`, `equity` to `Equity`, `perpetual`
-and `inverse` both to `CryptoPerpetual`, and `forex` to a named refusal because
-nautilus ships no leveraged-FX instrument. The refusal is deliberate and its
-reasoning lives with the open work.
+and `inverse` to a nautilus type chosen by their declared asset class -
+`CryptoPerpetual` for cryptocurrency, `PerpetualContract` (the cross-asset
+generic, which carries the asset class and the underlying) for everything
+else - and `forex` to a named refusal because nautilus ships no leveraged-FX
+instrument. The refusal is deliberate and its reasoning lives with the open
+work. The split follows nautilus's own taxonomy rather than publishing one
+type uniformly, and the choice is load-bearing: nautilus's risk engine accepts
+every inverse `CryptoPerpetual` on its full-position exit path but an inverse
+`PerpetualContract` only when linear, so moving crypto inverses onto the
+generic would silently change risk-engine behavior. A non-crypto linear
+perpetual publishes `base_currency: None` - its underlying is an asset
+identity, not a currency, and the costing path reads the base only for an
+inverse - while a non-crypto inverse states its settlement currency as the
+base, which the checked constructor requires.
 
 Mandatory fields beyond the common spine, re-derived at the 0.63 pin rather than
 carried: a spot pair owes base and quote currency; an equity owes its currency;
@@ -226,9 +237,10 @@ alone. On both perpetual types and on the spot pair they are optional, so a
 declaration omitting them gets nautilus's default of one. The previous version
 of this paragraph claimed they were mandatory on the perpetual types too, and
 that `CryptoPerpetual` owes underlying and asset class; neither is true. Those
-two fields exist on `PerpetualContract`, the newer generic type, which is
-required to carry them - but that is the type we do not publish, and mixing its
-signature into the elder crypto-only type is what produced the error.
+two fields exist on `PerpetualContract`, which is required to carry them -
+and now publishes them for the non-crypto perpetual classes, taken from the
+wire. Mixing the generic type's signature into the elder crypto-only one is
+what produced the original error.
 
 Four traps, each of which must be guarded rather than exposed as a knob:
 
