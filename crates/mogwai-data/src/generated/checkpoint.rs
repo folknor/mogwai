@@ -141,15 +141,12 @@ impl CheckpointIndex {
                 // it. Adopt the faulted lead so `fault()` names the refusal,
                 // then stop: the tick-at-a-time fallback below would only
                 // return `None` on the same fault.
-                let Ok(parent) = advanced.advance_parent() else {
+                let Ok(parent) = advanced.advance_for_checkpoint() else {
                     self.lead = advanced;
                     break;
                 };
-                let parent_ticks = 1usize.saturating_add(parent.child_count as usize);
-                let parent_end = parent.parent_ts_ns.saturating_add(
-                    u64::from(parent.child_count.saturating_sub(1))
-                        .saturating_mul(parent.child_stride_ns),
-                );
+                let parent_ticks = parent.wire_count;
+                let parent_end = parent.end_ns;
                 if parent_end < target
                     && parent_ticks <= remaining_to_snapshot
                     && parent_ticks <= remaining_budget

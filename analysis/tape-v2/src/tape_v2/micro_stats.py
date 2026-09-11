@@ -198,15 +198,28 @@ def corr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def within_segments(parents: pl.DataFrame) -> pl.DataFrame:
-    """Mark consecutive parents that share a session and a phase."""
+    """Mark consecutive parents that share a session and a phase.
+
+    The next-parent book columns are computed here, on the full ordered
+    frame, so a later phase filter cannot fake adjacency: `next_same` is
+    true only when the physically next parent shares the segment.
+    """
     same = (pl.col("session_date") == pl.col("session_date").shift(1)) & (
         pl.col("phase") == pl.col("phase").shift(1)
     )
-    return parents.with_columns(
+    frame = parents.with_columns(
         same.fill_null(False).alias("same_segment"),
         (pl.col("ts_event") - pl.col("ts_event").shift(1)).alias("gap_ns"),
         pl.col("sign").shift(1).alias("prev_sign"),
         pl.col("price_last").shift(1).alias("prev_price"),
+    )
+    return frame.with_columns(
+        pl.col("same_segment").shift(-1).fill_null(False).alias("next_same"),
+        pl.col("gap_ns").shift(-1).alias("next_gap_ns"),
+        pl.col("bid_ticks").shift(-1).alias("next_bid"),
+        pl.col("ask_ticks").shift(-1).alias("next_ask"),
+        pl.col("bid_sz").shift(-1).alias("next_bid_sz"),
+        pl.col("ask_sz").shift(-1).alias("next_ask_sz"),
     )
 
 
@@ -375,14 +388,23 @@ def impact_stats(mid: np.ndarray, sign: np.ndarray, valid: np.ndarray, same: np.
 def price_stats(seg: pl.DataFrame) -> dict:
     consecutive = seg.filter(pl.col("same_segment"))
     change = (consecutive["price_last"] - consecutive["prev_price"]).abs()
+
+    def change_pmf(values: pl.Series) -> dict:
+        return pmf(
+            values.clip(upper_bound=3).cast(pl.Utf8).replace({"3": "3+"}).alias("d"),
+            ["0", "1", "2", "3+"],
+        )
+
+    fast = consecutive.filter(pl.col("gap_ns") < 100_000_000)
     out = {
         "n": consecutive.height,
-        "abs_change_pmf": pmf(
-            change.clip(upper_bound=3).cast(pl.Utf8).replace({"3": "3+"}).alias("d"),
-            ["0", "1", "2", "3+"],
-        ),
+        "abs_change_pmf": change_pmf(change),
         "abs_change_mean": float(change.mean()),
     }
+    if fast.height >= 1000:
+        out["abs_change_pmf_fast"] = change_pmf(
+            (fast["price_last"] - fast["prev_price"]).abs()
+        )
     sign = seg["sign"].to_numpy().astype(np.float64)
     same = seg["same_segment"].to_numpy()
     if seg["bid_ticks"].null_count() < seg.height:
@@ -415,6 +437,253 @@ def price_stats(seg: pl.DataFrame) -> dict:
     return out
 
 
+# Elapsed-time buckets for the transition statistics: an observed spread
+# or touch transition over a long gap admits arbitrarily many unobserved
+# changes, so every transition statistic is conditioned on elapsed time.
+GAP_BUCKETS = [("lt_100ms", 0, 100_000_000), ("lt_1s", 100_000_000, NS), ("ge_1s", NS, None)]
+SPREAD_STATES = ["1", "2", "3+"]
+
+
+def spread_state(expr: pl.Expr) -> pl.Expr:
+    return (
+        pl.when(expr <= 1).then(pl.lit("1")).when(expr == 2).then(pl.lit("2")).otherwise(pl.lit("3+"))
+    )
+
+
+def book_stats(seg: pl.DataFrame) -> dict:
+    """The book-dynamics fit targets, real side only (needs the pre-trade
+    book on every parent). Every transition here is between consecutive
+    parent observations, not between underlying quote changes: intervening
+    cancellations, limit orders, replenishment and unobserved spread
+    transitions sit inside every pair, more of them the longer the gap.
+    The elapsed-time conditioning and the censoring at segment breaks are
+    what keep these usable as effective-model targets rather than claims
+    about the underlying book process.
+    """
+    valid = (
+        (pl.col("bid_ticks") > 0)
+        & (pl.col("ask_ticks") > pl.col("bid_ticks"))
+        & (pl.col("bid_sz") > 0)
+        & (pl.col("ask_sz") > 0)
+    )
+    next_valid = (
+        (pl.col("next_bid") > 0)
+        & (pl.col("next_ask") > pl.col("next_bid"))
+        & (pl.col("next_bid_sz") > 0)
+        & (pl.col("next_ask_sz") > 0)
+    )
+    frame = seg.with_row_index("idx").filter(valid.fill_null(False)).with_columns(
+        (pl.col("ask_ticks") - pl.col("bid_ticks")).alias("spread"),
+        (pl.col("bid_ticks") + pl.col("ask_ticks")).alias("mid2"),
+        pl.when(pl.col("sign") > 0)
+        .then(pl.col("ask_sz"))
+        .otherwise(pl.col("bid_sz"))
+        .alias("touch"),
+    )
+    out: dict = {"n": frame.height}
+    if frame.height < 1000:
+        return out
+
+    # Touch size by spread state, and the book imbalance.
+    for state in SPREAD_STATES:
+        sub = frame.filter(spread_state(pl.col("spread")) == state)
+        if sub.height >= 200:
+            out[f"touch_size_spread_{state}"] = quantiles(
+                sub["touch"].to_numpy().astype(float), [0.1, 0.5, 0.9]
+            )
+    imbalance = (frame["bid_sz"] - frame["ask_sz"]) / (frame["bid_sz"] + frame["ask_sz"])
+    out["imbalance"] = quantiles(imbalance.to_numpy().astype(float), [0.1, 0.5, 0.9])
+
+    # Pairs: this parent and the physically next one, same segment, both
+    # books valid.
+    pairs = frame.filter(
+        pl.col("next_same") & next_valid.fill_null(False) & (pl.col("next_gap_ns") > 0)
+    ).with_columns(
+        (pl.col("next_ask") - pl.col("next_bid")).alias("next_spread"),
+        (pl.col("next_bid") + pl.col("next_ask")).alias("next_mid2"),
+    )
+    out["pairs"] = pairs.height
+    if pairs.height < 1000:
+        return out
+
+    # The midpoint change pmf, separate from the last-print pmf (which
+    # carries bid-ask bounce). mid2 is twice the mid, so integer arithmetic
+    # is exact on half-ticks. The pooled pmf mixes every elapsed gap; the
+    # fast-bucket one is what a parent-indexed model is honestly compared
+    # against, and the same split is reported for the last-print pmf.
+    labels = {str(k): v for k, v in {0: "0", 1: "0.5", 2: "1", 3: "1.5", 4: "2"}.items()}
+    keys = ["0", "0.5", "1", "1.5", "2", "2.5+"]
+
+    def mid_pmf(sub: pl.DataFrame) -> dict:
+        dmid2 = (sub["next_mid2"] - sub["mid2"]).abs()
+        return pmf(
+            dmid2.clip(upper_bound=5).cast(pl.Utf8).replace(labels | {"5": "2.5+"}).alias("d"),
+            keys,
+        )
+
+    out["mid_change_pmf"] = mid_pmf(pairs)
+    fast = pairs.filter(pl.col("next_gap_ns") < 100_000_000)
+    if fast.height >= 1000:
+        out["mid_change_pmf_fast"] = mid_pmf(fast)
+
+    # The spread transition matrix between parent observations, per elapsed
+    # bucket. A run of identical sampled spreads is an observed run, not
+    # proof of uninterrupted dwell.
+    transitions: dict = {}
+    for bucket, lo, hi in GAP_BUCKETS:
+        cond = pl.col("next_gap_ns") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("next_gap_ns") < hi)
+        sub = pairs.filter(cond)
+        if sub.height < 1000:
+            continue
+        rows: dict = {"n": sub.height}
+        for state in SPREAD_STATES:
+            from_state = sub.filter(spread_state(pl.col("spread")) == state)
+            if from_state.height < 200:
+                continue
+            rows[state] = pmf(
+                from_state.select(spread_state(pl.col("next_spread")).alias("s"))["s"],
+                SPREAD_STATES,
+            )
+        transitions[bucket] = rows
+    out["spread_transition"] = transitions
+
+    # Observed spread dwell: run lengths of a constant sampled spread state,
+    # censored at breaks (a run touching a segment break, a filtered pair,
+    # or either edge is dropped rather than counted short).
+    state = pairs.select(spread_state(pl.col("spread")).alias("s"))["s"].to_numpy()
+    idx = pairs["idx"].to_numpy()
+    adjacent = np.zeros(state.size, dtype=bool)
+    adjacent[1:] = idx[1:] == idx[:-1] + 1
+    breaks = np.ones(state.size, dtype=bool)
+    breaks[1:] = (state[1:] != state[:-1]) | ~adjacent[1:]
+    starts = np.flatnonzero(breaks)
+    lengths = np.diff(np.concatenate([starts, [state.size]]))
+    # A run is complete only when both its boundaries are genuine state
+    # changes between adjacent observations; a boundary caused by a
+    # filtered pair or an edge censors the run.
+    interior = np.zeros(starts.size, dtype=bool)
+    if starts.size >= 3:
+        left_ok = adjacent[starts[1:-1]]
+        right_ok = adjacent[starts[2:]]
+        interior[1:-1] = left_ok & right_ok
+    if interior.sum() >= 100:
+        out["spread_dwell_parents"] = quantiles(
+            lengths[interior].astype(float), [0.5, 0.9]
+        )
+        out["spread_dwell_mean"] = float(lengths[interior].mean())
+
+    # The depletion witness: the next pre-trade touch moved through the
+    # struck side (for a buy, the ask rose; for a sell, the bid fell),
+    # conditioned on the size trichotomy, levels crossed, spread and
+    # elapsed time. A witness is a response, not an identified depletion;
+    # an unchanged touch does not prove absence of one.
+    witness_frame = pairs.with_columns(
+        pl.when(pl.col("sign") > 0)
+        .then(pl.col("next_ask") > pl.col("ask_ticks"))
+        .otherwise(pl.col("next_bid") < pl.col("bid_ticks"))
+        .alias("witness"),
+        pl.when(pl.col("size") < pl.col("touch"))
+        .then(pl.lit("lt"))
+        .when(pl.col("size") == pl.col("touch"))
+        .then(pl.lit("eq"))
+        .otherwise(pl.lit("gt"))
+        .alias("tri"),
+        (pl.col("levels") > 1).alias("multi"),
+    )
+    witness: dict = {}
+    for bucket, lo, hi in GAP_BUCKETS[:2]:
+        cond = pl.col("next_gap_ns") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("next_gap_ns") < hi)
+        sub = witness_frame.filter(cond)
+        if sub.height < 1000:
+            continue
+        cells: dict = {"n": sub.height, "rate": float(sub["witness"].mean())}
+        for tri in ("lt", "eq", "gt"):
+            t = sub.filter(pl.col("tri") == tri)
+            if t.height >= 200:
+                cells[tri] = float(t["witness"].mean())
+        for name, mask in (("single_level", ~pl.col("multi")), ("multi_level", pl.col("multi"))):
+            m = sub.filter(mask)
+            if m.height >= 200:
+                cells[name] = float(m["witness"].mean())
+        for state in SPREAD_STATES[:2]:
+            s = sub.filter(spread_state(pl.col("spread")) == state)
+            if s.height >= 200:
+                cells[f"spread_{state}"] = float(s["witness"].mean())
+        witness[bucket] = cells
+    out["depletion_witness"] = witness
+
+    # The size trichotomy by spread state (the pooled one lives in sweep
+    # stats; the fit conditions on the spread).
+    tri_by_spread: dict = {}
+    for state in SPREAD_STATES[:2]:
+        sub = witness_frame.filter(spread_state(pl.col("spread")) == state)
+        if sub.height >= 500:
+            tri_by_spread[state] = pmf(sub["tri"], ["lt", "eq", "gt"])
+    out["size_trichotomy_by_spread"] = tri_by_spread
+
+    # The struck touch at the next observation, for the replenishment law:
+    # what the touch looks like after a parent, split by whether the parent
+    # consumed at least the displayed touch.
+    for name, cond in (("after_lt", pl.col("tri") == "lt"), ("after_ge", pl.col("tri") != "lt")):
+        sub = witness_frame.filter(cond).with_columns(
+            pl.when(pl.col("sign") > 0)
+            .then(pl.col("next_ask_sz"))
+            .otherwise(pl.col("next_bid_sz"))
+            .alias("next_touch")
+        )
+        if sub.height >= 500:
+            out[f"next_touch_{name}"] = quantiles(
+                sub["next_touch"].to_numpy().astype(float), [0.1, 0.5, 0.9]
+            )
+
+    # The signed mid response conditioned on the initial spread. The
+    # anchor's spread is the condition; the response is the pooled
+    # impact arithmetic restricted to those anchors.
+    mid = (seg["bid_ticks"].fill_null(0) + seg["ask_ticks"].fill_null(0)).to_numpy().astype(
+        np.float64
+    ) / 2.0
+    sign = seg["sign"].to_numpy().astype(np.float64)
+    seg_valid = seg.select(
+        ((pl.col("bid_ticks") > 0) & (pl.col("ask_ticks") > pl.col("bid_ticks")))
+        .fill_null(False)
+        .alias("v")
+    )["v"].to_numpy()
+    seg_same = seg["same_segment"].to_numpy()
+    seg_spread = (
+        seg["ask_ticks"].fill_null(0) - seg["bid_ticks"].fill_null(0)
+    ).to_numpy()
+    impact_by_spread: dict = {}
+    for state, want in (("1", 1), ("2", 2)):
+        anchors = seg_valid & (seg_spread == want)
+        block: dict = {}
+        for lag in (1, 10, 100):
+            if lag >= mid.size:
+                break
+            keep = (
+                segment_lag_mask(seg_same, lag, mid.size - lag)
+                & anchors[:-lag]
+                & seg_valid[lag:]
+            )
+            if keep.sum() < 500:
+                continue
+            move = (mid[lag:][keep] - mid[:-lag][keep]) * sign[:-lag][keep]
+            block[str(lag)] = float(move.mean())
+        if block:
+            impact_by_spread[state] = block
+    out["impact_by_spread"] = impact_by_spread
+
+    # The reporting-split feasibility mass: single-level parents whose
+    # quantity admits an integer split.
+    out["split_eligible"] = float(
+        seg.select(((pl.col("levels") == 1) & (pl.col("size") >= 2)).mean()).item()
+    )
+    return out
+
+
 def phase_block(parents: pl.DataFrame, prints: pl.DataFrame, sessions: int, phase: str) -> dict:
     seg = within_segments(parents)
     if phase != "all":
@@ -441,6 +710,7 @@ def phase_block(parents: pl.DataFrame, prints: pl.DataFrame, sessions: int, phas
         "print_size": print_size_stats(prints) if phase == "all" else {},
         "sign": sign_stats(seg),
         "price": price_stats(seg),
+        "book": book_stats(seg) if seg["bid_ticks"].null_count() < seg.height else {},
     }
 
 
@@ -523,6 +793,7 @@ def flatten(block: dict) -> dict[str, float]:
     s = block.get("sweep", {})
     sg = block.get("sign", {})
     p = block.get("price", {})
+    b = block.get("book", {})
     return {
         "parents/s": block.get("rate_per_s", nan),
         "gap p50 ms": g.get("ms", {}).get("p50", nan),
@@ -579,6 +850,29 @@ def flatten(block: dict) -> dict[str, float]:
         "impact1 ticks": p.get("impact", {}).get("1", {}).get("mean_ticks", nan),
         "impact10 ticks": p.get("impact", {}).get("10", {}).get("mean_ticks", nan),
         "impact100 ticks": p.get("impact", {}).get("100", {}).get("mean_ticks", nan),
+        "dmid 0": b.get("mid_change_pmf", {}).get("0", nan),
+        "dmid 0.5": b.get("mid_change_pmf", {}).get("0.5", nan),
+        "dmid 1": b.get("mid_change_pmf", {}).get("1", nan),
+        "dmid 2.5+": b.get("mid_change_pmf", {}).get("2.5+", nan),
+        "spr 1->1 fast": b.get("spread_transition", {})
+        .get("lt_100ms", {})
+        .get("1", {})
+        .get("1", nan),
+        "spr 2->2 fast": b.get("spread_transition", {})
+        .get("lt_100ms", {})
+        .get("2", {})
+        .get("2", nan),
+        "spr dwell mean": b.get("spread_dwell_mean", nan),
+        "witness fast": b.get("depletion_witness", {}).get("lt_100ms", {}).get("rate", nan),
+        "witness lt": b.get("depletion_witness", {}).get("lt_100ms", {}).get("lt", nan),
+        "witness gt": b.get("depletion_witness", {})
+        .get("lt_100ms", {})
+        .get("gt", nan),
+        "touch p50 spr1": b.get("touch_size_spread_1", {}).get("p50", nan),
+        "touch p50 spr2": b.get("touch_size_spread_2", {}).get("p50", nan),
+        "impact1 spr1": b.get("impact_by_spread", {}).get("1", {}).get("1", nan),
+        "impact1 spr2": b.get("impact_by_spread", {}).get("2", {}).get("1", nan),
+        "split eligible": b.get("split_eligible", nan),
     }
 
 

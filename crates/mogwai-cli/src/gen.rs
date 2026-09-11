@@ -42,6 +42,11 @@ const DEFAULT_GEN_SEED: u64 = 42;
 #[derive(Copy, Clone, ValueEnum)]
 pub(crate) enum GenType {
     Trades,
+    /// The published top-of-book quotes as CSV: `ts_event,bid_px,ask_px,
+    /// bid_sz,ask_sz`. The book-dynamics measurement surface - a trades CSV
+    /// carries no book, so the spread, midpoint and depletion statistics are
+    /// only visible through the quote stream.
+    Quotes,
     Bars,
     /// One JSON object of bounded fit statistics from the full walk. The
     /// calibration instrument of the MNQ TBBO fit: consumes every draw
@@ -168,10 +173,24 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             Some(NonZeroU64::new(ns).context("--interval must be nonzero")?)
         }
         (GenType::Bars, None) => bail!("--type bars requires --interval"),
-        (GenType::Trades | GenType::Summary | GenType::Trace | GenType::Measure12a, Some(_)) => {
+        (
+            GenType::Trades
+            | GenType::Quotes
+            | GenType::Summary
+            | GenType::Trace
+            | GenType::Measure12a,
+            Some(_),
+        ) => {
             bail!("--interval is only valid with --type bars")
         }
-        (GenType::Trades | GenType::Summary | GenType::Trace | GenType::Measure12a, None) => None,
+        (
+            GenType::Trades
+            | GenType::Quotes
+            | GenType::Summary
+            | GenType::Trace
+            | GenType::Measure12a,
+            None,
+        ) => None,
     };
     if args.burn_in.is_some() && !matches!(args.kind, GenType::Summary | GenType::Measure12a) {
         bail!("--burn-in is only valid with --type summary or --type measure12a");
@@ -245,6 +264,23 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         return write_summary(&acc, sink);
     }
 
+    if let GenType::Quotes = args.kind {
+        let mut source = build_source(args, &profile, args.start)?;
+        let start = args.start;
+        let quotes = std::iter::from_fn(move || {
+            loop {
+                match source.next_tick() {
+                    Some(TickEvent::Quote(q)) => break Some(q),
+                    Some(TickEvent::Trade(_)) => {}
+                    None => break None,
+                }
+            }
+        })
+        .take_while(move |q| q.ts_event < end)
+        .filter(move |q| q.ts_event >= start);
+        return write_quotes(quotes, sink);
+    }
+
     let mut source = build_source(args, &profile, args.start)?;
     let start = args.start;
     let trades = std::iter::from_fn(move || {
@@ -264,6 +300,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             let interval = interval.expect("bars validated interval above");
             write_bars(trades, args.start, end, interval, sink)?;
         }
+        GenType::Quotes => unreachable!("quotes dispatched above"),
         GenType::Summary | GenType::Trace | GenType::Measure12a => {
             unreachable!("summary, trace and measure12a dispatched above")
         }
@@ -608,6 +645,20 @@ fn write_trades(
             t.price,
             t.size,
             aggressor_word(t.aggressor)
+        )?;
+    }
+    Ok(())
+}
+fn write_quotes(
+    quotes: impl Iterator<Item = mogwai_protocol::QuoteTick>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    writeln!(out, "ts_event,bid_px,ask_px,bid_sz,ask_sz")?;
+    for q in quotes {
+        writeln!(
+            out,
+            "{},{},{},{},{}",
+            q.ts_event, q.bid_px, q.ask_px, q.bid_sz, q.ask_sz
         )?;
     }
     Ok(())

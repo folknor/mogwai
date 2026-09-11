@@ -1182,6 +1182,7 @@ pub(crate) struct PartialGeneratorScalars {
     pub(crate) trade_displacement_ticks: Option<mogwai_data::TradeDisplacement>,
     pub(crate) arrival: Option<mogwai_data::ArrivalConfig>,
     pub(crate) cascade: Option<mogwai_data::CascadeConfig>,
+    pub(crate) book: Option<mogwai_data::BookDynamicsConfig>,
 }
 
 impl PartialGeneratorScalars {
@@ -1209,6 +1210,7 @@ impl PartialGeneratorScalars {
             trade_displacement_ticks,
             arrival,
             cascade,
+            book,
         } = self;
         // The definition owns the symbol; a stated one is accepted for
         // compatibility with full tables and ignored.
@@ -1267,6 +1269,9 @@ impl PartialGeneratorScalars {
         if let Some(value) = cascade {
             scalars.cascade = Some(value.clone());
         }
+        if let Some(value) = book {
+            scalars.book = Some(value.clone());
+        }
     }
 }
 
@@ -1293,6 +1298,7 @@ impl From<mogwai_data::GeneratorScalars> for PartialGeneratorScalars {
             trade_displacement_ticks: Some(scalars.trade_displacement_ticks),
             arrival: scalars.arrival,
             cascade: scalars.cascade,
+            book: scalars.book,
         }
     }
 }
@@ -1824,7 +1830,7 @@ fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::Instrument
 ///
 /// See [`refuse_unknown_subtable_keys`] for why the list exists, and
 /// `the_generator_key_list_is_exhaustive` for what stops it drifting.
-const GENERATOR_KEYS: [&str; 19] = [
+const GENERATOR_KEYS: [&str; 20] = [
     "symbol",
     "modal_tick",
     "price_decimals",
@@ -1844,6 +1850,7 @@ const GENERATOR_KEYS: [&str; 19] = [
     "trade_displacement_ticks",
     "arrival",
     "cascade",
+    "book",
 ];
 
 /// The keys `mogwai_data::SessionProfile` accepts, in its declaration order.
@@ -1951,6 +1958,13 @@ const CASCADE_KEYS: [&str; 30] = [
     "jump_local_exponent",
 ];
 
+/// The book table's own keys. Only `phases`, an array of rows; the per-row
+/// knob keys are caught by `BookPhaseKnobs`'s `deny_unknown_fields`, because
+/// the overlay merge replaces an array wholesale rather than merging into
+/// its elements, so a mistyped row key survives to deserialize rather than
+/// being silently dropped.
+const BOOK_KEYS: [&str; 1] = ["phases"];
+
 fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result<()> {
     for (name, known) in [
         ("quoted_width", &QUOTED_WIDTH_KEYS[..]),
@@ -1959,6 +1973,7 @@ fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result
         ("depth_growth", &DEPTH_GROWTH_KEYS[..]),
         ("trade_displacement_ticks", &TRADE_DISPLACEMENT_KEYS[..]),
         ("cascade", &CASCADE_KEYS[..]),
+        ("book", &BOOK_KEYS[..]),
     ] {
         let Some(seam) = generator.get(name).and_then(toml::Value::as_table) else {
             continue;
@@ -2792,8 +2807,56 @@ mod tests {
             trade_displacement_ticks: _,
             arrival: _,
             cascade: _,
+            book: _,
         } = sample;
-        assert_eq!(GENERATOR_KEYS.len(), 19);
+        assert_eq!(GENERATOR_KEYS.len(), 20);
+    }
+
+    /// A `book` on the generator overlay survives into the built scalars.
+    /// `PartialGeneratorScalars` deserializes permissively - a field it lacks
+    /// is silently dropped rather than refused - so a `[generator.book]` table
+    /// that parsed and passed the key allowlist could still arrive as `None`
+    /// at the generator. That was a real, shipped bug: a preset declared a
+    /// discrete book, the overlay had no `book` field, the tape ran the placed
+    /// book, and only an end-to-end spread measurement caught it. This pins
+    /// the overlay carry-through so it cannot recur when a book preset ships.
+    /// No shipped preset carries a book today, so the invariant is pinned on
+    /// the overlay directly rather than through `profile_from_preset`.
+    #[test]
+    fn a_book_overlay_survives_into_the_generator_scalars() {
+        let fp = mogwai_data::Fingerprint::repo();
+        let mut scalars = mogwai_data::GeneratorScalars::from_fingerprint_medians("MNQ", fp);
+        assert!(scalars.book.is_none(), "baseline carries no book");
+        let phase = mogwai_data::BookPhaseKnobs {
+            start_minute: 0,
+            replenish_mean: 2.2,
+            touch_by_spread: 2.0,
+            target_one: 0.5,
+            target_two: 0.4,
+            p_widen: 0.28,
+            p_narrow: 0.7,
+            p_follow: 0.6,
+            p_dep_lt: 0.19,
+            p_dep_eq: 0.45,
+            p_dep_gt: 0.6,
+            p_size_match: 0.42,
+            p_split: 0.05,
+            impact_permanent_ticks: 0.34,
+            impact_transient_ticks: 0.32,
+            impact_transient_decay: 0.9,
+            slack_ticks: 0.5,
+        };
+        let overlay = PartialGeneratorScalars {
+            book: Some(mogwai_data::BookDynamicsConfig {
+                phases: vec![phase],
+            }),
+            ..PartialGeneratorScalars::default()
+        };
+        overlay.overlay(&mut scalars);
+        assert!(
+            scalars.book.is_some(),
+            "the book overlay was dropped before reaching the generator scalars"
+        );
     }
 
     /// The anchor for `SESSION_KEYS`, on the same terms.

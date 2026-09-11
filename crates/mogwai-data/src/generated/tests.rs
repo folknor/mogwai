@@ -5820,3 +5820,254 @@ fn every_scalar_refusal_names_a_bare_config_field() {
     assert_eq!(err.field, "top_sizes");
     assert!(bare(&err), "{err:?}");
 }
+
+// -------------------------------------------------------- discrete book
+
+/// A cascade config matching the shipped fit's shape, for the book wiring
+/// tests. Mirrors `cascade::tests::config`, inlined because that module is
+/// private to `cascade`.
+fn book_cascade_config() -> CascadeConfig {
+    CascadeConfig {
+        texture_tau_minutes: vec![0.25, 1.0, 5.0, 25.0, 90.0],
+        texture_weights: vec![0.52, 0.135, 0.18, 0.15, 0.015],
+        texture_amplitude: 0.54,
+        texture_exponent: 0.24,
+        fast_texture_tau_s: 3.0,
+        fast_texture_log_sd: 0.55,
+        excitation_ratio: vec![0.2, 0.1, 0.3],
+        excitation_tau_s: vec![0.0003, 0.03, 1.0],
+        sign_slots: 5,
+        sign_alpha: 2.2,
+        sign_repeat: 0.08,
+        impact_permanent_ticks: 0.3,
+        impact_transient_ticks: 0.15,
+        impact_transient_decay: 0.98,
+        level_tau_minutes: vec![420.0, 8640.0, 47520.0],
+        level_weights: vec![0.2, 0.3, 0.5],
+        level_log_sd: 0.34,
+        sigma_level_exponent: 0.57,
+        sigma_level_log_sd: 0.207,
+        event_log_sigma: 7.4e-6,
+        student_df: 4.0,
+        gap_median_ratio: 0.9,
+        gap_log_sd: 1.6,
+        gap_log_clamp_sd: 2.75,
+        jumps_per_session: 3.0,
+        jump_size: 4.0,
+        jump_log_sd: 0.5,
+        jump_log_clamp_sd: 2.75,
+        jump_volume_kick: 1.5,
+        jump_local_exponent: 0.5,
+    }
+}
+
+/// Two phase rows so the minute-of-session table lookup is exercised.
+fn book_config() -> BookDynamicsConfig {
+    let row = |start_minute: u32, replenish_mean: f64| BookPhaseKnobs {
+        start_minute,
+        replenish_mean,
+        touch_by_spread: 2.0,
+        target_one: 0.5,
+        target_two: 0.4,
+        p_widen: 0.28,
+        p_narrow: 0.7,
+        p_follow: 0.6,
+        p_dep_lt: 0.19,
+        p_dep_eq: 0.45,
+        p_dep_gt: 0.6,
+        p_size_match: 0.42,
+        p_split: 0.05,
+        impact_permanent_ticks: 0.34,
+        impact_transient_ticks: 0.32,
+        impact_transient_decay: 0.9,
+        slack_ticks: 0.5,
+    };
+    BookDynamicsConfig {
+        phases: vec![row(0, 2.2), row(600, 1.05)],
+    }
+}
+
+fn book_calendar() -> SessionCalendar {
+    let mut windows = Vec::new();
+    for day in 0..5_u32 {
+        windows.push(WeeklyWindow {
+            start_minute: day * 1_440 + 1_020,
+            end_minute: (day + 1) * 1_440 + 960,
+        });
+    }
+    SessionCalendar {
+        utc_offset_minutes: 0,
+        open_windows: windows,
+        settlement_minute_of_day: Some(900),
+        envelope: Some(SessionEnvelope {
+            session_open_minute_of_day: 1_020,
+            weekday_weight: [1.0; 7],
+            volume: vec![1.0; 1_380],
+            range: vec![1.0; 1_380],
+        }),
+    }
+}
+
+fn book_source(seed: u64, start_ts: u64) -> GeneratedSource {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::from_fingerprint_medians("MNQ", &fp);
+    // A whole-contract instrument: integral grid, tick 0.25.
+    scalars.modal_tick = Decimal::new(25, 2);
+    scalars.price_decimals = 2;
+    scalars.start_price = Decimal::from(20_000);
+    // A whole-contract latent size on the integral grid.
+    scalars.latent_size_median = Decimal::from(2);
+    scalars.size_log_sigma = 0.9;
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::from(3));
+    scalars.cascade = Some(book_cascade_config());
+    scalars.book = Some(book_config());
+    let session = SessionProfile {
+        intensity_hour: [1.0 / 24.0; 24],
+        vol_hour: [1.0; 24],
+        dow_weight: [1.0 / 7.0; 7],
+    };
+    let grid = SizeGrid {
+        multiplier: Decimal::ONE,
+        integral: true,
+        min_size: Decimal::ONE,
+    };
+    GeneratedSource::try_new_with_session_profile(
+        scalars,
+        seed,
+        start_ts,
+        &fp,
+        &session,
+        None,
+        grid,
+        Some(book_calendar()),
+    )
+    .expect("a cascade-plus-book MNQ source builds")
+}
+
+const BOOK_START_NS: u64 = 1_020 * 60 * 1_000_000_000;
+
+#[test]
+fn a_book_source_requires_an_integral_grid() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::from_fingerprint_medians("MNQ", &fp);
+    scalars.modal_tick = Decimal::new(25, 2);
+    scalars.cascade = Some(book_cascade_config());
+    scalars.book = Some(book_config());
+    let session = SessionProfile {
+        intensity_hour: [1.0 / 24.0; 24],
+        vol_hour: [1.0; 24],
+        dow_weight: [1.0 / 7.0; 7],
+    };
+    let err = GeneratedSource::try_new_with_session_profile(
+        scalars,
+        7,
+        BOOK_START_NS,
+        &fp,
+        &session,
+        None,
+        SizeGrid::spot(),
+        Some(book_calendar()),
+    )
+    .err()
+    .expect("a fractional grid must refuse the book");
+    assert!(matches!(err, GeneratedSourceError::Scalar(_)), "{err:?}");
+}
+
+#[test]
+fn a_book_wire_stream_is_monotone_and_carries_both_frames() {
+    let mut src = book_source(11, BOOK_START_NS);
+    let mut last_ts = 0_u64;
+    let mut quotes = 0_usize;
+    let mut trades = 0_usize;
+    for _ in 0..5_000 {
+        let Some(tick) = src.next_tick() else { break };
+        assert!(
+            tick.ts_event() > last_ts || last_ts == 0,
+            "timestamps must strictly increase: {} after {last_ts}",
+            tick.ts_event()
+        );
+        last_ts = tick.ts_event();
+        match tick {
+            TickEvent::Quote(q) => {
+                quotes += 1;
+                assert!(q.ask_px > q.bid_px, "a published book is never crossed");
+                assert!(q.bid_sz > Decimal::ZERO && q.ask_sz > Decimal::ZERO);
+            }
+            TickEvent::Trade(t) => {
+                trades += 1;
+                assert!(t.size > Decimal::ZERO);
+            }
+        }
+    }
+    assert!(quotes > 0 && trades > 0, "quotes {quotes} trades {trades}");
+}
+
+#[test]
+fn a_book_walk_is_byte_identical_across_a_seek_resume() {
+    // From-origin reference.
+    let mut origin = book_source(23, BOOK_START_NS);
+    let mut reference = Vec::new();
+    for _ in 0..4_000 {
+        let Some(tick) = origin.next_tick() else {
+            break;
+        };
+        reference.push(format!("{tick:?}"));
+    }
+    assert!(reference.len() > 2_000, "the reference walk is long enough");
+    // A fresh source seeked into the middle re-emits the identical tail: the
+    // book state, both its rng streams, and the dedup snapshot all clone and
+    // replay deterministically.
+    let target_index = 1_500;
+    let target_ts = {
+        let mut s = book_source(23, BOOK_START_NS);
+        let mut ts = 0;
+        for _ in 0..=target_index {
+            ts = s.next_tick().expect("reference tick").ts_event();
+        }
+        ts
+    };
+    let mut resumed = book_source(23, BOOK_START_NS);
+    let first = resumed.seek_to(target_ts).expect("seek reaches the target");
+    assert_eq!(
+        format!("{first:?}"),
+        reference[target_index],
+        "the seek's first tick is the reference tick at the target"
+    );
+    for expected in &reference[target_index + 1..] {
+        let tick = resumed.next_tick().expect("resumed walk continues");
+        assert_eq!(
+            &format!("{tick:?}"),
+            expected,
+            "resume diverged from origin"
+        );
+    }
+}
+
+#[test]
+fn a_book_checkpoint_resume_matches_the_from_origin_walk() {
+    let mut origin = book_source(29, BOOK_START_NS);
+    let mut reference = Vec::new();
+    for _ in 0..4_000 {
+        let Some(tick) = origin.next_tick() else {
+            break;
+        };
+        reference.push((tick.ts_event(), format!("{tick:?}")));
+    }
+    let target_ts = reference[2_000].0;
+    let mut index = CheckpointIndex::new(book_source(29, BOOK_START_NS), 128, 1_000_000);
+    let mut resumed = index.source_before(target_ts);
+    // Drain to the target and compare the tail.
+    let mut expected_iter = reference.iter().skip_while(|(ts, _)| *ts < target_ts);
+    let mut tick = resumed.seek_to(target_ts);
+    while let Some(event) = tick {
+        let Some((_, expected)) = expected_iter.next() else {
+            break;
+        };
+        assert_eq!(
+            &format!("{event:?}"),
+            expected,
+            "checkpoint resume diverged"
+        );
+        tick = resumed.next_tick();
+    }
+}

@@ -50,15 +50,16 @@ use rust_decimal::Decimal;
 pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, AbsReturnAcf, AnchorRange, ArrivalConfig,
-    ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk,
-    CalendarError, CalibrationProvenance, CascadeConfig, CheckpointIndex, DepthGrowth, DepthLevels,
-    EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars,
-    GoldenTargets, LogOuParams, MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y,
-    MAX_MEAN_EVENT_DURATION_S, MinMedianMax, ParentDraw, ParentSummary, PendingReopen,
-    PublishedBook, QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError,
-    SelfExcitingParams, SessionCalendar, SessionEnvelope, SessionProfile, SessionProfileError,
-    ShotNoiseParams, SizeGrid, SweepShape, TickTraversal, TopOfBookSizes, TradeDisplacement,
-    VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks, place_book,
+    ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState, BookDynamicsConfig, BookPhaseKnobs,
+    BookSnapshot, CadenceParts, CadenceWalk, CalendarError, CalibrationProvenance, CascadeConfig,
+    CheckpointIndex, DepthGrowth, DepthLevels, DiscreteBook, EmpiricalRanges, Fingerprint,
+    GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets, LevelFill, LogOuParams,
+    MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax,
+    ParentDraw, ParentSummary, PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers,
+    ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar, SessionEnvelope,
+    SessionProfile, SessionProfileError, ShotNoiseParams, SizeGrid, Struck, SweepShape,
+    TickTraversal, TopOfBookSizes, TradeDisplacement, Trichotomy, VolTrace, WalkOutcome,
+    WallMmppParams, WeeklyWindow, book_mid_ticks, ladder_next_units, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{

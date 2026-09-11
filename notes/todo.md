@@ -216,23 +216,22 @@ instrument class is not a finding and does not need re-reporting.
   (`notes/synthetic-tape-micro.md`, measured on the year's tbbo with
   `analysis/tape-v2` micro-stats). What is declared rather than fitted,
   or measured and left, in order of what a fill would meet first:
-  - The impact of a parent on the mid landed at protocol 34 as a
-    propagator (0.45, 0.63, 0.67 ticks at one, ten and a hundred parents
-    against 0.48, 0.65, 0.66 real). What it left: Asia and London carry
-    0.59 and 0.65 ticks at one parent where the tape gives 0.45 in every
-    phase, because a depletion moves the mid by half the spread and the
-    real spread is wider overnight (1 tick 21 percent of the time in Asia,
-    45 at the open) while the tape's book is two ticks always. Spread
-    dynamics is the item.
-  - The per-parent price change is more dispersed than real: the last
-    print moves zero ticks between consecutive parents 21 percent of the
-    time against 31 real, and three or more ticks 28 percent against 11.
-    A Student-t innovation on a continuous mid rounded to the grid is not
-    how a real touch moves; the real change is one tick or none because
-    the mid only moves when a level is depleted. A heavier tail at the same
-    variance was tried and does nothing (degrees of freedom three, one
-    seed: 22 and 27 percent); a discrete mid with the spread dynamics is
-    the mechanism.
+  - The spread dynamics and the per-parent price change are one item now,
+    specced and prototyped: `notes/book-dynamics-spec.md` (sparred to
+    consensus 2026-09-11) holds the consensus mechanism - a persistent
+    discrete book with a stochastic spread state, effective depletion,
+    minimal projection against the latent anchor, and the residual impact
+    channel the fit selected - plus the prototype fit (`proto_book.py`,
+    pooled score 0.157, open 0.158 untouched, Asia 0.220 on phase knobs)
+    and the new real-side book targets `micro_stats.py` measures. Every
+    gate runnable without the engine is closed: per-phase fits (pooled
+    0.117, asia 0.165 over twenty-two targets, with the frozen ladder
+    and the size-match channel), monthly holdouts, and the second spar's
+    rulings (phase tables over an activity link, the frozen shared
+    ladder, the positioned-source interface). What remains is the Rust
+    transcription itself per the spec's wire contract and source-audit
+    corrections, owing the tape bump, goldens, the minute gates on a
+    composed walk, and the chart.
   - Inside a second the tape clusters at half the real strength at 10 ms
     and 100 ms (dispersion 1.65 and 1.9 against 2.1 and 3.5) while it
     matches the sub-millisecond share and the seconds inside a minute; the
@@ -1152,6 +1151,25 @@ price from a `limit_offset`, so they send an offset and not a price.
 
 Theirs to run, not ours to build, but each is a venue exercise that would surface
 mogwai defects, and several have been owed for weeks.
+
+> **External QA progress (2026-09-10, `mogwai 068bc6c0b` against `ba
+> a36d8f3c8`).** The broadarrow-side blockers that stopped any of these from
+> running are cleared: warmup now delivers bars to the session (was dropped
+> en route), the trailing leg is no longer refused for a missing `trigger_price`,
+> and an accelerated venue clock no longer trips a false command-ack timeout.
+> What that unblocked, witnessed so far:
+> - **Futures (MNQ), partial.** Warmup, fed fills at venue timing, and the
+>   **settlement-currency commission** confirmed: per-contract taker fee charged
+>   as `2.50 USD` per fill (1.25 × multiplier 2), in USD, with brakes marking in
+>   USD. A separate MNQ stop strategy rested a `STOP_MARKET` and had it trigger
+>   on the multiplied instrument. Not yet in one clean run: stop-trigger +
+>   commission + brake-mark together end to end.
+> - **Trailing exit.** The venue's `TRAILING_STOP_MARKET` rests, ratchets
+>   (serving a moving `trigger_price` on `OrderUpdated`), and fills; broadarrow's
+>   classifier verdicts `Agree` over a quiet stretch. The trail-vs-shadow
+>   spike-bar parity question (`docs/oms-types.md`) is still unmeasured.
+> The remaining entries below (restart legs, go_live dedup, conditional fed-fill,
+> flip+pyramid+partial, Gate B, poll-heal) are not yet run.
 
 - The restart run, the realized-PnL baseline, legs 1 to 3: serve durably, trade to
   a non-zero realized figure, SIGKILL the worker, re-run against the same

@@ -17,6 +17,10 @@
 //!   selects with `[instrument.generator.cascade]`; it replaces the arrival
 //!   clock, the GARCH mid and the bounce/drift process on that preset and
 //!   leaves every other preset on `dynamics`.
+//! - `book` - the discrete book beside the cascade: spread state, effective
+//!   depletion, the frozen ladder and the projection against the latent
+//!   anchor (`notes/book-dynamics-spec.md`). Pure state and transitions;
+//!   the emission plan and the wire stay in `source`.
 //! - `numeric` - small numeric helpers (range checks, saturating decimal
 //!   conversion, round-lot snapping).
 //! - `source` - `GeneratedSource` itself, the `TickSource` the running venue
@@ -29,6 +33,7 @@
 //! arithmetic expression relative to the original single-file generator.
 
 mod arrival;
+mod book;
 mod calendar;
 mod cascade;
 mod checkpoint;
@@ -49,6 +54,10 @@ pub use arrival::{
     ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk, LogOuParams, MAX_LOG_OU_SIGMA_Y,
     ParentDraw, PendingReopen, RuntimeModifiers, SelfExcitingParams, ShotNoiseParams,
     WallMmppParams,
+};
+pub use book::{
+    BookDynamicsConfig, BookPhaseKnobs, BookSnapshot, DiscreteBook, LevelFill, Struck, Trichotomy,
+    WalkOutcome, ladder_next_units,
 };
 pub use calendar::{CalendarError, SessionCalendar, SessionEnvelope, WeeklyWindow};
 pub use cascade::{CascadeConfig, MAX_CASCADE_COMPONENTS};

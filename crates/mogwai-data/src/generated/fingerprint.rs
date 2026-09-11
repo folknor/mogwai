@@ -320,6 +320,15 @@ pub struct GeneratorScalars {
     /// for byte.
     #[serde(default)]
     pub cascade: Option<super::cascade::CascadeConfig>,
+    /// The discrete book beside the cascade (`notes/book-dynamics-spec.md`):
+    /// spread state, effective depletion and the frozen ladder. Present, it
+    /// replaces the placed constant-width book and the trade bounce on the
+    /// cascade path; absent, every cascade preset keeps the placed book byte
+    /// for byte. Requires the cascade - the book's causal order is defined
+    /// per cascade parent - and an integral size grid, because its walk
+    /// consumes whole units of the size increment.
+    #[serde(default)]
+    pub book: Option<super::book::BookDynamicsConfig>,
 }
 
 impl GeneratorScalars {
@@ -353,6 +362,7 @@ impl GeneratorScalars {
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
             cascade: None,
+            book: None,
         }
     }
 
@@ -382,6 +392,7 @@ impl GeneratorScalars {
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
             arrival: None,
             cascade: None,
+            book: None,
         }
     }
 
@@ -416,6 +427,7 @@ impl GeneratorScalars {
             trade_displacement_ticks,
             arrival: _,
             cascade: _,
+            book: _,
         } = self;
         [
             ("quoted_width", quoted_width.provenance()),
@@ -448,6 +460,18 @@ impl GeneratorScalars {
                 return Err(ScalarError::detailed(
                     "cascade",
                     "cannot be combined with an arrival kernel",
+                ));
+            }
+        }
+        if let Some(book) = &self.book {
+            book.validate()?;
+            // The book's causal order is defined per cascade parent; on the
+            // fingerprint-fitted walk there is no parent transaction to
+            // attach it to.
+            if self.cascade.is_none() {
+                return Err(ScalarError::detailed(
+                    "book",
+                    "requires the activity cascade",
                 ));
             }
         }

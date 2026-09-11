@@ -65,6 +65,23 @@ def pull(remote_path: str, local_path: Path) -> int:
     return 0
 
 
+def push_file(local_path: Path, remote_path: str) -> int:
+    """Send one local file to the run host over ssh stdin, mkdir'ing its
+    parent - the mirror of `pull`, for a locally generated tape the source
+    push deliberately excludes (`data/`)."""
+    data = local_path.read_bytes()
+    parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+    result = subprocess.run(
+        ["ssh", REMOTE, f"mkdir -p {parent} && cat > {remote_path}"],
+        input=data,
+    )
+    if result.returncode:
+        print(f"push-file failed: rc={result.returncode}", file=sys.stderr)
+        return 1
+    print(f"pushed {local_path} -> {REMOTE}:{remote_path} ({len(data)} bytes)")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         return push()
@@ -72,6 +89,8 @@ def main(argv: list[str]) -> int:
         return pull(f"{REMOTE_DIR}/uv.lock", HERE / "uv.lock")
     if len(argv) == 3 and argv[0] == "pull":
         return pull(argv[1], Path(argv[2]))
+    if len(argv) == 3 and argv[0] == "push-file":
+        return push_file(Path(argv[1]), argv[2])
     print(__doc__, file=sys.stderr)
     return 2
 
