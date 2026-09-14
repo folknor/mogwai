@@ -58,6 +58,11 @@ pub struct TzAuthority {
     transitions: Vec<Transition>,
     standard_offset_s: i64,
     daylight_offset_s: i64,
+    /// First and last UTC second the authority's transition list speaks for,
+    /// inclusive. Outside it the list says nothing, so a lookup there is refused
+    /// rather than extrapolated from the nearest transition.
+    coverage_start_s: i64,
+    coverage_end_s: i64,
     pub artifact_path: String,
     pub artifact_sha256: String,
 }
@@ -82,10 +87,8 @@ struct AuthorityFile {
     tzdb_release: String,
     #[serde(rename = "source")]
     _source: String,
-    /// Not enforced: `offset_at_utc_s` extrapolates the first and last
-    /// transitions' offsets to instants outside this window.
-    #[serde(rename = "coverage_utc")]
-    _coverage_utc: AuthorityCoverage,
+    /// Enforced by `offset_at_utc_s`, which refuses an instant outside it.
+    coverage_utc: AuthorityCoverage,
     standard_offset_s: i64,
     daylight_offset_s: i64,
     transitions: Vec<AuthorityTransition>,
@@ -94,10 +97,10 @@ struct AuthorityFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthorityCoverage {
-    #[serde(rename = "start")]
-    _start: String,
-    #[serde(rename = "end")]
-    _end: String,
+    /// A UTC calendar date, covered from its first second.
+    start: String,
+    /// A UTC calendar date, covered through its last second.
+    end: String,
 }
 
 #[derive(Deserialize)]
@@ -145,10 +148,22 @@ impl ScheduleFrame {
                 "timezone authority carries an unpermitted offset",
             ));
         }
+        let coverage_start_s = parse_utc_second(&format!("{}T00:00:00Z", raw.coverage_utc.start))?;
+        let coverage_end_s = parse_utc_second(&format!("{}T23:59:59Z", raw.coverage_utc.end))?;
+        if transitions
+            .iter()
+            .any(|t| t.utc_s < coverage_start_s || t.utc_s > coverage_end_s)
+        {
+            return Err(LabError::refusal(
+                "timezone authority carries a transition outside its own coverage",
+            ));
+        }
         Ok(Self::Chicago2026c(TzAuthority {
             transitions,
             standard_offset_s: raw.standard_offset_s,
             daylight_offset_s: raw.daylight_offset_s,
+            coverage_start_s,
+            coverage_end_s,
             artifact_path: path.display().to_string(),
             artifact_sha256: hash,
         }))
@@ -158,6 +173,13 @@ impl ScheduleFrame {
         match self {
             Self::JulyFixed => Ok(i64::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60),
             Self::Chicago2026c(tz) => {
+                if utc_s < tz.coverage_start_s || utc_s > tz.coverage_end_s {
+                    return Err(LabError::refusal(format!(
+                        "utc second {utc_s} is outside the timezone authority's coverage, \
+                         {} to {} inclusive; the transition list says nothing there",
+                        tz.coverage_start_s, tz.coverage_end_s
+                    )));
+                }
                 let mut offset = tz
                     .transitions
                     .first()
@@ -180,15 +202,15 @@ impl ScheduleFrame {
             Self::JulyFixed => &[-18_000],
             Self::Chicago2026c(tz) => &[tz.standard_offset_s, tz.daylight_offset_s],
         };
-        let mut valid = candidates
-            .iter()
-            .copied()
-            .map(|offset| local_s - offset)
-            .filter(|utc| {
-                self.offset_at_utc_s(*utc)
-                    .is_ok_and(|offset| *utc + offset == local_s)
-            })
-            .collect::<Vec<_>>();
+        // A lookup refusal propagates rather than filtering the candidate out:
+        // an instant past the authority's coverage is not a nonexistent civil
+        // instant, and reporting it as one would name the wrong defect.
+        let mut valid = Vec::with_capacity(candidates.len());
+        for utc in candidates.iter().map(|offset| local_s - offset) {
+            if utc + self.offset_at_utc_s(utc)? == local_s {
+                valid.push(utc);
+            }
+        }
         valid.sort_unstable();
         valid.dedup();
         match valid.as_slice() {
@@ -638,6 +660,24 @@ mod tests {
         assert_eq!(before.scheduled_open_seconds, 81_900);
         assert_eq!(after.scheduled_open_seconds, 81_900);
         assert_eq!(after.open_ns - before.open_ns, 71 * 3_600_000_000_000);
+    }
+
+    /// Outside the authority's coverage the transition list says nothing, so a
+    /// session there is refused naming the coverage, not answered with the
+    /// nearest transition's offset.
+    #[test]
+    fn a_session_outside_the_authority_coverage_is_refused() {
+        let authority = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/tz-america-chicago-2026c.json");
+        let frame = ScheduleFrame::stage_m(&authority).expect("frozen authority");
+        frame.bounds("2024-06-03").expect("inside coverage");
+        for session in ["2023-06-01", "2031-06-02"] {
+            let refusal = frame
+                .bounds(session)
+                .expect_err("outside coverage must refuse")
+                .to_string();
+            assert!(refusal.contains("coverage"), "{session}: {refusal}");
+        }
     }
 
     #[test]

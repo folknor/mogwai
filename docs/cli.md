@@ -158,8 +158,9 @@ omitted one resolves the run's default account, which is the same resolution a
 socket does, so a consumer that named no account on either surface sees one
 ledger. An id nobody has traded under is answered rather than refused, with the
 opening balances a ledger under that id would carry; asking does not open the
-account. Its `ts_event` is venue time and
-the top-level `clock` field is `"venue"`. Pushed account events are stamped on
+account. The body is `mogwai_protocol::http::AccountSnapshot`: the ledger nested
+under `account`, beside `clock` and `sweep_passes`. The account's `ts_event` is
+venue time and the top-level `clock` field is `"venue"`. Pushed account events are stamped on
 their boat clocks, so consumers order pulls against pushes by protocol
 sequence, never by comparing timestamps across those axes. Opening an account
 on your own terms, the freeze and the risk policies are in `docs/accounts.md`.
@@ -342,13 +343,16 @@ decodes. A reader that wants only a slice of the body reads it as an untyped
 JSON value instead, as the adapter's run-identity probe does for `run_seed`.
 `Health` sits beside the request carriers the venue itself decodes:
 `SocketQuery` for the `/ws` upgrade, `AccountQuery`, `HistoryQuery` for the
-operator history routes, `OpenAccountRequest` and `DivergenceRequest`. Each
+operator history routes, `OpenAccountRequest` and `DivergenceRequest` - and
+beside the one other response body, `AccountSnapshot` for `GET /account`, which
+is strict the same way at the top level and inside its nested account. Each
 query carrier writes its own query string, so a renamed key is a build failure
 for its writers rather than a `400` at run time.
 
 The fill sweeper's progress is reported per account instead. The `GET /account`
-body carries `sweep_passes`, one row per boat the named account is seated on,
-sorted by `symbol` and carrying a monotonic `completed` count. The
+body carries a top-level `sweep_passes` beside the nested `account`, one row per
+boat the named account is seated on, sorted by `symbol` and carrying a
+monotonic `completed` count. The
 count advances only after the whole pass over that boat finishes, so an operator
 or a test can wait for engine work - a fill walk, a settlement, a funding charge
 - rather than infer it from elapsed wall or simulated time. There is no cadence

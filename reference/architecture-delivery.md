@@ -95,8 +95,9 @@ only through the instant its own boat has published.
 The ledger stays venue-scoped because one engine serves every river, so a
 pulled `/account` snapshot has no boat axis to sit on: stamping it from any one
 boat makes it ahead of or behind a push from another. `GET /account` therefore
-keeps the venue stamp and labels it, adding a `clock: "venue"` field beside the
-otherwise unchanged `AccountState` so a consumer can never mistake that
+keeps the venue stamp and labels it: the body, the protocol's
+`http::AccountSnapshot`, nests the unchanged `AccountState` under `account`
+beside a `clock: "venue"` field, so a consumer can never mistake that
 `ts_event` for boat time; pushes are ordered against pulls by sequence.
 `/clock` goes further and renders only the venue's: it named a river and rendered
 that river's boat clock until that made an anonymous route a boat-discovery
@@ -224,7 +225,7 @@ on a wound-down river stay unscanned until someone boards again.
 Each boat also carries a monotonic completed-pass count, advanced after the
 whole pass including every seated account's engine and delivery work. It is
 observation only: neither scheduling nor engine behavior reads it. It is
-published on `GET /account`, one row per boat the named account is seated on,
+published on `GET /account` as the top-level `sweep_passes`, one row per boat the named account is seated on,
 and deliberately not on `/health`: `/health` answers without an identity, so a
 per-boat list there is an anonymous boat-discovery surface enumerating every
 other account's symbols and cadences, which is what `/clock` was cut back to

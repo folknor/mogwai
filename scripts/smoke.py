@@ -619,8 +619,10 @@ def mode_default(venue: Venue) -> str:
             f"SMOKE-1 is absent from the venue-truth snapshot: {snapshot['orders']}"
         )
 
-        account = venue.http("/account")
-        assert account["balances"], "the run's one ledger reports its funding"
+        snapshot = venue.http("/account")
+        assert set(snapshot) == {"clock", "account", "sweep_passes"}, snapshot
+        assert snapshot["clock"] == "venue", snapshot
+        assert snapshot["account"]["balances"], "the run's one ledger reports its funding"
         return "tape pushed unbidden, order worked, one ledger answered"
     finally:
         ws.close()

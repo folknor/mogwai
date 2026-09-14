@@ -1135,13 +1135,11 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// maintenance hazard: `def` builds the struct literal, so a field added
 /// upstream fails to build here until it is mirrored.
 ///
-/// The `deny` reaches this table's own keys only, because `generator` and
-/// `session` deserialize into `PartialGeneratorScalars` / `SessionProfile`,
-/// deliberately permissive shapes (the latter shared with the committed
-/// fingerprint JSON parse). `configured_from_table` covers those two sub-tables instead, by
-/// checking their raw TOML keys against `GENERATOR_KEYS` / `SESSION_KEYS`
-/// before this struct is built - so a typo inside either one is refused by name
-/// rather than defaulting the knob it meant. Every construction of a
+/// `generator` and `session` deserialize into `PartialGeneratorScalars` and
+/// `SessionProfile`, which deny unknown fields themselves. `configured_from_table`
+/// also checks their raw TOML keys against `GENERATOR_KEYS` / `SESSION_KEYS`
+/// before this struct is built, so a typo inside either one is refused naming
+/// the table the operator wrote rather than only the serde path. Every construction of a
 /// `ConfiguredInstrument` from operator or preset text goes through that
 /// function. Values are validated after, at load
 /// (`build_instrument_profiles` runs `scalars.validate` and `session.validate`).
@@ -1876,27 +1874,18 @@ const SESSION_KEYS: [&str; 3] = ["intensity_hour", "vol_hour", "dow_weight"];
 /// Refuses an unknown key inside the `generator` or `session` sub-tables of a
 /// resolved instrument.
 ///
-/// `ConfiguredInstrument` denies unknown fields, but that guard stops at its
-/// own keys. These two sub-tables deserialize into `GeneratorScalars` and
-/// `SessionProfile`, types shared with the committed fingerprint JSON parse and
-/// so deliberately permissive, which left a typo inside the two most
-/// dynamics-sensitive tables an operator writes silently accepted: the
-/// misspelled key was dropped and the knob it meant ran at its default. Both
-/// halves stayed green, because a defaulted scalar is a legal scalar. Checking
-/// the raw TOML keys here closes that without touching the shared types.
+/// The shared types these sub-tables decode into - `PartialGeneratorScalars`,
+/// `SessionProfile` and the calibration and arrival seams under `generator` -
+/// all deny unknown fields, so serde refuses a typo on its own. This check
+/// predates that: those types were once permissive, a misspelled key was
+/// dropped, and the knob it meant ran at its default with both halves green.
+/// It stays because it names the table the operator wrote
+/// (`instrument.generator.quoted_width`) where serde's error names only a
+/// field, and because it runs on the raw TOML before any overlay is applied.
 ///
-/// Two levels deep under `generator`. The four seams an operator writes as
-/// inline tables (`quoted_width`, `top_sizes`, `trade_displacement_ticks`,
-/// `arrival`) deserialize into the same permissive shared types and were
-/// admitted unchecked until 2026-08-23, so a misspelled `tikcs` inside
-/// `quoted_width` left the quoted spread at one tick with nothing said - the
-/// same defect the outer guard closes, one level further in. `calendar`,
-/// `margin` and `fees` need no cover because their own types already deny
-/// unknown fields.
-///
-/// The floor is `provenance`, which is a tagged enum: an unknown `kind` is
-/// refused by serde itself, and the fields under a known one are a closed set
-/// serde already checks, so there is nothing left here to swallow.
+/// Two levels deep under `generator`, over the four inline-table seams
+/// (`quoted_width`, `top_sizes`, `trade_displacement_ticks`, `arrival`).
+/// `calendar`, `margin` and `fees` are left to their own types' refusal.
 fn refuse_unknown_subtable_keys(instrument: &toml::Table) -> anyhow::Result<()> {
     for (name, known) in [
         ("generator", &GENERATOR_KEYS[..]),
@@ -2830,10 +2819,11 @@ mod tests {
     }
 
     /// A `book` on the generator overlay survives into the built scalars.
-    /// `PartialGeneratorScalars` deserializes permissively - a field it lacks
-    /// is silently dropped rather than refused - so a `[generator.book]` table
-    /// that parsed and passed the key allowlist could still arrive as `None`
-    /// at the generator. That was a real, shipped bug: a preset declared a
+    /// `PartialGeneratorScalars` once deserialized permissively - a field it
+    /// lacked was silently dropped rather than refused - so a `[generator.book]`
+    /// table that parsed and passed the key allowlist could still arrive as
+    /// `None` at the generator. It denies unknown fields now; what this still
+    /// pins is the overlay's carry-through from the partial table to the scalars. That was a real, shipped bug: a preset declared a
     /// discrete book, the overlay had no `book` field, the tape ran the placed
     /// book, and only an end-to-end spread measurement caught it. This pins
     /// the overlay carry-through so it cannot recur when a book preset ships.
@@ -2972,8 +2962,9 @@ mod tests {
     }
 
     /// A typo inside `[instrument.generator]` used to be swallowed: the shared
-    /// `GeneratorScalars` does not deny unknown fields, so the misspelled key
-    /// was dropped and the knob it meant ran at its default with nothing said.
+    /// scalar types did not deny unknown fields then, so the misspelled key was
+    /// dropped and the knob it meant ran at its default with nothing said. The
+    /// refusal must also name the table, which is this guard's remaining job.
     #[test]
     fn a_typo_inside_the_generator_table_refuses_and_names_the_key() {
         let (mut instrument, _) = effective_preset("MNQ").unwrap();

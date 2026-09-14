@@ -367,7 +367,7 @@ hedging, the larger of the two sides. Working orders count; reduce-only does
 not, because a reduce-only leave cannot grow a side.
 
 `GET /account` publishes the thresholds, remaining budgets, the position cap
-and any breach for the evaluator. A strategy that ended flat having spent most
+and any breach for the evaluator, as `account.risk` in its body. A strategy that ended flat having spent most
 of its budget is a different result from one that never came close.
 
 ## The instrument class

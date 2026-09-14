@@ -84,17 +84,15 @@ fn a_pulled_account_snapshot_is_labeled_venue_clock() {
     let venue = spawn(&["--config", &fast_config()]);
     let (status, body) = http_get(&venue.http_base(), "/account");
     assert_eq!(status, 200, "account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(value["clock"], "venue");
-    for field in ["account_id", "balances", "positions", "ts_event"] {
-        assert!(
-            value.get(field).is_some(),
-            "flattened field {field} is missing: {body}"
-        );
-    }
+    // The strict shared type is the whole shape check: it refuses a key it does
+    // not know at the snapshot and at the nested account, and requires every
+    // field, so the real venue's body decoding is the proof the two agree.
+    let snapshot: mogwai_protocol::http::AccountSnapshot = serde_json::from_str(&body)
+        .unwrap_or_else(|err| panic!("the account body is an AccountSnapshot: {err}: {body}"));
+    assert_eq!(snapshot.clock, mogwai_protocol::http::ClockAxis::Venue);
     assert!(
-        value.get("account").is_none(),
-        "account payload must remain flat: {body}"
+        snapshot.account.risk.is_some(),
+        "the pulled account always carries its risk block: {body}"
     );
 }
 
@@ -1004,7 +1002,7 @@ fn an_account_opens_on_the_balance_its_consumer_named() {
 
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-100");
     assert_eq!(status, 200, "the named account answers: {body}");
-    let named: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let named = snapshot_account(&body);
     assert_eq!(named["account_id"], "WYRD-100");
     assert!(
         body.contains("250000"),
@@ -1015,7 +1013,7 @@ fn an_account_opens_on_the_balance_its_consumer_named() {
     // separable rather than one ledger wearing a different label.
     let (status, body) = http_get(&venue.http_base(), "/account");
     assert_eq!(status, 200, "the default account still answers: {body}");
-    let default: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let default = snapshot_account(&body);
     assert_ne!(
         default["account_id"], "WYRD-100",
         "the default account is a different ledger: {body}"
@@ -1078,7 +1076,7 @@ fn a_policed_account_publishes_its_remaining_budget() {
 
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-200");
     assert_eq!(status, 200, "the account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     let risk = &value["risk"];
     assert_eq!(
         risk["peak_equity"], "50000",
@@ -1213,7 +1211,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     let body = loop {
         let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-204");
         assert_eq!(status, 200, "the account answers: {body}");
-        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let value = snapshot_account(&body);
         let equity: f64 = value["risk"]["equity"]
             .as_str()
             .expect("equity is reported")
@@ -1238,7 +1236,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     // by the notional would have crossed this account's 1,000,000 trailing
     // drawdown off its 5,000,000 opening and stuck there. The poll can wait for the
     // mark; it cannot wait out a breach that already fired.
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     assert!(
         value["risk"]["breached"].is_null(),
         "a purchase is not a drawdown breach: {body}"
@@ -1405,7 +1403,7 @@ fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
     assert_eq!(status, 201, "the named policy resolves: {body}");
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-400");
     assert_eq!(status, 200, "the account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     assert_eq!(
         value["risk"]["trailing_threshold"], "48000",
         "the shipped intraday trail is a 2,000 drawdown: {body}"
@@ -1432,7 +1430,7 @@ fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
     assert_eq!(status, 201, "the static ruleset resolves: {body}");
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-402");
     assert_eq!(status, 200, "the static account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     assert_eq!(
         value["risk"]["overall_threshold"], "45000",
         "a 5,000 static floor off a 50k open: {body}"
@@ -1452,7 +1450,7 @@ fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
     assert_eq!(status, 201, "the sized ruleset resolves: {body}");
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-403");
     assert_eq!(status, 200, "the sized account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     assert_eq!(
         value["risk"]["max_position"], "10",
         "the sized ruleset publishes its cap: {body}"
@@ -2452,7 +2450,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     let drain = BackgroundDrain::spawn(socket);
 
     let balance_of = |body: &str| -> f64 {
-        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        let value = snapshot_account(body);
         value["balances"]
             .as_array()
             .expect("balances")
@@ -2519,8 +2517,12 @@ fn an_account_naming_no_policy_is_unpoliced() {
     let venue = spawn(&["--config", &fast_config()]);
     let (status, body) = http_get(&venue.http_base(), "/account");
     assert_eq!(status, 200, "the default account answers: {body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value = snapshot_account(&body);
     let risk = &value["risk"];
+    assert!(
+        risk.is_object(),
+        "an unpoliced account still publishes its risk block: {body}"
+    );
     assert!(
         risk["trailing_threshold"].is_null() && risk["daily_remaining"].is_null(),
         "an unpoliced account states no thresholds: {body}"
@@ -3443,24 +3445,38 @@ fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
     clock.venue_now_ns
 }
 
+/// The nested account of a `GET /account` body, as raw JSON.
+///
+/// The body is first decoded as the strict shared
+/// `mogwai_protocol::http::AccountSnapshot`, so a body of the wrong shape fails
+/// here by name rather than letting an index into a missing key read as
+/// `null` - which is how an assertion like "`risk.breached` is null" would
+/// pass against a body that has no `risk` where it is looked for. The raw
+/// value is what is returned, so decimals are compared in the exact spelling
+/// the venue wrote.
+fn snapshot_account(body: &str) -> serde_json::Value {
+    let _: mogwai_protocol::http::AccountSnapshot = serde_json::from_str(body)
+        .unwrap_or_else(|err| panic!("the account body is an AccountSnapshot: {err}: {body}"));
+    let mut value: serde_json::Value =
+        serde_json::from_str(body).expect("the account snapshot is json");
+    value["account"].take()
+}
+
 /// The `sweep_passes` rows one account's snapshot carries, `query` being the
 /// `?account=` suffix or the empty string for the venue's default account.
-fn sweep_rows(base: &str, query: &str) -> Vec<serde_json::Value> {
+fn sweep_rows(base: &str, query: &str) -> Vec<mogwai_protocol::http::SweepPasses> {
     let (status, body) = http_get(base, &format!("/account{query}"));
     assert_eq!(status, 200, "account while reading sweep passes: {body}");
-    let value: serde_json::Value =
-        serde_json::from_str(&body).expect("the account snapshot is json");
-    value["sweep_passes"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the account snapshot carries a sweep_passes array: {value}"))
-        .clone()
+    let snapshot: mogwai_protocol::http::AccountSnapshot = serde_json::from_str(&body)
+        .unwrap_or_else(|err| panic!("the account body is an AccountSnapshot: {err}: {body}"));
+    snapshot.sweep_passes
 }
 
 /// The symbols one account's snapshot admits to being seated on.
 fn sweep_symbols(base: &str, query: &str) -> Vec<String> {
     sweep_rows(base, query)
-        .iter()
-        .map(|row| row["symbol"].as_str().unwrap_or_default().to_owned())
+        .into_iter()
+        .map(|row| row.symbol)
         .collect()
 }
 
@@ -3469,9 +3485,9 @@ fn sweep_symbols(base: &str, query: &str) -> Vec<String> {
 /// boarding yet, or one that has left.
 fn completed_sweep_passes(base: &str, symbol: &str) -> Option<u64> {
     sweep_rows(base, "")
-        .iter()
-        .find(|row| row["symbol"] == symbol)
-        .and_then(|row| row["completed"].as_u64())
+        .into_iter()
+        .find(|row| row.symbol == symbol)
+        .map(|row| row.completed)
 }
 
 /// Wait until the run clock has advanced `lead_ns` past the run's own start.
@@ -4348,7 +4364,7 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
 
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
     assert_eq!(status, 200, "an unopened account still answers: {body}");
-    let snapshot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let snapshot = snapshot_account(&body);
     assert_eq!(
         snapshot["account_id"], "WYRD-READ",
         "the answer is about the account that was asked for: {body}"

@@ -129,7 +129,7 @@ while it is being read. A clock-neutral havoc window stores its wall arming inst
 and simulated span. Each reader judges the span on its own clock; a boat placed
 after the arm opens the window at its own epoch and receives the full span.
 The pulled `/account` snapshot is venue-scoped and labels its axis as
-`"clock":"venue"`; pushed account events remain boat-stamped and the two axes
+`"clock":"venue"` beside the nested `account`; pushed account events remain boat-stamped and the two axes
 must be ordered by sequence, not timestamp comparison. A process is
 not restarted in place: launchers create a new run and obtain a new readiness
 record with a fresh (or configured) seed.

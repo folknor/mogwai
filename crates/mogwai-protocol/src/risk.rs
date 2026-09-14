@@ -323,10 +323,11 @@ impl AccountPolicy {
 /// Every decimal here is string-spelled on the wire, and a JSON number is
 /// refused, for the same reason the execution and market-data frames in
 /// `messages` are: these are money quantities, and a bare number decodes
-/// through `f64`. This type is output-only in-tree - the venue builds it and
-/// publishes it on `GET /account`, nothing decodes it here - but it derives
-/// `Deserialize` for consumers, and a consumer's decoder is exactly where the
-/// tolerance would have bitten unobserved. It is a deliberate inclusion, not
+/// through `f64`. The venue builds it and publishes it inside
+/// `AccountState::risk`, on the pushed frame and on `GET /account`'s nested
+/// account alike, and `mogwai-adapter` decodes it on both paths - so a
+/// consumer's decoder is exactly where the tolerance would bite, and it is
+/// refused rather than trusted. It is a deliberate inclusion, not
 /// an oversight: [`AccountPolicy`] beside it stays number-tolerant because a
 /// policy is also TOML config, while a published state is only ever wire.
 ///
@@ -568,13 +569,10 @@ mod tests {
     }
 
     /// `RiskState` is on the wire - `GET /account` publishes it as
-    /// `AccountSnapshot.risk` - so it takes the same string-only decimal rule
-    /// the execution and market-data frames do, and this is the row that says
-    /// the inclusion was decided rather than forgotten.
-    ///
-    /// It is output-only in this workspace, which is exactly why the tolerance
-    /// needed pinning here: no in-tree decode would ever have exercised it, and
-    /// a consumer's would.
+    /// `AccountSnapshot.account.risk`, and the pushed `AccountState` frame
+    /// carries it too - so it takes the same string-only decimal rule the
+    /// execution and market-data frames do, and this is the row that says the
+    /// inclusion was decided rather than forgotten.
     #[test]
     fn a_published_risk_state_refuses_a_numeric_decimal() {
         let string_spelled = r#"{"equity":"1000.5","peak_equity":"1200","day_open_equity":"1100","trailing_remaining":"50.25","breached":{"rule":"daily_loss_limit","action":"lock_until_reset","ts_event":7,"equity":"900","threshold":"950"}}"#;

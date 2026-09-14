@@ -20,12 +20,64 @@ use super::consts::{
 };
 use super::numeric::decimal_from_f64;
 
+/// The committed fingerprint, every key in `analysis/fingerprint.json` named.
+///
+/// Unknown keys are refused at every level. A key the artifact carries and no
+/// struct names is either something the generator should be reading and is not,
+/// or a record nothing reads; both are worth a build failure over a silent
+/// default. The records nothing on the generator's path reads are named too -
+/// `source`, the cadence corpus report, the declined level-queue study and the
+/// `_doc` notes - so the artifact's whole shape is stated here.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Fingerprint {
+    /// The corpus the golden targets and empirical ranges were measured on.
+    pub source: FingerprintSource,
     pub cadence: Cadence,
     pub golden_targets: GoldenTargets,
+    #[serde(deserialize_with = "session_profile_with_doc")]
     pub session_profile: SessionProfile,
     pub empirical_ranges: EmpiricalRanges,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FingerprintSource {
+    pub pairs: Vec<String>,
+    pub total_trades: u64,
+    pub anchor: String,
+}
+
+/// The fingerprint's session profile carries a `_doc` note that an operator
+/// profile does not, and `SessionProfile` is also what operator TOML decodes
+/// into, so the note is named on this private mirror rather than on the shared
+/// type. The conversion is an exhaustive struct literal, so a field added to
+/// `SessionProfile` fails to build here until the mirror names it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FingerprintSessionProfile {
+    #[serde(rename = "_doc")]
+    _doc: String,
+    intensity_hour: [f64; 24],
+    vol_hour: [f64; 24],
+    dow_weight: [f64; 7],
+}
+
+fn session_profile_with_doc<'de, D>(deserializer: D) -> Result<SessionProfile, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let FingerprintSessionProfile {
+        _doc,
+        intensity_hour,
+        vol_hour,
+        dow_weight,
+    } = FingerprintSessionProfile::deserialize(deserializer)?;
+    Ok(SessionProfile {
+        intensity_hour,
+        vol_hour,
+        dow_weight,
+    })
 }
 
 impl Fingerprint {
@@ -51,7 +103,15 @@ impl Fingerprint {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoldenTargets {
+    #[serde(rename = "_doc")]
+    pub doc: String,
+    /// The at-touch traded-volume study, whose own `_doc` records it as
+    /// declined: nothing samples it. Opaque on purpose - the offline writer emits
+    /// it through `serde_json::json!` with no type in this tree to bind, and a
+    /// type invented here would be a second grammar with no reader.
+    pub level_queue: serde_json::Value,
     pub duration_dispersion_cv2: AnchorRange,
     pub dwell: DwellTargets,
     pub return_acf_lag1: AnchorRange,
@@ -62,8 +122,31 @@ pub struct GoldenTargets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cadence {
     pub targets: CadenceTargets,
+    /// The pair the targets are anchored on.
+    pub anchor: String,
+    /// The per-pair corpus report and the archives it was read from. Opaque for
+    /// the reason `GoldenTargets::level_queue` is: written by `json!` in
+    /// `mogwai-lab`'s cadence probe, read by nothing.
+    pub pairs: serde_json::Value,
+    pub provenance: serde_json::Value,
+    /// The child-count shape the offline fit solved from the targets.
+    ///
+    /// A record, not an input. The generator re-solves the shape from the
+    /// declared `children_mean`, `children_single_frac` and `levels_mean` at
+    /// construction, so it follows whatever those say rather than this copy.
+    pub shape: CadenceShape,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadenceShape {
+    pub m: f64,
+    pub q: f64,
+    pub level_step_prob: f64,
+    pub fallback_pure_geometric: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +173,10 @@ pub struct PerSecondCounts {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DwellTargets {
+    #[serde(rename = "_doc")]
+    pub doc: String,
     pub era_start_ts: u64,
     pub mean_s: AnchorRange,
     pub max_gap_s: AnchorRange,
@@ -133,6 +219,7 @@ impl MinMedianMax {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionProfile {
     pub intensity_hour: [f64; 24],
     pub vol_hour: [f64; 24],
@@ -256,7 +343,10 @@ fn strictly_positive_finite(value: f64) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmpiricalRanges {
+    #[serde(rename = "_doc")]
+    pub doc: String,
     /// Human-readable identity of the corpus behind every range below. These
     /// bands are observations, not universal units or mechanism limits.
     pub corpus: String,
@@ -907,7 +997,15 @@ mod tests {
         let base: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         serde_json::from_value::<Fingerprint>(base.clone()).expect("the committed base parses");
 
-        let cases: [(&[&str], &str); 5] = [
+        let cases: [(&[&str], &str); 13] = [
+            (&[], "sourse"),
+            (&["source"], "pair"),
+            (&["cadence"], "shap"),
+            (&["cadence", "shape"], "level_step"),
+            (&["golden_targets"], "level_queues"),
+            (&["golden_targets", "dwell"], "doc"),
+            (&["session_profile"], "vol_hours"),
+            (&["empirical_ranges"], "tick"),
             (&["cadence", "targets"], "levels_meen"),
             (&["cadence", "targets", "children_mean"], "anchr"),
             (&["cadence", "targets", "children_mean", "range"], "p95"),

@@ -331,15 +331,32 @@ wrong with it, and so is any query key other than `account`, since a misspelled
 key would otherwise hand back the default account's snapshot under the name of
 the account you asked about.
 
-The answer carries three fields: `clock`, `account` and `risk`. `clock` is
-always `venue`, and the stamp is deliberate. A ledger spans every river its
+The answer carries three fields, in this order: `clock`, `account` and
+`sweep_passes`. `account` is the ledger itself, the same `AccountState` a pushed
+frame carries, nested rather than spread across the top level; `risk` rides
+inside it. The shape is `mogwai_protocol::http::AccountSnapshot`, which the
+venue writes and the adapter decodes, and it refuses an unknown key at the top
+level and inside `account` alike:
+
+```json
+{"clock":"venue",
+ "account":{"account_id":"WYRD-01","balances":[...],"positions":[],
+            "risk":{"equity":"10000","peak_equity":"10000","day_open_equity":"10000"},
+            "ts_event":7},
+ "sweep_passes":[{"symbol":"MNQ","completed":3}]}
+```
+
+`sweep_passes` is the fill sweeper's progress on each seat the account's
+passengers hold; `docs/cli.md` describes it. `clock` is always `venue`, and the
+stamp is deliberate. A ledger spans every river its
 account's passengers have boarded, so there is no boat clock to put it on:
 stamp from one boat and a push from a later-placed boat is ahead of the pull,
 stamp from the newest and it is behind. No choice keeps a cross-clock
 monotonicity promise, so the answer says which clock it used and a consumer
 orders pulls against pushes by sequence.
 
-`risk` publishes equity, the ratcheted peak, the day's opening equity, whatever
+`account.risk` is always present on this answer, policed or not. It publishes
+equity, the ratcheted peak, the day's opening equity, whatever
 thresholds and remaining budgets the policy defines, the position cap and any
 breach that has fired. Every decimal in it is string-spelled, and a numeric
 spelling is refused on decode. An unpoliced account still reports its equity

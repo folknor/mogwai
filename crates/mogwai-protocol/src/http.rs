@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The venue's HTTP and upgrade grammars: every query string and JSON body a
-//! consumer writes to a native route, and the `/health` body it reads back.
+//! consumer writes to a native route, and the `/health` and `/account` bodies it
+//! reads back.
 //!
 //! These lived private to the venue crate, which left every writer outside it
 //! spelling the keys by hand - the adapter with `format!`, a sister repository
@@ -11,8 +12,8 @@
 //! `routes`, makes the venue's decoder and every writer one definition, so a
 //! moved name is a build failure wherever it is written.
 //!
-//! Every carrier here denies unknown fields, the requests and the `/health`
-//! response alike. On a request, accepted-and-ignored is the worst reading: a
+//! Every carrier here denies unknown fields, the requests and the two responses
+//! alike. On a request, accepted-and-ignored is the worst reading: a
 //! misspelled key is served as a wider or different request than the consumer
 //! wrote, so it is refused with a `400` naming the key. On the response the
 //! reasoning is the same from the other end. The venue, the adapter and every
@@ -165,6 +166,85 @@ impl AccountQuery {
     pub fn to_query(&self) -> String {
         encode_query(self)
     }
+}
+
+/// The `GET /account` body: one account's ledger, the axis its stamp lives on,
+/// and the sweeper's progress on the seats its passengers hold.
+///
+/// The account is nested under `account` rather than flattened beside the two
+/// response-only keys, and that is what lets the body be strict. `serde(flatten)`
+/// cannot combine with `deny_unknown_fields`, so a flattened body either
+/// tolerated stray keys or made every decoder take `clock` and `sweep_passes`
+/// off by name before decoding the rest - a hand-kept list of keys beside the
+/// type, which is the pattern a shared carrier exists to remove. Nested, the
+/// venue writes this type and every reader decodes it, and a moved name is a
+/// build failure on both sides.
+///
+/// Field order is wire order, because `serde_json` writes fields as declared.
+///
+/// Risk rides inside the account as [`crate::AccountState::risk`], always
+/// `Some` on this body, rather than as a sibling here. `AccountState` is also
+/// the pushed frame's payload, where `None` is meaningful (an unpoliced
+/// account's frame reports no budget), so the field stays optional on the type;
+/// a required sibling on this body would leave the nested account carrying a
+/// second `risk` slot that must always be absent, two spellings of one fact
+/// kept apart by convention. The venue always sets it here because an
+/// evaluator wants an unpoliced account's equity too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSnapshot {
+    /// Always [`ClockAxis::Venue`] today. Present so a consumer can never
+    /// mistake the account's `ts_event` for boat time.
+    ///
+    /// Stamped on the venue clock, deliberately. A ledger spans every river
+    /// its account's passengers have boarded, so there is no boat axis to put
+    /// it on: stamp from one boat and a push from a later-placed boat on
+    /// another river is ahead of the pull; stamp from the newest and it is
+    /// behind. A consumer orders pulls against pushes by sequence.
+    pub clock: ClockAxis,
+    /// The ledger itself, the same type the pushed `AccountState` frame
+    /// carries.
+    pub account: crate::AccountState,
+    /// The fill sweeper's completed-pass count on each boat this account is
+    /// seated on, sorted by symbol.
+    ///
+    /// Account-scoped, and that placement is the whole of it. The count is the
+    /// only observable that says the engine work behind a fill, a settlement or
+    /// a funding charge has actually run, so something had to carry it - and it
+    /// first landed on `/health`, which enumerated every boat in the run to any
+    /// caller. That is the anonymous boat-discovery surface `/clock` was cut
+    /// back to remove: symbols and cadences are what other accounts asked for,
+    /// and passengers of different accounts are owed invisibility. Here the
+    /// caller must name an account to be told anything, on the same footing as
+    /// the balances and risk state beside it, and it is told only about seats
+    /// its own passengers boarded. An account seated nowhere - unopened, or
+    /// frozen with its last passenger gone - gets an empty list, which is the
+    /// truth rather than a redaction: an unseated account's rivers are not
+    /// swept.
+    ///
+    /// Keyed by symbol alone, with no cadence field, because one ledger carries
+    /// one cadence per river - a second is refused at admission - so the symbol
+    /// already names the seat unambiguously and publishing the speed would add
+    /// an observable for nothing.
+    pub sweep_passes: Vec<SweepPasses>,
+}
+
+/// One seat's completed-pass count on [`AccountSnapshot::sweep_passes`].
+/// Monotonic within a boat's life and observation only: nothing in scheduling,
+/// pacing or the engine reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SweepPasses {
+    pub symbol: String,
+    pub completed: u64,
+}
+
+/// Which axis a timestamp lives on. The sibling of `VenueClock::boat_clock`,
+/// and the reason a venue stamp is honest rather than a look-ahead in disguise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClockAxis {
+    Venue,
 }
 
 /// The `/operator/trades` and `/operator/quotes` query string.
@@ -526,6 +606,59 @@ mod tests {
         assert!(
             serde_json::from_str::<Health>(missing).is_err(),
             "reset_account_on_reconnect was defaulted instead of required"
+        );
+    }
+
+    /// The exact `GET /account` body the venue writes: the account nested under
+    /// `account`, between `clock` and `sweep_passes`, with its risk block inside
+    /// it. Decoding and re-encoding reproduces the bytes, so no field is dropped
+    /// or reordered on either side.
+    const ACCOUNT_SNAPSHOT: &str = r#"{"clock":"venue","account":{"account_id":"WYRD-01","balances":[{"currency":"USD","total":"10000","free":"10000","locked":"0"}],"positions":[],"risk":{"equity":"10000","peak_equity":"10000","day_open_equity":"10000"},"ts_event":7},"sweep_passes":[{"symbol":"MNQ","completed":3}]}"#;
+
+    #[test]
+    fn account_snapshot_writes_the_wire_bytes_consumers_read() {
+        let decoded: AccountSnapshot =
+            serde_json::from_str(ACCOUNT_SNAPSHOT).expect("the venue's body decodes");
+        assert_eq!(decoded.clock, ClockAxis::Venue);
+        assert_eq!(decoded.account.account_id.as_str(), "WYRD-01");
+        assert_eq!(decoded.account.ts_event, 7);
+        assert!(decoded.account.risk.is_some(), "risk rides the account");
+        assert_eq!(
+            decoded.sweep_passes,
+            vec![SweepPasses {
+                symbol: "MNQ".to_owned(),
+                completed: 3,
+            }]
+        );
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), ACCOUNT_SNAPSHOT);
+    }
+
+    /// Strict at both levels: a key the snapshot does not know is refused, and
+    /// so is one inside the nested account. The flattened shape could not do
+    /// the first without a decoder-side list of keys, which is what nesting
+    /// removed. A flat body - the account's keys at the top level - is refused
+    /// too, so a double serving the retired shape cannot pass as the venue.
+    #[test]
+    fn account_snapshot_refuses_unknown_keys_at_both_levels() {
+        let top = ACCOUNT_SNAPSHOT.replacen(
+            r#""clock":"venue","#,
+            r#""clock":"venue","added_later":1,"#,
+            1,
+        );
+        let err = serde_json::from_str::<AccountSnapshot>(&top)
+            .expect_err("an unknown snapshot key is refused");
+        assert!(err.to_string().contains("added_later"), "{err}");
+
+        let nested =
+            ACCOUNT_SNAPSHOT.replacen(r#""ts_event":7"#, r#""ts_event":7,"added_later":1"#, 1);
+        let err = serde_json::from_str::<AccountSnapshot>(&nested)
+            .expect_err("an unknown account key is refused");
+        assert!(err.to_string().contains("added_later"), "{err}");
+
+        let flat = r#"{"clock":"venue","account_id":"WYRD-01","balances":[],"positions":[],"ts_event":7,"sweep_passes":[]}"#;
+        assert!(
+            serde_json::from_str::<AccountSnapshot>(flat).is_err(),
+            "the retired flattened body decoded"
         );
     }
 

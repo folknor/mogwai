@@ -1165,14 +1165,21 @@ async fn serve_exec_message<S>(
 
 /// Builds the canonical `GET /account` body, including the required account id.
 ///
-/// Venue-shaped rather than a bare `AccountState`: the real pull response adds
-/// `clock` and `sweep_passes` beside the account, and the client refuses a body
-/// without them, so a stub serving the bare account would be testing a venue
-/// that does not exist.
+/// Venue-shaped rather than a bare `AccountState`: the real pull response is
+/// `mogwai_protocol::http::AccountSnapshot`, the account nested under `account`
+/// beside `clock` and `sweep_passes`, with the risk block the venue always sets
+/// on this body. The client decodes that strict type, so a stub serving the bare
+/// account would be testing a venue that does not exist. The body is checked
+/// against the shared type here too, so a stub drifting from it fails where it
+/// is built rather than as a confusing connect failure.
 pub fn account_json(account_id: &str, positions: &str, ts_event: u64) -> String {
-    format!(
-        r#"{{"clock":"venue","account_id":"{account_id}","balances":[{{"currency":"USDT","total":"10000","free":"10000","locked":"0"}}],"positions":{positions},"ts_event":{ts_event},"sweep_passes":[]}}"#
-    )
+    let body = format!(
+        r#"{{"clock":"venue","account":{{"account_id":"{account_id}","balances":[{{"currency":"USDT","total":"10000","free":"10000","locked":"0"}}],"positions":{positions},"risk":{{"equity":"10000","peak_equity":"10000","day_open_equity":"10000"}},"ts_event":{ts_event}}},"sweep_passes":[]}}"#
+    );
+    if let Err(err) = serde_json::from_str::<mogwai_protocol::http::AccountSnapshot>(&body) {
+        panic!("the stub account body is not an AccountSnapshot: {err}: {body}");
+    }
+    body
 }
 
 /// One venue-truth BTCUSDT position row for an account snapshot.

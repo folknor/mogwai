@@ -154,33 +154,15 @@ async fn fetch_account(
             response.status.as_u16()
         )));
     }
-    decode_account_snapshot(&response.body)
+    // The venue's own body type, strict at the snapshot and the nested account,
+    // so a key either side moves is a decode failure here rather than a list of
+    // names this client keeps by hand. `sweep_passes` is evaluator observation
+    // this client has no reader for; decoding it is still what keeps the body
+    // exact.
+    serde_json::from_slice::<mogwai_protocol::http::AccountSnapshot>(&response.body)
+        .map(|snapshot| snapshot.account)
         .context("decode account")
         .map_err(FetchAccountError::Other)
-}
-
-/// Decodes a `GET /account` body into the account it describes.
-///
-/// The body is an `AccountState` with two keys the pull response adds beside
-/// it: `clock`, which names the stamp's axis, and `sweep_passes`, which is
-/// evaluator observation this client has no reader for. `AccountState` refuses
-/// unknown keys, so those two are taken off by name first - and required, so a
-/// double serving a bare `AccountState` fails here rather than passing as the
-/// venue - and every other key is then the account's to accept or refuse.
-fn decode_account_snapshot(body: &[u8]) -> anyhow::Result<mogwai_protocol::AccountState> {
-    let mut object: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(body).context("the account body is not a JSON object")?;
-    match object.remove("clock") {
-        Some(serde_json::Value::String(axis)) if axis == "venue" => {}
-        other => anyhow::bail!("the account body must carry clock \"venue\", got {other:?}"),
-    }
-    anyhow::ensure!(
-        object
-            .remove("sweep_passes")
-            .is_some_and(|value| value.is_array()),
-        "the account body must carry a sweep_passes array"
-    );
-    serde_json::from_value(serde_json::Value::Object(object)).map_err(anyhow::Error::from)
 }
 
 /// Notes the venue's account label when it differs from the configured one.
@@ -3977,48 +3959,6 @@ mod tests {
             )),
         );
         MogwaiExecutionClient::new(core, config).expect("test client builds")
-    }
-
-    /// The pull body decodes with its two response-only keys taken off by
-    /// name, and refuses everything else it does not know. The venue-shaped
-    /// body decodes and keeps its risk block; a stray key, a bare
-    /// `AccountState` without `clock`, and one without `sweep_passes` each
-    /// refuse. Removing `deny_unknown_fields` from `AccountState` turns the
-    /// stray-key arm green, which is what this pins from the consumer side.
-    #[test]
-    fn the_account_pull_body_decodes_by_name_and_refuses_the_rest() {
-        let venue = serde_json::json!({
-            "clock": "venue",
-            "account_id": "MOGWAI-001",
-            "balances": [],
-            "positions": [],
-            "risk": { "equity": "1", "peak_equity": "1", "day_open_equity": "1" },
-            "ts_event": 7,
-            "sweep_passes": [],
-        });
-        let account = decode_account_snapshot(venue.to_string().as_bytes())
-            .expect("the venue-shaped body decodes");
-        assert_eq!(account.ts_event, 7);
-        assert!(account.risk.is_some(), "the risk block rides the account");
-
-        let mut stray = venue.clone();
-        stray["surprise"] = serde_json::json!(1);
-        let error = format!(
-            "{:#}",
-            decode_account_snapshot(stray.to_string().as_bytes()).expect_err("a stray key refuses")
-        );
-        assert!(error.contains("surprise"), "{error}");
-
-        for missing in ["clock", "sweep_passes"] {
-            let mut body = venue.clone();
-            body.as_object_mut().expect("object").remove(missing);
-            let error = format!(
-                "{:#}",
-                decode_account_snapshot(body.to_string().as_bytes())
-                    .expect_err("a body missing a response key refuses")
-            );
-            assert!(error.contains(missing), "{error}");
-        }
     }
 
     /// A mirror seeded with one order in `status`, plus the context that reads

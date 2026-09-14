@@ -24,8 +24,8 @@ use mogwai_protocol::{
     VenueMessage,
     control::Divergence,
     http::{
-        AccountQuery, DivergenceRequest, Health, HealthFault, HealthStatus, HistoryQuery,
-        OpenAccountRequest,
+        AccountQuery, AccountSnapshot, ClockAxis, DivergenceRequest, Health, HealthFault,
+        HealthStatus, HistoryQuery, OpenAccountRequest, SweepPasses,
     },
     truncate_echoed_id, truncate_reason, validate_client_order_id, validate_divergence,
     validate_modify_order, validate_request_id, validate_submit_order,
@@ -1393,68 +1393,6 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
     Json(state.rivers.instrument_defs())
 }
 
-/// The HTTP shape of a pulled account snapshot.
-///
-/// `AccountState` itself is unchanged - it is also the pushed frame's payload,
-/// and the pushed path is per-boat and already correct. The label is added by
-/// this response only, and `serde(flatten)` keeps every existing field at the
-/// same position in the object. `AccountState` refuses unknown keys, so a
-/// consumer decoding this body as one must first take off the two keys this
-/// response adds, `clock` and `sweep_passes`; `mogwai-adapter`'s
-/// `fetch_account` does exactly that, by name.
-///
-/// Risk rides inside the flattened account as `AccountState::risk`, always
-/// `Some` here, rather than as a sibling field. The wire is the same top-level
-/// `risk` key either way, but a sibling beside a flattened `AccountState` that
-/// also carries `risk` would serialize the key twice the moment a snapshot
-/// arrived with it set.
-#[derive(Serialize)]
-pub(crate) struct AccountSnapshot {
-    /// Always `"venue"` today. Present so a consumer can never mistake the
-    /// `ts_event` here for boat time.
-    clock: ClockAxis,
-    #[serde(flatten)]
-    account: AccountState,
-    /// The fill sweeper's completed-pass count on each boat this account is
-    /// seated on, sorted by symbol.
-    ///
-    /// Account-scoped, and that placement is the whole of it. The count is the
-    /// only observable that says the engine work behind a fill, a settlement or
-    /// a funding charge has actually run, so something had to carry it - and it
-    /// first landed on `/health`, which enumerated every boat in the run to any
-    /// caller. That is the anonymous boat-discovery surface `/clock` was cut
-    /// back to remove: symbols and cadences are what other accounts asked for,
-    /// and passengers of different accounts are owed invisibility. Here the
-    /// caller must name an account to be told anything, on the same footing as
-    /// the balances and risk state already in this body, and it is told only
-    /// about seats its own passengers boarded. An account seated nowhere -
-    /// unopened, or frozen with its last passenger gone - gets an empty list,
-    /// which is the truth rather than a redaction: an unseated account's rivers
-    /// are not swept.
-    ///
-    /// Keyed by symbol alone, with no cadence field, because one ledger carries
-    /// one cadence per river - a second is refused at admission - so the symbol
-    /// already names the seat unambiguously and publishing the speed would add
-    /// an observable for nothing.
-    sweep_passes: Vec<AccountSweepPasses>,
-}
-
-/// One seat's completed-pass count. Monotonic within a boat's life and
-/// observation only: nothing in scheduling, pacing or the engine reads it.
-#[derive(Serialize)]
-struct AccountSweepPasses {
-    symbol: String,
-    completed: u64,
-}
-
-/// Which axis a timestamp lives on. The sibling of `VenueClock::boat_clock`,
-/// and the reason a venue stamp is honest rather than a look-ahead in disguise.
-#[derive(Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ClockAxis {
-    Venue,
-}
-
 /// Pull route for the venue's current account snapshot.
 ///
 /// `AccountState` is execution-owned and is otherwise only pushed with an order
@@ -1476,12 +1414,8 @@ enum ClockAxis {
 /// the mint would have and then throws it away; what changed is that asking
 /// about an account is no longer the same act as opening one.
 ///
-/// Stamped on the venue clock, deliberately. A ledger spans every river its
-/// account's passengers have boarded, so there is no boat axis to put it on: stamp from one
-/// boat and a push from a later-placed boat on another river is ahead of the
-/// pull; stamp from the newest and it is behind. No choice can keep a
-/// cross-clock monotonicity promise, so the answer keeps the venue stamp and
-/// says so, and a consumer orders pulls against pushes by sequence.
+/// The body is `mogwai_protocol::http::AccountSnapshot`, whose doc states the
+/// shape and why the stamp sits on the venue clock.
 pub(crate) async fn account(
     Query(query): Query<AccountQuery>,
     State(state): State<AppState>,
@@ -1505,7 +1439,7 @@ pub(crate) async fn account(
         Some(account_state) => {
             for boat in state.run.boatyard.boats() {
                 if account_state.is_seated_on(&boat.key()) {
-                    sweep_passes.push(AccountSweepPasses {
+                    sweep_passes.push(SweepPasses {
                         symbol: boat.symbol().to_owned(),
                         completed: boat
                             .completed_sweep_passes
