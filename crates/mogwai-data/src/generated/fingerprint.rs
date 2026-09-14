@@ -108,10 +108,10 @@ pub struct GoldenTargets {
     #[serde(rename = "_doc")]
     pub doc: String,
     /// The at-touch traded-volume study, whose own `_doc` records it as
-    /// declined: nothing samples it. Opaque on purpose - the offline writer emits
-    /// it through `serde_json::json!` with no type in this tree to bind, and a
-    /// type invented here would be a second grammar with no reader.
-    pub level_queue: serde_json::Value,
+    /// declined: nothing samples it. Typed all the same, because an untyped
+    /// value would accept any key in a committed artifact, and this struct is
+    /// the only statement in the tree of what the record holds.
+    pub level_queue: LevelQueueStudy,
     pub duration_dispersion_cv2: AnchorRange,
     pub dwell: DwellTargets,
     pub return_acf_lag1: AnchorRange,
@@ -127,17 +127,127 @@ pub struct Cadence {
     pub targets: CadenceTargets,
     /// The pair the targets are anchored on.
     pub anchor: String,
-    /// The per-pair corpus report and the archives it was read from. Opaque for
-    /// the reason `GoldenTargets::level_queue` is: written by `json!` in
-    /// `mogwai-lab`'s cadence probe, read by nothing.
-    pub pairs: serde_json::Value,
-    pub provenance: serde_json::Value,
+    /// The per-pair corpus report, keyed by pair symbol, written by
+    /// `mogwai-lab`'s cadence probe and read by nothing on the generator's path.
+    /// Typed for the reason `GoldenTargets::level_queue` is.
+    pub pairs: std::collections::BTreeMap<String, CadencePairReport>,
+    pub provenance: CadenceProvenance,
     /// The child-count shape the offline fit solved from the targets.
     ///
     /// A record, not an input. The generator re-solves the shape from the
     /// declared `children_mean`, `children_single_frac` and `levels_mean` at
     /// construction, so it follows whatever those say rather than this copy.
     pub shape: CadenceShape,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadenceProvenance {
+    pub archives: Vec<CadenceArchive>,
+    pub generated_utc: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadenceArchive {
+    pub name: String,
+    pub bytes: u64,
+    pub rows: u64,
+    pub span_days: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadencePairReport {
+    pub bytes: u64,
+    pub rows: u64,
+    pub span_days: f64,
+    pub mean_notional: f64,
+    pub raw_fills_per_second: f64,
+    pub per_second_counts: PerSecondCounts,
+    /// Parents grouped on timestamp and aggressor side together.
+    pub timestamp_and_side: CadenceGrouping,
+    /// Parents grouped on timestamp alone.
+    pub timestamp_only: CadenceGrouping,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadenceGrouping {
+    pub events: u64,
+    pub children: ChildCounts,
+    pub levels: LevelCounts,
+    pub parent_gap: ParentGap,
+    pub subsecond_distinct_gap_mean_us: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildCounts {
+    pub max: u64,
+    pub mean: f64,
+    pub p95: u64,
+    pub single_frac: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelCounts {
+    pub mean: f64,
+    pub single_frac: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentGap {
+    pub acf_lag1: f64,
+    pub acf_lag5: f64,
+    pub cv2: f64,
+    pub mean_s: f64,
+    pub var_over_mean: f64,
+}
+
+/// The declined at-touch traded-volume study. See its own `_doc`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelQueueStudy {
+    #[serde(rename = "_doc")]
+    pub doc: String,
+    pub era_start_ts: u64,
+    pub single_print_frac: AnchorRange,
+    pub vol_p50_norm: AnchorRange,
+    pub vol_p90_norm: AnchorRange,
+    pub vol_dispersion: AnchorRange,
+    pub size_dispersion: AnchorRange,
+    pub verdict: LevelQueueVerdict,
+    pub binning: LevelQueueBinning,
+    pub support_norm: Vec<f64>,
+    pub pmf: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelQueueVerdict {
+    pub proceed: bool,
+    pub conditions: Vec<LevelQueueCondition>,
+    pub failed: Vec<String>,
+    pub single_print_frac_cross_pair_median: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelQueueCondition {
+    pub test: String,
+    pub why: String,
+    pub held: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelQueueBinning {
+    pub bin_lo: f64,
+    pub bin_hi: f64,
+    pub bins_per_decade: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -997,8 +1107,23 @@ mod tests {
         let base: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         serde_json::from_value::<Fingerprint>(base.clone()).expect("the committed base parses");
 
-        let cases: [(&[&str], &str); 13] = [
+        let cases: [(&[&str], &str); 19] = [
             (&[], "sourse"),
+            (&["golden_targets", "level_queue"], "pmff"),
+            (&["golden_targets", "level_queue", "verdict"], "proced"),
+            (&["golden_targets", "level_queue", "binning"], "bins"),
+            (&["cadence", "provenance"], "archive"),
+            (&["cadence", "pairs", "BTCUSDT"], "row"),
+            (
+                &[
+                    "cadence",
+                    "pairs",
+                    "BTCUSDT",
+                    "timestamp_only",
+                    "parent_gap",
+                ],
+                "cv",
+            ),
             (&["source"], "pair"),
             (&["cadence"], "shap"),
             (&["cadence", "shape"], "level_step"),
