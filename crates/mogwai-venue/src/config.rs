@@ -11,7 +11,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 
-use mogwai_protocol::{InstrumentClass, InstrumentDef, MarketRegime, SimClock, WireAssetClass};
+use mogwai_protocol::{
+    InstrumentClass, InstrumentDef, MarketRegime, SimClock, StrictHashMap, WireAssetClass,
+};
 use rust_decimal::Decimal;
 
 use crate::admission::AdmissionLimits;
@@ -221,11 +223,11 @@ pub struct Config {
     /// Operator knobs applied to individual symbols, exactly as written. Same
     /// overlay shape as `instrument`, including its own `preset` and `override`
     /// sub-table, and applied after it. Keyed case-insensitively.
-    pub symbols: HashMap<String, toml::Table>,
+    pub symbols: StrictHashMap<String, toml::Table>,
     /// Operator-registered instrument presets. Names are case-insensitive and
     /// registered entries shadow shipped presets.
     #[serde(default)]
-    pub instrument_presets: HashMap<String, toml::Table>,
+    pub instrument_presets: StrictHashMap<String, toml::Table>,
     /// Market regime for this run's tape. Formerly the one knob a consumer
     /// picked for itself per subscription; with no subscriptions left it is
     /// boot config, chosen by whoever launches the run. Absent means the
@@ -239,7 +241,7 @@ pub struct Config {
     /// desyncing the consumer from the venue. An absent table keeps the funded
     /// built-in default (matching the committed mogwai.toml); an explicitly
     /// empty `[balances]` table runs the account unfunded on purpose.
-    pub(crate) balances: HashMap<String, Decimal>,
+    pub(crate) balances: StrictHashMap<String, Decimal>,
     /// Named risk policies a consumer can ask for by name instead of restating.
     ///
     /// The same idea as an instrument preset: a named bundle of knobs a user
@@ -251,7 +253,7 @@ pub struct Config {
     /// read from the operator's config at boot and a registered name shadows a
     /// shipped one.
     #[serde(default)]
-    pub(crate) account_policies: HashMap<String, mogwai_protocol::risk::AccountPolicy>,
+    pub(crate) account_policies: StrictHashMap<String, mogwai_protocol::risk::AccountPolicy>,
 }
 
 impl Default for Config {
@@ -292,11 +294,11 @@ impl Default for Config {
             global_pending_command_acts: crate::admission::GLOBAL_PENDING_COMMAND_SLOTS,
             symbol: None,
             instrument: None,
-            symbols: HashMap::new(),
-            instrument_presets: HashMap::new(),
+            symbols: StrictHashMap::default(),
+            instrument_presets: StrictHashMap::default(),
             regime: None,
             balances: default_balances(),
-            account_policies: HashMap::new(),
+            account_policies: StrictHashMap::default(),
         }
     }
 }
@@ -306,8 +308,8 @@ impl Default for Config {
 /// no-config checkout serves an account that can actually trade; operators
 /// running a custom instrument set fund their own quote currencies via the
 /// `[balances]` table (or set it empty to run unfunded deliberately).
-fn default_balances() -> HashMap<String, Decimal> {
-    HashMap::from([("USD".to_string(), Decimal::from(1_000_000))])
+fn default_balances() -> StrictHashMap<String, Decimal> {
+    StrictHashMap::from([("USD".to_string(), Decimal::from(1_000_000))])
 }
 
 /// Refuses boot on funding gaps the funded-account enforcement would turn into
@@ -2675,7 +2677,7 @@ mod tests {
     #[test]
     fn an_unfunded_quote_currency_refuses_boot() {
         let cfg = Config {
-            balances: HashMap::from([("EUR".to_string(), Decimal::from(1))]),
+            balances: StrictHashMap::from([("EUR".to_string(), Decimal::from(1))]),
             ..Config::default()
         };
         let defs = mogwai_protocol::default_instruments();
@@ -2694,7 +2696,7 @@ mod tests {
     #[test]
     fn an_explicitly_unfunded_account_still_boots() {
         let cfg = Config {
-            balances: HashMap::new(),
+            balances: StrictHashMap::default(),
             ..Config::default()
         };
         refuse_unfunded_settlement(&cfg, &mogwai_protocol::default_instruments()[0])
@@ -2713,7 +2715,7 @@ mod tests {
     fn a_future_with_an_unfunded_settlement_currency_refuses_boot() {
         let configured = future_configured();
         let cfg = Config {
-            balances: HashMap::from([("EUR".into(), Decimal::ONE)]),
+            balances: StrictHashMap::from([("EUR".into(), Decimal::ONE)]),
             ..Config::default()
         };
         let err = refuse_unfunded_settlement(&cfg, &configured.def())

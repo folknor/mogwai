@@ -2912,9 +2912,9 @@ fn empty_hour_stats_match_the_shared_conformance_fixture() {
         _doc: String,
         version: u32,
         #[serde(rename = "units")]
-        _units: std::collections::BTreeMap<String, String>,
+        _units: mogwai_protocol::StrictBTreeMap<String, String>,
         #[serde(rename = "rules")]
-        _rules: std::collections::BTreeMap<String, String>,
+        _rules: mogwai_protocol::StrictBTreeMap<String, String>,
         tolerance: f64,
         epoch: Epoch,
         cases: Vec<Case>,
@@ -3894,9 +3894,9 @@ fn stratified_roll_matches_the_shared_conformance_fixture() {
         _doc: String,
         version: u32,
         #[serde(rename = "units")]
-        _units: std::collections::BTreeMap<String, String>,
+        _units: mogwai_protocol::StrictBTreeMap<String, String>,
         #[serde(rename = "rules")]
-        _rules: std::collections::BTreeMap<String, String>,
+        _rules: mogwai_protocol::StrictBTreeMap<String, String>,
         tolerance: f64,
         cases: Vec<Case>,
     }

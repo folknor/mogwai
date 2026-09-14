@@ -130,7 +130,7 @@ pub struct Cadence {
     /// The per-pair corpus report, keyed by pair symbol, written by
     /// `mogwai-lab`'s cadence probe and read by nothing on the generator's path.
     /// Typed for the reason `GoldenTargets::level_queue` is.
-    pub pairs: std::collections::BTreeMap<String, CadencePairReport>,
+    pub pairs: mogwai_protocol::StrictBTreeMap<String, CadencePairReport>,
     pub provenance: CadenceProvenance,
     /// The child-count shape the offline fit solved from the targets.
     ///

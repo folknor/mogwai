@@ -277,7 +277,7 @@ async fn serve_async(
     let run = run::Run::new(
         instrument.clone(),
         Arc::clone(&rivers),
-        cfg.balances.clone(),
+        cfg.balances.clone().into_inner(),
         sim,
         run_start_ns,
         cfg.warmup_ns,
@@ -290,7 +290,7 @@ async fn serve_async(
         mogwai_protocol::AccountId::parse(cfg.account_id.trim())
             .map_err(|err| anyhow::anyhow!("account_id: {err}"))?,
         cfg.reset_account_on_reconnect,
-        cfg.account_policies.clone(),
+        cfg.account_policies.clone().into_inner(),
         fault_tx,
     );
     tracing::info!(

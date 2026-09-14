@@ -4355,7 +4355,7 @@ mod tests {
                 ScreenWindow {
                     scheduled: 60 * sessions,
                     zeros: 0,
-                    count_hist: BTreeMap::new(),
+                    count_hist: mogwai_protocol::StrictBTreeMap::default(),
                     present_sessions: sessions,
                 },
             );
@@ -4386,7 +4386,7 @@ mod tests {
             ScreenWindow {
                 scheduled: 60 * 23,
                 zeros: 0,
-                count_hist: BTreeMap::new(),
+                count_hist: mogwai_protocol::StrictBTreeMap::default(),
                 present_sessions: 23,
             },
         );
@@ -4533,7 +4533,7 @@ mod tests {
         // needed: a cell dead on A3 whose A2 is inside base would never have
         // asked for an envelope, so it could not show the skip.
         for counts in walk.projection.parent_counts.values_mut() {
-            let lifted: std::collections::BTreeMap<u32, u64> = counts
+            let lifted: mogwai_protocol::StrictBTreeMap<u32, u64> = counts
                 .iter()
                 .map(|(&n, &minutes)| (((f64::from(n) * 1.03).round() as u32).max(1), minutes))
                 .collect();

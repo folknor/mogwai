@@ -61,8 +61,11 @@ fn market_data(args: &SelectWindowsArgs) -> PathBuf {
 
 /// The cache's on-disk shape, matching what the retired Python
 /// window-selection implementation's `features` mode
-/// writes: `{symbol: {session: {feature: value}}}`.
-type CacheJson = std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>;
+/// writes: `{symbol: {session: {feature: value}}}`. A repeated symbol is
+/// refused; the inner session and feature objects are `serde_json::Map`, which
+/// still keeps the last of a repeated key.
+type CacheJson =
+    mogwai_protocol::StrictBTreeMap<String, serde_json::Map<String, serde_json::Value>>;
 
 fn write_cache(path: &PathBuf, cache: &sw::Cache) -> anyhow::Result<()> {
     let mut out = serde_json::Map::new();

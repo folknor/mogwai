@@ -1612,13 +1612,13 @@ pub(crate) async fn open_account(
 }
 
 fn opening_balances(
-    explicit: std::collections::HashMap<String, rust_decimal::Decimal>,
+    explicit: mogwai_protocol::StrictHashMap<String, rust_decimal::Decimal>,
     policy: &mogwai_protocol::risk::AccountPolicy,
 ) -> std::collections::HashMap<String, rust_decimal::Decimal> {
     if explicit.is_empty() {
-        policy.opening_balances.clone()
+        policy.opening_balances.clone().into_inner()
     } else {
-        explicit
+        explicit.into_inner()
     }
 }
 
@@ -3057,7 +3057,7 @@ mod calendar_tests {
     #[test]
     fn a_policy_supplies_balances_only_when_the_request_omits_them() {
         let policy = mogwai_protocol::risk::AccountPolicy {
-            opening_balances: std::collections::HashMap::from([(
+            opening_balances: mogwai_protocol::StrictHashMap::from([(
                 "USD".to_owned(),
                 Decimal::from(50_000),
             )]),
@@ -3067,7 +3067,8 @@ mod calendar_tests {
             opening_balances(Default::default(), &policy).get("USD"),
             Some(&Decimal::from(50_000))
         );
-        let explicit = std::collections::HashMap::from([("USD".to_owned(), Decimal::from(75_000))]);
+        let explicit =
+            mogwai_protocol::StrictHashMap::from([("USD".to_owned(), Decimal::from(75_000))]);
         assert_eq!(
             opening_balances(explicit, &policy).get("USD"),
             Some(&Decimal::from(75_000))

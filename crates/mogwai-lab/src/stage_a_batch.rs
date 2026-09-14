@@ -125,7 +125,7 @@ pub struct BatchManifest {
     pub selection_seeds: SelectionSeeds,
     pub refinement_caps: Vec<RefinementCap>,
     pub pilot_readings_sha256: String,
-    pub quantile_boundaries: BTreeMap<String, Vec<u32>>,
+    pub quantile_boundaries: mogwai_protocol::StrictBTreeMap<String, Vec<u32>>,
     pub strata: Vec<StratumPlan>,
     pub quick: Vec<PanelCell>,
     pub full: Vec<PanelCell>,
@@ -750,7 +750,7 @@ pub fn build_manifest(
         },
         refinement_caps,
         pilot_readings_sha256: sha256_bytes(&pilot_bytes),
-        quantile_boundaries: frame.boundaries,
+        quantile_boundaries: frame.boundaries.into(),
         strata,
         quick,
         full,
@@ -821,7 +821,7 @@ pub fn validate_manifest(manifest: &BatchManifest) -> LabResult<()> {
         )));
     }
     let frame = complete_frame();
-    if manifest.quantile_boundaries != frame.boundaries || manifest.strata.len() != 78 {
+    if *manifest.quantile_boundaries != frame.boundaries || manifest.strata.len() != 78 {
         return Err(LabError::refusal(
             "manifest quantile partition does not match the complete frame",
         ));

@@ -26,7 +26,7 @@
 //! Account resolution, boat placement, divergence routing and every other
 //! state-dependent decision stay in the venue. What lives here is grammar only.
 
-use std::collections::HashMap;
+use crate::StrictHashMap;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -305,7 +305,7 @@ pub struct OpenAccountRequest {
     /// number-tolerant on purpose: they are thresholds and fractions that are
     /// also spelled in TOML.
     #[serde(with = "crate::decimal::str_map", default)]
-    pub balances: HashMap<String, Decimal>,
+    pub balances: StrictHashMap<String, Decimal>,
     /// The rules the venue enforces against this account, stated inline.
     /// Absent means unpoliced unless `policy_preset` names one.
     ///
@@ -479,8 +479,11 @@ pub struct DivergenceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub kind: String,
+    /// A strict map rather than `serde_json::Map`, whose decode keeps the last
+    /// of a repeated argument before the variant's own decode could refuse it.
+    /// Both are ordered by key, so the encoded body is unchanged.
     #[serde(default)]
-    pub args: serde_json::Map<String, serde_json::Value>,
+    pub args: crate::StrictBTreeMap<String, serde_json::Value>,
 }
 
 impl DivergenceRequest {
@@ -504,7 +507,7 @@ impl DivergenceRequest {
             symbol: None,
             account,
             kind,
-            args,
+            args: args.into_iter().collect(),
         }
     }
 
@@ -531,7 +534,11 @@ impl DivergenceRequest {
                 self.kind
             ));
         }
-        let mut value = self.args.clone();
+        let mut value: serde_json::Map<String, serde_json::Value> = self
+            .args
+            .iter()
+            .map(|(key, arg)| (key.clone(), arg.clone()))
+            .collect();
         value.insert(
             "type".to_owned(),
             serde_json::Value::String(self.kind.clone()),
@@ -729,7 +736,7 @@ mod tests {
     fn open_account_request_writes_string_balances_and_omits_the_default_policy() {
         let request = OpenAccountRequest {
             account_id: "WYRD-01".to_owned(),
-            balances: HashMap::from([("USD".to_owned(), Decimal::from(25_000))]),
+            balances: StrictHashMap::from([("USD".to_owned(), Decimal::from(25_000))]),
             policy: AccountPolicy::default(),
             policy_preset: Some("eod-trail".to_owned()),
         };
@@ -747,6 +754,33 @@ mod tests {
                 r#"{"account_id":"WYRD-01","balances":{"USD":25000}}"#
             )
             .is_err()
+        );
+    }
+
+    /// A body naming one currency twice is refused, naming the currency,
+    /// rather than funding the account with whichever spelling came last.
+    #[test]
+    fn open_account_request_refuses_a_repeated_currency() {
+        let error = serde_json::from_str::<OpenAccountRequest>(
+            r#"{"account_id":"WYRD-01","balances":{"USD":"1","USD":"25000"}}"#,
+        )
+        .expect_err("a repeated currency must not decode");
+        assert!(
+            error.to_string().contains("duplicate map key `USD`"),
+            "{error}"
+        );
+    }
+
+    /// The same refusal reaches the policy's own map inside the request body.
+    #[test]
+    fn open_account_request_refuses_a_repeated_opening_balance_in_its_policy() {
+        let error = serde_json::from_str::<OpenAccountRequest>(
+            r#"{"account_id":"WYRD-01","policy":{"opening_balances":{"EUR":1,"EUR":2}}}"#,
+        )
+        .expect_err("a repeated policy currency must not decode");
+        assert!(
+            error.to_string().contains("duplicate map key `EUR`"),
+            "{error}"
         );
     }
 
@@ -810,6 +844,20 @@ mod tests {
         assert!(typo.divergence().unwrap_err().contains("msec"));
     }
 
+    /// A repeated argument is refused by name at decode, rather than the last
+    /// spelling silently arming the divergence.
+    #[test]
+    fn divergence_request_refuses_a_repeated_argument() {
+        let error = serde_json::from_str::<DivergenceRequest>(
+            r#"{"kind":"PartialFillNext","args":{"client_order_id":"O-1","fraction":"0.1","fraction":"0.9"}}"#,
+        )
+        .expect_err("a repeated argument must not decode");
+        assert!(
+            error.to_string().contains("duplicate map key `fraction`"),
+            "{error}"
+        );
+    }
+
     /// The argument list is the variants' own fields, with no second list to
     /// drift: every kind, unit kinds included, refuses a key it does not take,
     /// both through the control envelope and decoded directly as a havoc
@@ -849,7 +897,7 @@ mod tests {
             symbol: None,
             account: None,
             kind: "Earthquake".to_owned(),
-            args: serde_json::Map::new(),
+            args: crate::StrictBTreeMap::default(),
         };
         assert_eq!(
             unknown.divergence().unwrap_err(),

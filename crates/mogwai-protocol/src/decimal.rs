@@ -107,11 +107,17 @@ pub(crate) mod str_option {
 ///
 /// `serialize` is what a writer of `http::OpenAccountRequest` goes through, so a
 /// typed client spells its balances as strings by construction.
+///
+/// A repeated currency is refused, naming it. serde allows one deserializer per
+/// field, so this cannot stack on top of the strict map's own; instead the map
+/// is decoded as a `StrictHashMap` of string-only values, which runs the one
+/// shared duplicate check, and the values are unwrapped afterwards. Neither the
+/// spelling rule nor the repeated-key refusal is restated here.
 pub mod str_map {
-    use std::collections::HashMap;
-
     use rust_decimal::Decimal;
     use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
+
+    use crate::StrictHashMap;
 
     /// One map value, deserialized by the same rule a required wire decimal
     /// uses, so the map cannot drift away from the scalar case.
@@ -125,7 +131,10 @@ pub mod str_map {
 
     /// # Errors
     /// Propagates the serializer's own errors.
-    pub fn serialize<S>(value: &HashMap<String, Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        value: &StrictHashMap<String, Decimal>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -137,12 +146,13 @@ pub mod str_map {
     }
 
     /// # Errors
-    /// Fails when a value is spelled as anything but a decimal in a JSON string.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<String, Decimal>, D::Error>
+    /// Fails when a value is spelled as anything but a decimal in a JSON string,
+    /// or when a key is repeated.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<StrictHashMap<String, Decimal>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let raw = HashMap::<String, WireDecimal>::deserialize(deserializer)?;
+        let raw = StrictHashMap::<String, WireDecimal>::deserialize(deserializer)?;
         Ok(raw.into_iter().map(|(key, value)| (key, value.0)).collect())
     }
 }
@@ -166,5 +176,31 @@ mod tests {
         // Magnitudes past Decimal's range saturate to the signed bound.
         assert_eq!(decimal_from_f64(1e40), Decimal::MAX);
         assert_eq!(decimal_from_f64(-1e40), Decimal::MIN);
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Carrier {
+        #[serde(with = "str_map")]
+        balances: crate::StrictHashMap<String, Decimal>,
+    }
+
+    #[test]
+    fn str_map_refuses_a_repeated_key_by_name() {
+        let error = serde_json::from_str::<Carrier>(r#"{"balances":{"USD":"1","USD":"2"}}"#)
+            .expect_err("a repeated currency must not decode");
+        assert!(
+            error.to_string().contains("duplicate map key `USD`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn str_map_still_refuses_a_number_after_the_duplicate_check() {
+        let carrier: Carrier =
+            serde_json::from_str(r#"{"balances":{"USD":"1.5","EUR":"2"}}"#).unwrap();
+        assert_eq!(carrier.balances.get("USD"), Some(&Decimal::new(15, 1)));
+        serde_json::from_str::<Carrier>(r#"{"balances":{"USD":1}}"#)
+            .expect_err("a JSON number balance must not decode");
     }
 }

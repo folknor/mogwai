@@ -32,6 +32,9 @@ mod messages;
 mod ready;
 pub mod seeds;
 pub mod sizing;
+/// The map types every workspace decoder uses in place of `HashMap` and
+/// `BTreeMap`, refusing a repeated key rather than keeping its last value.
+pub mod strict_map;
 
 pub mod close;
 pub mod control;
@@ -69,6 +72,7 @@ pub use messages::{
 };
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;
+pub use strict_map::{StrictBTreeMap, StrictHashMap};
 
 pub type Symbol = std::sync::Arc<str>;
 /// Consumer-assigned order id (nautilus `ClientOrderId`).

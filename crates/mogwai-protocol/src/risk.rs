@@ -144,8 +144,8 @@ pub struct AccountPolicy {
     /// Opening funding carried by a funded-account programme. An account
     /// request's explicit balances take precedence; these are used when that
     /// request omits balances.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub opening_balances: std::collections::HashMap<String, Decimal>,
+    #[serde(default, skip_serializing_if = "crate::StrictHashMap::is_empty")]
+    pub opening_balances: crate::StrictHashMap<String, Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_drawdown: Option<TrailingDrawdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,7 +205,7 @@ fn default_reset_minute() -> u32 {
 impl Default for AccountPolicy {
     fn default() -> Self {
         Self {
-            opening_balances: std::collections::HashMap::new(),
+            opening_balances: crate::StrictHashMap::default(),
             trailing_drawdown: None,
             daily_loss_limit: None,
             overall_drawdown: None,
@@ -807,7 +807,7 @@ mod tests {
         // the anchor, and refusing here would refuse a shape that has always
         // worked.
         AccountPolicy {
-            opening_balances: std::collections::HashMap::from([
+            opening_balances: crate::StrictHashMap::from([
                 ("USD".to_owned(), Decimal::from(50_000)),
                 ("EUR".to_owned(), Decimal::from(50_000)),
             ]),
@@ -815,6 +815,20 @@ mod tests {
         }
         .validate()
         .expect("an unpoliced account is anchored by nothing and may hold anything");
+    }
+
+    /// A policy naming one opening currency twice is refused by name at
+    /// decode, rather than anchoring on whichever amount came last.
+    #[test]
+    fn a_policy_naming_an_opening_currency_twice_is_refused() {
+        let error = serde_json::from_str::<AccountPolicy>(
+            r#"{"opening_balances":{"USD":50000,"USD":1},"currency":"USD"}"#,
+        )
+        .expect_err("a repeated opening currency must not decode");
+        assert!(
+            error.to_string().contains("duplicate map key `USD`"),
+            "{error}"
+        );
     }
 
     /// The inverse of `every_shipped_policy_is_usable`: a name this build does

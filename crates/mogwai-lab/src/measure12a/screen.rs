@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use mogwai_protocol::StrictBTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -33,7 +34,7 @@ struct SegmentAcc {
 pub struct ScreenWindow {
     pub scheduled: u64,
     pub zeros: u64,
-    pub count_hist: BTreeMap<u64, u64>,
+    pub count_hist: StrictBTreeMap<u64, u64>,
     /// Sessions that serialized this cell. A3 refuses if any session omitted
     /// the one-second cell, so pooling must retain presence as well as sums.
     pub present_sessions: u64,
@@ -44,8 +45,8 @@ pub struct ScreenWindow {
 #[serde(deny_unknown_fields)]
 pub struct ScreenReduced {
     pub sessions: u64,
-    pub parent_counts: BTreeMap<u32, BTreeMap<u32, u64>>,
-    pub windows: BTreeMap<u32, BTreeMap<u32, ScreenWindow>>,
+    pub parent_counts: StrictBTreeMap<u32, StrictBTreeMap<u32, u64>>,
+    pub windows: StrictBTreeMap<u32, StrictBTreeMap<u32, ScreenWindow>>,
 }
 
 impl ScreenReduced {

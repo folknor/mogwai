@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
+use mogwai_protocol::StrictBTreeMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -60,7 +61,7 @@ pub fn sha256_file(path: &Path) -> LabResult<String> {
 struct JobsManifest {
     #[serde(rename = "_version")]
     _version: u32,
-    jobs: BTreeMap<String, DeliveryEntry>,
+    jobs: StrictBTreeMap<String, DeliveryEntry>,
 }
 
 /// One ledger entry. Two entry generations exist: the submitted form
@@ -76,7 +77,7 @@ struct JobsManifest {
 struct DeliveryEntry {
     state: String,
     job_id: String,
-    files: BTreeMap<String, String>,
+    files: StrictBTreeMap<String, String>,
     #[serde(rename = "schema")]
     _schema: String,
     #[serde(rename = "scope")]
@@ -125,28 +126,48 @@ struct Manifest {
 /// untagged enum tries each variant in turn and reports only that none
 /// matched, so a malformed entry in either generation would surface as an
 /// opaque "did not match any variant" instead of the field that is wrong.
+///
+/// The shape is read off the deserializer directly rather than through a
+/// buffered `serde_json::Value`, because a `Value` object has already kept the
+/// last of a repeated filename by the time it could be inspected, and the map
+/// generation's repeated-key refusal would then be unreachable.
 #[derive(Default)]
 enum ManifestFiles {
     #[default]
     Empty,
-    Map(BTreeMap<String, String>),
+    Map(StrictBTreeMap<String, String>),
     List(Vec<ManifestFileEntry>),
 }
 
 impl<'de> Deserialize<'de> for ManifestFiles {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        match serde_json::Value::deserialize(deserializer)? {
-            map @ serde_json::Value::Object(_) => serde_json::from_value(map)
-                .map(Self::Map)
-                .map_err(D::Error::custom),
-            list @ serde_json::Value::Array(_) => serde_json::from_value(list)
-                .map(Self::List)
-                .map_err(D::Error::custom),
-            other => Err(D::Error::custom(format!(
-                "manifest files must be a filename map or a vendor file list, not {other}"
-            ))),
+        struct Shape;
+
+        impl<'de> serde::de::Visitor<'de> for Shape {
+            type Value = ManifestFiles;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a filename map or a vendor file list")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                StrictBTreeMap::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ManifestFiles::Map)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                Vec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(ManifestFiles::List)
+            }
         }
+
+        deserializer.deserialize_any(Shape)
     }
 }
 
@@ -160,7 +181,7 @@ impl ManifestFiles {
     fn normalized(&self) -> BTreeMap<String, String> {
         match self {
             ManifestFiles::Empty => BTreeMap::new(),
-            ManifestFiles::Map(map) => map.clone(),
+            ManifestFiles::Map(map) => map.clone().into_inner(),
             ManifestFiles::List(entries) => entries
                 .iter()
                 .map(|entry| {
@@ -250,7 +271,7 @@ fn verify_input_bound(
             manifest.job_id, entry.job_id
         )));
     }
-    let delivery_files = &entry.files;
+    let delivery_files: &BTreeMap<String, String> = &entry.files;
     let mut manifest_files = manifest.files.normalized();
     if manifest.files.is_vendor_list() {
         manifest_files.insert("manifest.json".to_string(), sha256_file(&manifest_path)?);
@@ -374,6 +395,36 @@ mod tests {
                 "the refusal must name {key}: {error}"
             );
         }
+    }
+
+    /// A repeated filename in either inventory is refused by name. The ledger
+    /// side is the strict map inside a derived type; the delivered-manifest
+    /// side is the hand-written shape dispatch, which once buffered through a
+    /// `Value` that had already dropped the first spelling.
+    #[test]
+    fn a_repeated_filename_in_either_inventory_refuses_naming_it() {
+        let ledger = r#"{"_version":1,"jobs":{"k":{"state":"downloaded","job_id":"J","files":{"a.csv.zst":"00","a.csv.zst":"11"},"schema":"trades","scope":"s","window":"w","live_quote_at_submit":1.0}}}"#;
+        let error = serde_json::from_str::<JobsManifest>(ledger)
+            .err()
+            .expect("a repeated ledger filename must refuse");
+        assert!(
+            error.to_string().contains("duplicate map key `a.csv.zst`"),
+            "{error}"
+        );
+
+        let manifest = r#"{"job_id":"J","files":{"a.csv.zst":"00","a.csv.zst":"11"}}"#;
+        let error = serde_json::from_str::<Manifest>(manifest)
+            .err()
+            .expect("a repeated delivered filename must refuse");
+        assert!(
+            error.to_string().contains("duplicate map key `a.csv.zst`"),
+            "{error}"
+        );
+
+        let list = r#"{"job_id":"J","files":[{"filename":"a.csv.zst","hash":"sha256:00"}]}"#;
+        let decoded =
+            serde_json::from_str::<Manifest>(list).expect("the vendor list still decodes");
+        assert!(decoded.files.is_vendor_list());
     }
 
     #[test]
