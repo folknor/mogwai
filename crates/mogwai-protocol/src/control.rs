@@ -513,6 +513,36 @@ divergence_kinds!(
     FaultTape,
 );
 
+impl Divergence {
+    /// Whether an explicitly named account can scope this divergence's effect.
+    ///
+    /// True for every kind whose effect lands on one ledger or one account's
+    /// view, `CancelOpenOrderSilently` included, since the account names the
+    /// book to search. False only for `FaultTape`, which takes the whole venue
+    /// down: the venue refuses an account on it rather than widening the
+    /// request, and a writer holding a scope for it has a request that cannot be
+    /// honoured, not one to send unscoped.
+    ///
+    /// Exhaustive, so a new kind fails to build until someone decides.
+    #[must_use]
+    pub fn accepts_account_scope(&self) -> bool {
+        match self {
+            Self::PartialFillNext { .. }
+            | Self::RejectNextSubmit { .. }
+            | Self::RejectNextCancel { .. }
+            | Self::DelayAcks { .. }
+            | Self::CommandLatency { .. }
+            | Self::DuplicateNextFill
+            | Self::DropNextAccountUpdate
+            | Self::GoDark { .. }
+            | Self::StallData { .. }
+            | Self::FeeSurcharge { .. }
+            | Self::CancelOpenOrderSilently { .. } => true,
+            Self::FaultTape => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod window_tests {
     use super::{TapeWindowRefusal, validate_tape_window};

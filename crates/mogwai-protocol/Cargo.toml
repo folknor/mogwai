@@ -10,6 +10,9 @@ rust_decimal.workspace = true
 # The launcher parses the venue's readiness line, so this is a runtime dep
 # rather than a test-only one.
 serde_json.workspace = true
+# The native route query carriers in `http` encode themselves, so every writer
+# spells a query string the way the venue's decoder reads it.
+serde_urlencoded = "0.7"
 # The launcher announces the run it started. `log` bridges the event onto the
 # `log` facade for hosts that install one and no tracing subscriber, which is
 # the common shape for a nautilus host.

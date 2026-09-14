@@ -114,11 +114,9 @@ impl From<anyhow::Error> for FetchAccountError {
 /// the venue's query carrier denies unknown fields, so a misspelling is a 400
 /// rather than a quietly defaulted snapshot.
 ///
-/// The id goes into the query string verbatim, with no percent encoding. A
-/// `mogwai_protocol::AccountId` is ASCII alphanumerics plus dot, underscore,
-/// colon and dash, and a nautilus `AccountId` is an `ISSUER-NUMBER` subset of
-/// that. Every one of those characters is legal in a query value per RFC 3986,
-/// colon included, so encoding would only obscure the id in a venue log.
+/// The query is written by the venue's own carrier,
+/// `mogwai_protocol::http::AccountQuery`, so the key cannot be misspelled here
+/// and the id is form-encoded the way the venue's decoder reads it.
 async fn fetch_account(
     http: &HttpClient,
     quota: &HttpQuota,
@@ -126,13 +124,16 @@ async fn fetch_account(
     account_id: AccountId,
 ) -> Result<mogwai_protocol::AccountState, FetchAccountError> {
     quota.wait().await;
+    let query = mogwai_protocol::http::AccountQuery {
+        account: Some(account_id.as_ref().to_owned()),
+    };
     let url = format!(
-        "{path}?account={account}",
+        "{path}?{query}",
         path = join_url(
             base,
             mogwai_protocol::routes::segment(mogwai_protocol::routes::ACCOUNT),
         ),
-        account = account_id.as_ref()
+        query = query.to_query()
     );
     let response = http
         .get(
@@ -218,38 +219,13 @@ async fn ship_venue_havoc(
         mogwai_protocol::routes::segment(mogwai_protocol::routes::CONTROL_DIVERGENCE),
     );
     for divergence in &spec.venue {
-        let serde_json::Value::Object(mut encoded) =
-            serde_json::to_value(divergence).context("encode divergence")?
-        else {
-            unreachable!("Divergence always serializes as an object")
-        };
-        let kind = encoded
-            .remove("type")
-            .expect("Divergence serialization carries its tag");
-        let mut request = serde_json::json!({
-            "kind": kind,
-            "args": encoded,
-        });
-        // Named rather than defaulted, and the set is the one this function's
-        // doc derives from `arm_divergence`: every account-side arm carries the
-        // named account. A `_` arm here would
-        // silently start scoping the next variant somebody adds, which is how a
-        // field gets sent to a reader that ignores it.
-        if matches!(
-            divergence,
-            mogwai_protocol::control::Divergence::DelayAcks { .. }
-                | mogwai_protocol::control::Divergence::CommandLatency { .. }
-                | mogwai_protocol::control::Divergence::GoDark { .. }
-                | mogwai_protocol::control::Divergence::StallData { .. }
-                | mogwai_protocol::control::Divergence::PartialFillNext { .. }
-                | mogwai_protocol::control::Divergence::RejectNextSubmit { .. }
-                | mogwai_protocol::control::Divergence::RejectNextCancel { .. }
-                | mogwai_protocol::control::Divergence::DuplicateNextFill
-                | mogwai_protocol::control::Divergence::DropNextAccountUpdate
-                | mogwai_protocol::control::Divergence::FeeSurcharge { .. }
-        ) {
-            request["account"] = serde_json::Value::String(account_id.to_string());
-        }
+        // Scoped by the venue's own predicate, which is exhaustive over the
+        // kinds, so the next variant somebody adds is decided there once rather
+        // than here and in the venue separately.
+        let account = divergence
+            .accepts_account_scope()
+            .then(|| account_id.to_string());
+        let request = mogwai_protocol::http::DivergenceRequest::new(divergence, account);
         let body = serde_json::to_vec(&request).context("encode divergence request")?;
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());

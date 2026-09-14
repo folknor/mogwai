@@ -21,77 +21,21 @@ use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, Command, CommandClass, DEFAULT_HISTORY_LIMIT, InstrumentDef,
     MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, SubmitPhase, TradeTick, VenueClock,
-    VenueMessage, control::Divergence, truncate_echoed_id, truncate_reason,
-    validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
-    validate_submit_order,
+    VenueMessage,
+    control::Divergence,
+    http::{
+        AccountQuery, DivergenceRequest, Health, HealthFault, HealthStatus, HistoryQuery,
+        OpenAccountRequest,
+    },
+    truncate_echoed_id, truncate_reason, validate_client_order_id, validate_divergence,
+    validate_modify_order, validate_request_id, validate_submit_order,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, now_ns, sim_duration_from_millis, sim_now_ns};
 use crate::run::{Run, VenueArm};
 use crate::source;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DivergenceRequest {
-    #[serde(default)]
-    symbol: Option<String>,
-    /// Which account an account-side divergence applies to. Absent means
-    /// every account, which is what an operator on a single-account venue wants
-    /// and what every existing scenario file already writes.
-    ///
-    /// Transport arms, engine arms, `FeeSurcharge`, and
-    /// `CancelOpenOrderSilently` honour it. `GoDark` and `StallData` change what
-    /// one connection receives, so they blur the eyesight of every passenger
-    /// under that account;
-    /// generator arms change the water itself, which is a property of the river and
-    /// reaches everyone reading it whatever account they trade.
-    #[serde(default)]
-    account: Option<String>,
-    kind: String,
-    #[serde(default)]
-    args: serde_json::Map<String, serde_json::Value>,
-}
-
-impl DivergenceRequest {
-    fn divergence(&self) -> Result<Divergence, String> {
-        let allowed: &[&str] = match self.kind.as_str() {
-            "PartialFillNext" => &["client_order_id", "fraction"],
-            "RejectNextSubmit" | "RejectNextCancel" => &["reason"],
-            "DelayAcks" | "GoDark" | "StallData" => &["ms"],
-            "CommandLatency" => &[
-                "submit_act_ms",
-                "modify_act_ms",
-                "cancel_act_ms",
-                "submit_ack_ms",
-                "modify_ack_ms",
-                "cancel_ack_ms",
-            ],
-            "DuplicateNextFill" | "DropNextAccountUpdate" | "FaultTape" => &[],
-            "FeeSurcharge" => &["mult", "window_ms"],
-            "CancelOpenOrderSilently" => &["client_order_id"],
-            other => return Err(format!("unknown divergence kind {other}")),
-        };
-        if let Some(unknown) = self
-            .args
-            .keys()
-            .find(|key| !allowed.contains(&key.as_str()))
-        {
-            return Err(format!(
-                "unknown field args.{unknown} for divergence kind {}",
-                self.kind
-            ));
-        }
-        let mut value = self.args.clone();
-        value.insert(
-            "type".to_owned(),
-            serde_json::Value::String(self.kind.clone()),
-        );
-        serde_json::from_value(serde_json::Value::Object(value))
-            .map_err(|err| format!("invalid args for divergence kind {}: {err}", self.kind))
-    }
-}
 
 #[derive(Serialize)]
 struct DivergenceAccepted {
@@ -972,83 +916,6 @@ pub(crate) struct AppState {
     pub(crate) history_slot_waiters: Arc<tokio::sync::Semaphore>,
 }
 
-#[derive(Serialize)]
-pub(crate) struct Health {
-    /// The one word a fleet poller gates on, derived from `fault` below rather
-    /// than stated: `ok` while no boated river carries a tape fault, `faulted`
-    /// the moment one does. It was the constant `ok` until this, which made a
-    /// status field that could not vary - a poller reading it learned nothing
-    /// it did not already know from the response arriving at all, and a run
-    /// with a stuck tape was scored healthy by anything that did not go on to
-    /// read `fault`. The two fields are one decision, so they are computed
-    /// together and cannot disagree.
-    status: &'static str,
-    oms_type: mogwai_protocol::OmsType,
-    /// Identifies this run, not this process.
-    ///
-    /// The endpoint is an ephemeral port, and a port outlives nothing: once a
-    /// venue exits, the number is free and anything may take it. A consumer
-    /// holding that address has no way to tell the run it was launched against
-    /// from whatever now answers there, and the window is not hypothetical -
-    /// this venue stops accepting before it exits, draining live connections for
-    /// up to the shutdown grace, so the port is free while the process is still
-    /// alive and any consumer watching for child exit sees nothing.
-    ///
-    /// The seed is already unique per run and already reported in the readiness
-    /// record, so a launcher can hand it to its consumers and they can check they
-    /// are still talking to the venue they were given.
-    run_seed: u64,
-    /// A faulted tape on any boated river, not merely on the boot one.
-    ///
-    /// This used to read `boat_for_symbol(default_symbol)` and report that one
-    /// boat's tape fault, which was exactly right when a run had one paced
-    /// tape. Under the open instrument set a run places a boat per keyed river,
-    /// every one owns its own tape and can fault independently, and the boot
-    /// river is the one a strategy under test is least likely to have bound -
-    /// so a consumer whose own arrival draw refused was reading a healthy
-    /// `/health`. That is not cosmetic: a launcher and an orchestrator poll
-    /// this to decide whether a fire-and-forget run is worth keeping, and a
-    /// fault that never reaches the poll gets the run scored healthy and its
-    /// output silently trusted.
-    ///
-    /// One optional object, N boats, so the choice is which boat answers. It is
-    /// the faulted river with the smallest symbol, which keeps the field
-    /// deterministic across polls (reporting whichever the registry iterated
-    /// first would not be), keeps the wire shape every existing consumer
-    /// already reads, and still answers "is any river faulted" - the question a
-    /// fleet poller actually has. `symbol` says which river it is, so the
-    /// narrowing costs no information about the fault that is reported; what it
-    /// does not report is a second simultaneous fault, which changes no
-    /// decision, because one faulted river already condemns the run.
-    ///
-    /// Separate from the venue's terminal fault shutdown path: this is what a
-    /// poller can see before a run dies, not when it dies.
-    fault: Option<HealthFault>,
-    /// The two account-lifecycle boot constants, published for the attaching
-    /// consumer the readiness record cannot reach: a posted ledger's survival
-    /// depends on both (a reset-enabled venue discards it at the first socket;
-    /// a nonzero TTL can collect a posted, never-connected account before the
-    /// socket seats), and only the spawning launcher can read the
-    /// `ReadyRecord` that already reports them. Same names, same meanings, and
-    /// the same `cfg` they are read from at the readiness line - `false`
-    /// means reconnection preserves the ledger. Always present: a consumer
-    /// gates on these, and an absent field must not read as a third state.
-    reset_account_on_reconnect: bool,
-    /// Milliseconds a frozen account may sit unconnected before the reaper
-    /// collects it; `0` means never, which is the default. Published beside
-    /// `reset_account_on_reconnect` for the same attach-time verification.
-    account_ttl_ms: u64,
-}
-
-#[derive(Serialize)]
-struct HealthFault {
-    /// The river that faulted. Absent from this field's earlier shape because
-    /// only the boot river was ever reported.
-    symbol: String,
-    kind: &'static str,
-    clock_ns: u64,
-}
-
 /// One tick fault, classified once for every reader of the taxonomy.
 ///
 /// There are two readers - the `/health` body and the process exit line the
@@ -1145,7 +1012,7 @@ fn health_fault(
     let class = classify_fault(fault);
     Some(HealthFault {
         symbol,
-        kind: class.kind,
+        kind: class.kind.to_owned(),
         clock_ns: class.clock_ns,
     })
 }
@@ -1162,7 +1029,9 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         .materialize_fault()
         .map(|symbol| HealthFault {
             symbol,
-            kind: classify_fault(mogwai_data::TickFault::Materialize).kind,
+            kind: classify_fault(mogwai_data::TickFault::Materialize)
+                .kind
+                .to_owned(),
             clock_ns: 0,
         })
         .or_else(|| {
@@ -1172,7 +1041,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
             }))
         });
     Json(Health {
-        status: health_status(fault.is_some()),
+        status: HealthStatus::from_faulted(fault.is_some()),
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
         fault,
@@ -1182,15 +1051,6 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         reset_account_on_reconnect: state.cfg.reset_account_on_reconnect,
         account_ttl_ms: state.cfg.account_ttl_ms,
     })
-}
-
-/// The `status` word for a run that does or does not carry a reported fault.
-///
-/// Split out so the derivation is testable without a boatyard, and so the two
-/// spellings live in one place: a consumer that matches on the string is
-/// matching on these, and anything else here would be a wire change.
-fn health_status(faulted: bool) -> &'static str {
-    if faulted { "faulted" } else { "ok" }
 }
 
 impl AppState {
@@ -1256,6 +1116,17 @@ pub(crate) async fn arm_divergence(
     if let Err(err) = validate_divergence(&div) {
         tracing::warn!(?div, err, "rejecting out-of-range divergence");
         return divergence_refused(StatusCode::BAD_REQUEST, err);
+    }
+    // The account scope is refused rather than ignored for a kind that cannot
+    // honour one. Today that is `FaultTape`: a venue fault is the whole process
+    // going away, so naming one account reads as a request nothing here can
+    // honour, and silently widening it to the venue is how an operator ends up
+    // killing a run they meant to perturb one ledger of.
+    if request.account.is_some() && !div.accepts_account_scope() {
+        return divergence_refused(
+            StatusCode::BAD_REQUEST,
+            "FaultTape takes down the whole venue and cannot be scoped to one account",
+        );
     }
     let target = match arm_target(request.account.as_deref()) {
         Ok(target) => target,
@@ -1456,17 +1327,8 @@ pub(crate) async fn arm_divergence(
         // terminal, so it is handled before the engine-armed set and never
         // recorded: there is no later ledger for a venue arm to replay onto.
         Divergence::FaultTape => {
-            // The account scope is refused rather than ignored. A venue fault is
-            // the whole process going away, so naming one account reads as a
-            // request nothing here can honour, and silently widening it to the
-            // venue is how an operator ends up killing a run they meant to
-            // perturb one ledger of.
-            if request.account.is_some() {
-                return divergence_refused(
-                    StatusCode::BAD_REQUEST,
-                    "FaultTape takes down the whole venue and cannot be scoped to one account",
-                );
-            }
+            // An account scope was already refused above, through
+            // `accepts_account_scope`.
             if !run.fault_venue() {
                 // Not an error. The receiver is gone, which means the venue is
                 // already tearing down - the state the arm was asking for.
@@ -1747,23 +1609,6 @@ fn risk_state(
     ledger.state(equity)
 }
 
-/// The `/account` query string, exactly as the consumer wrote it.
-///
-/// `deny_unknown_fields` for the reason `SocketQuery` and `ClockQuery` carry
-/// it: accepted-and-ignored is the failure mode these carriers exist to
-/// prevent, and it is the worst reading available here. A consumer that
-/// misspells the one key it can send is otherwise handed the default account's
-/// snapshot under the name of the account it asked about, and nothing in the
-/// answer says which ledger it describes. The price is that any unrecognized
-/// key is a `400`, a future key included; relaxing it is a wire change that
-/// owes its own reasoning.
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AccountQuery {
-    #[serde(default)]
-    account: Option<String>,
-}
-
 /// The one currency an account holds, or `None` if it holds none or several.
 /// Used only to report an unpoliced account's equity, where no policy names a
 /// currency to compute it in; a policed account always has one.
@@ -1777,53 +1622,8 @@ fn sole_currency(account: &AccountState) -> Option<String> {
     held.next().is_none().then(|| first.currency.clone())
 }
 
-/// Open an account on terms the consumer states, before it trades.
-///
-/// Structured account config goes over HTTP for the same reason a divergence
-/// does: it is a nested document validated at its own boundary, and the socket
-/// query string carries scalars. A socket then names the account it opened with
-/// `?account=`, and only that id crosses the upgrade.
-///
-/// Optional, and that is the design rather than a convenience. Account
-/// resolution is total: a connection that never calls this is served under the
-/// default account, so the ephemeral single-consumer venue needs no call at all.
-/// What this buys is the case the default cannot express - a batch of subagents
-/// on one exchange, each sized differently.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OpenAccountRequest {
-    account_id: String,
-    /// Opening balances by currency. The venue's `[balances]` is what an
-    /// unnamed account gets; this is the same value stated per account, which
-    /// is what makes a 25k experiment and a 100k experiment runnable on one
-    /// venue.
-    ///
-    /// String-spelled, like every other money quantity that crosses into the
-    /// venue: `{"USDT":"250000"}`, never `{"USDT":250000}`. A bare JSON number
-    /// goes through `f64`, so a wide opening balance would be silently rounded
-    /// and `1e-30` would fund the account with zero. This is a live decode path
-    /// the wire-decimal round nearly missed - it is not in `messages` and does
-    /// not look like a frame - and it is pinned by
-    /// `an_opening_balance_must_be_spelled_as_a_string`. The policy fields
-    /// below stay number-tolerant on purpose: they are thresholds and fractions
-    /// that are also spelled in TOML.
-    #[serde(with = "mogwai_protocol::decimal::str_map")]
-    #[serde(default)]
-    balances: std::collections::HashMap<String, rust_decimal::Decimal>,
-    /// The rules the venue enforces against this account, stated inline.
-    /// Absent means unpoliced unless `policy_preset` names one.
-    #[serde(default)]
-    policy: mogwai_protocol::risk::AccountPolicy,
-    /// A registered or shipped policy to use instead of restating one.
-    ///
-    /// Resolution is total and three-step, the same shape a symbol resolves in:
-    /// inline knobs win, else this name, else unpoliced. A name nobody has is an
-    /// error rather than a silent fall to unpoliced, because a run that believes
-    /// it is enforced and is not is the worst of the three outcomes.
-    #[serde(default)]
-    policy_preset: Option<String>,
-}
-
+/// Open an account on terms the consumer states, before it trades. The body
+/// grammar and why it exists are `mogwai_protocol::http::OpenAccountRequest`.
 pub(crate) async fn open_account(
     State(state): State<AppState>,
     Json(request): Json<OpenAccountRequest>,
@@ -2063,28 +1863,6 @@ fn stamp_market_price(
     if order.order_type == OrderType::Market && order.price.is_none() {
         order.price = last_px;
     }
-}
-
-/// The `/operator/trades` and `/operator/quotes` query string, exactly as the
-/// consumer wrote it.
-///
-/// `deny_unknown_fields` for the reason `SocketQuery` and `ClockQuery` carry
-/// it. Every key here bounds the window, so a misspelled one is served as a
-/// wider request than the consumer wrote: `?limti=5` reads as the default
-/// limit, `?strat=` as history from the origin, and the answer looks like a
-/// perfectly good page. The retired `regime` key is the worked example - it was
-/// boot config for the whole run before it was removed, so a consumer still
-/// sending it was being answered on a realization it did not ask for. Refusing
-/// makes that a `400` naming the key. The price is that any unrecognized key is
-/// a `400`, a future key included; relaxing it is a wire change that owes its
-/// own reasoning.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct HistoryQuery {
-    pub(crate) symbol: String,
-    pub(crate) start: Option<u64>,
-    pub(crate) end: Option<u64>,
-    pub(crate) limit: Option<usize>,
 }
 
 pub(crate) async fn trades(
@@ -2621,8 +2399,8 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// The charset rule is stated on the decoded value, which is the whole of it
 /// venue-side: `axum::extract::Query` percent-decodes before serde sees the
 /// field, so `?symbol=%4DNQ` arrives as `MNQ` and passes, exactly as it should.
-/// The needs-no-encoding framing belongs to the consumer-side caller of
-/// `validate_wire_symbol`, which builds a URL by concatenation.
+/// The adapter checks the same rule at config time so an illegal symbol fails
+/// there rather than inside its reconnect loop.
 ///
 /// The comparison against `bound` is exact and case-sensitive, and so is
 /// resolution: `mnq` is a different label from `MNQ` and therefore a different
@@ -2726,11 +2504,14 @@ mod health_fault_tests {
     /// and stopped there.
     #[test]
     fn the_status_word_follows_the_reported_fault() {
-        assert_eq!(health_status(false), "ok");
-        assert_eq!(health_status(true), "faulted");
+        let word = |faulted| {
+            serde_json::to_value(HealthStatus::from_faulted(faulted)).expect("status serializes")
+        };
+        assert_eq!(word(false), "ok");
+        assert_eq!(word(true), "faulted");
         assert_ne!(
-            health_status(true),
-            health_status(false),
+            word(true),
+            word(false),
             "a status that cannot vary gates nothing"
         );
     }

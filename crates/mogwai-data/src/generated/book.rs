@@ -520,10 +520,10 @@ impl DiscreteBook {
             if self.rng.random_bool(knobs.p_follow) {
                 match struck {
                     Struck::Ask => {
-                        self.bid_ticks = (self.bid_ticks + recede).min(self.ask_ticks - 1)
+                        self.bid_ticks = (self.bid_ticks + recede).min(self.ask_ticks - 1);
                     }
                     Struck::Bid => {
-                        self.ask_ticks = (self.ask_ticks - recede).max(self.bid_ticks + 1)
+                        self.ask_ticks = (self.ask_ticks - recede).max(self.bid_ticks + 1);
                     }
                 }
                 let spread = self.spread();

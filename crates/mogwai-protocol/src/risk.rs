@@ -134,7 +134,7 @@ pub struct MaxPosition {
 /// The rules an account is enforced under. Every field is optional, and an
 /// account naming none is unpoliced - which is the default account's policy and
 /// the behaviour every consumer had before this existed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountPolicy {
     /// Opening funding carried by a funded-account programme. An account
@@ -189,6 +189,27 @@ pub struct AccountPolicy {
 /// accounts advertise. A convention, not a measurement.
 fn default_reset_minute() -> u32 {
     22 * 60
+}
+
+/// Written by hand so the Rust default and the serde default are one value.
+///
+/// A derived `Default` gave `reset_minute_utc` zero while a decoded policy that
+/// omitted the key got 22:00, so a Rust writer spelling a daily limit with
+/// `..AccountPolicy::default()` - the natural form once the account-open body is
+/// a shared type - silently reset its budget and its end-of-day trail at
+/// midnight. No unpoliced outcome reads the minute, so moving it changes none.
+impl Default for AccountPolicy {
+    fn default() -> Self {
+        Self {
+            opening_balances: std::collections::HashMap::new(),
+            trailing_drawdown: None,
+            daily_loss_limit: None,
+            overall_drawdown: None,
+            max_position: None,
+            reset_minute_utc: default_reset_minute(),
+            currency: None,
+        }
+    }
 }
 
 impl AccountPolicy {
@@ -524,6 +545,16 @@ mod tests {
     #[test]
     fn a_policy_naming_no_rule_is_unpoliced() {
         assert!(AccountPolicy::default().is_unpoliced());
+    }
+
+    /// The Rust default and a decoded empty policy are one value, so a policy
+    /// built with `..AccountPolicy::default()` resets at the documented 22:00
+    /// rather than at midnight.
+    #[test]
+    fn the_rust_default_policy_is_the_decoded_empty_policy() {
+        let decoded: AccountPolicy = serde_json::from_str("{}").expect("an empty policy decodes");
+        assert_eq!(AccountPolicy::default(), decoded);
+        assert_eq!(AccountPolicy::default().reset_minute_utc, 22 * 60);
     }
 
     /// `RiskState` is on the wire - `GET /account` publishes it as

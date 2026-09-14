@@ -333,6 +333,14 @@ consumer verifies them here instead of resting on an operator's word. New
 fields on `/health` are additive; a consumer must tolerate ones it does not
 know.
 
+A Rust consumer does not spell these grammars by hand. `mogwai_protocol::http`
+exports the `/health` body as `Health`, which decodes a newer venue's extra
+fields and fault kinds, beside the request carriers the venue itself decodes:
+`SocketQuery` for the `/ws` upgrade, `AccountQuery`, `HistoryQuery` for the
+operator history routes, `OpenAccountRequest` and `DivergenceRequest`. Each
+query carrier writes its own query string, so a renamed key is a build failure
+for its writers rather than a `400` at run time.
+
 The fill sweeper's progress is reported per account instead. The `GET /account`
 body carries `sweep_passes`, one row per boat the named account is seated on,
 sorted by `symbol` and carrying a monotonic `completed` count. The

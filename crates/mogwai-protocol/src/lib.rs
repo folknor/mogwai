@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 mod clock;
 /// `Decimal` conversions, and the serde glue that makes a wire decimal a JSON
 /// string rather than a JSON number. Public for the one decode path outside
-/// this crate that carries money: `mogwai-venue`'s `POST /accounts` balances.
+/// this module that carries money: the `POST /accounts` balances in `http`.
 pub mod decimal;
 mod havoc;
 mod instruments;
@@ -35,6 +35,7 @@ pub mod sizing;
 
 pub mod close;
 pub mod control;
+pub mod http;
 /// Launching a venue and learning its endpoint - the launcher half of the
 /// readiness handshake, shipped so consumers do not re-derive it from prose.
 pub mod launch;

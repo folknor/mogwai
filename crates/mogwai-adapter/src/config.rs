@@ -544,30 +544,21 @@ fn ws_url(
     callsign: Option<&str>,
 ) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    let mut url = format!(
-        "{base}{path}?account={account}",
+    let query = mogwai_protocol::http::SocketQuery {
+        account: Some(account_id.as_ref().to_owned()),
+        symbol: symbol.map(str::to_owned),
+        speed,
+        duration_ms,
+        window_start_ns: window.0,
+        window_end_ns: window.1,
+        callsign: callsign.map(str::to_owned),
+        ..mogwai_protocol::http::SocketQuery::default()
+    };
+    format!(
+        "{base}{path}?{query}",
         path = mogwai_protocol::routes::WS,
-        account = account_id.as_ref()
-    );
-    if let Some(symbol) = symbol {
-        url.push_str(&format!("&symbol={symbol}"));
-    }
-    if let Some(speed) = speed {
-        url.push_str(&format!("&speed={speed}"));
-    }
-    if let Some(duration_ms) = duration_ms {
-        url.push_str(&format!("&duration_ms={duration_ms}"));
-    }
-    if let Some(start_ns) = window.0 {
-        url.push_str(&format!("&window_start_ns={start_ns}"));
-    }
-    if let Some(end_ns) = window.1 {
-        url.push_str(&format!("&window_end_ns={end_ns}"));
-    }
-    if let Some(callsign) = callsign {
-        url.push_str(&format!("&callsign={callsign}"));
-    }
-    url
+        query = query.to_query()
+    )
 }
 
 /// Refuse a speed the venue would refuse, against the venue's own rule rather
@@ -622,7 +613,8 @@ fn validate_callsign(callsign: Option<&str>) -> anyhow::Result<()> {
 
 /// Refuse a symbol the `/ws` URL cannot carry.
 ///
-/// The URL is built by string concatenation, so an illegal symbol must fail at config
+/// Form encoding would carry any string, but the venue refuses a symbol outside
+/// the wire alphabet after decoding it, so an illegal symbol must fail at config
 /// validation rather than as an unreadable `400` from inside the reconnect
 /// loop. The rule is `mogwai_protocol::validate_wire_symbol`, the one the
 /// venue judges the decoded value by, so the two ends cannot drift.

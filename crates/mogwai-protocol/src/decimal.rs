@@ -105,8 +105,8 @@ pub(crate) mod str_option {
 /// and fractions alongside it in that request body (`AccountPolicy`, and the
 /// `RiskPolicy` inside it) stay tolerant, because they are also TOML config.
 ///
-/// `serialize` is here for completeness of the `with = ...` pair rather than
-/// because a caller needs it today - the request type is deserialize-only.
+/// `serialize` is what a writer of `http::OpenAccountRequest` goes through, so a
+/// typed client spells its balances as strings by construction.
 pub mod str_map {
     use std::collections::HashMap;
 

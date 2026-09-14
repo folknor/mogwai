@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{Command, CommandClass, VenueMessage, truncate_reason};
+use mogwai_protocol::{Command, CommandClass, VenueMessage, http::SocketQuery, truncate_reason};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
@@ -41,128 +41,6 @@ struct PendingGap {
     /// when the loss preceded this passenger's first delivered frame, which is
     /// why it is not merely the last frame the venue read.
     after_ts_event: Option<u64>,
-}
-
-/// The upgrade's query string, exactly as the consumer wrote it.
-///
-/// `deny_unknown_fields` is a wire-compatibility decision, taken knowingly: a
-/// consumer that sends a key this carrier does not handle is refused rather than
-/// silently served a different river, speed or duration than it asked for. The
-/// price is that any unrecognized key is a `400`, including
-/// one an unrelated consumer, proxy or tracing layer appends, and including a
-/// future key added before its handling lands. That is accepted:
-/// accepted-and-ignored is the failure mode this carrier exists to prevent, and
-/// the venue's consumers are its own. Relaxing it later is a wire change that owes
-/// its own reasoning, not a tidy-up.
-///
-/// A repeated `symbol` key is not an error - `serde_urlencoded` keeps the last
-/// occurrence - so the last one wins and is then validated like any other.
-///
-/// The identity key was `session` until the callsign ruling retired `session`
-/// as a name for anything but the trading day. `deny_unknown_fields` is what
-/// makes that break loud for a consumer still sending the old spelling: it is a
-/// `400` naming the key rather than a socket silently admitted with no identity
-/// and the always-evict reading. Pinned by
-/// `the_retired_session_query_key_is_refused`.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SocketQuery {
-    /// Absent means "the run's boot symbol", which is what every consumer that
-    /// predates this carrier sends.
-    #[serde(default)]
-    symbol: Option<String>,
-    /// Absent means the venue's configured `speed`. Finite and non-negative,
-    /// quantized to micro-multiples in the sharing key, so `100` and
-    /// `100.0000001` board the same boat. An unserved speed places a second
-    /// boat on the same water rather than being refused - speed mutates no
-    /// generated value, so it is a second cursor, not a second river. The one
-    /// refusal left is per ledger: an account already riding this river at
-    /// another speed would be judged on two clocks.
-    ///
-    /// Open-ended sharing applies only to the unnamed form, the request that
-    /// says "wherever you are is fine". A named window gets a private placement
-    /// for its account and callsign even when another account already requested
-    /// identical bounds. Both placements read the same deterministic river from
-    /// the named start; the window changes cursor ownership, not water identity.
-    #[serde(default)]
-    speed: Option<f64>,
-    /// Absent means indefinite. Simulated milliseconds, measured on the boat's
-    /// clock from this passenger's boarding instant and not from boot. A
-    /// duration is a property of the passenger, so passengers with different
-    /// durations still share one boat; each announces
-    /// `PassengerDurationComplete` and closes at its own deadline, and the boat
-    /// winds down when the last one leaves.
-    #[serde(default)]
-    duration_ms: Option<u64>,
-    /// Inclusive start of a named tape window. It is valid only with
-    /// `window_end_ns`, and the pair is mutually exclusive with `duration_ms`.
-    #[serde(default)]
-    window_start_ns: Option<u64>,
-    /// Exclusive completion boundary of a named tape window.
-    #[serde(default)]
-    window_end_ns: Option<u64>,
-    /// The account to trade under. Absent means the venue's default account,
-    /// which exists for the ephemeral single-consumer venue where naming one
-    /// would be ceremony - it is not a venue-wide account every connection
-    /// shares.
-    ///
-    /// The id is the consumer's and outlives the connection, so presenting the
-    /// same one again resumes that ledger. The venue cannot distinguish a
-    /// reconnect from a stranger claiming the id and does not try; anyone who
-    /// knows an id can claim its account, which is acceptable on a loopback
-    /// venue serving one orchestrator's subagents and is stated rather than
-    /// assumed.
-    #[serde(default)]
-    account: Option<String>,
-    /// The generator arm this passenger's water carries, in four flat keys so
-    /// the query string stays readable and `deny_unknown_fields` still covers
-    /// them.
-    ///
-    /// This is the fork. A passenger carrying an arm boards a different river
-    /// than one without it, rather than mutating water someone else may already
-    /// be reading, so two accounts can run a clean strategy and a surged one on
-    /// one exchange without either seeing the other's weather. It rides the
-    /// upgrade rather than a control post because a posted default is run-wide
-    /// state: on a shared venue that would let one consumer decide what every
-    /// other account's next boarding resolves to.
-    ///
-    /// `surge_start_ms` is an offset from the run origin, not from this
-    /// passenger's boarding instant. That is what lets two passengers share:
-    /// "starting when I connect" names a different window for every boarding
-    /// instant, so it would fork a river per connection and share nothing. The
-    /// consequence to expect is that boarding late with a zero offset boards
-    /// water whose surge is already over - the river had its weather whether or
-    /// not anyone was aboard, which is what exogenous water means.
-    ///
-    /// Milliseconds, deliberately, where the identity underneath is
-    /// nanoseconds. Two harness paths computing the same intended start through
-    /// different units would otherwise differ by sub-millisecond residue and
-    /// each strand a river of its own against a cap that never evicts.
-    #[serde(default)]
-    surge_start_ms: Option<u64>,
-    #[serde(default)]
-    surge_duration_ms: Option<u64>,
-    #[serde(default)]
-    surge_rate_mult: Option<f64>,
-    #[serde(default)]
-    surge_children_mult: Option<f64>,
-    /// The identity this socket presents, so several sockets presenting the
-    /// same value can coexist on one ledger.
-    ///
-    /// A nautilus host dials `/ws` twice - market data and execution - and both
-    /// legs carry the same `account` by construction, so without this the second
-    /// dial evicts the first and the host disconnects itself. Sockets sharing a
-    /// callsign coexist; a socket presenting a different one, or none, takes the
-    /// ledger. Absent on both sides is therefore exactly
-    /// the pre-callsign behaviour.
-    ///
-    /// The venue reads nothing into the string beyond equality: it is stable
-    /// across related sockets and their redials, and fresh in a
-    /// restarted process. Like the account id it is a bearer token - anyone who
-    /// knows the pair can join that ledger rather than displace it - which is
-    /// acceptable on a loopback venue and is stated rather than assumed.
-    #[serde(default)]
-    callsign: Option<String>,
 }
 
 /// One connected trader: a single websocket under an account, boarded onto one

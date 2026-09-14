@@ -307,9 +307,9 @@ pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
 pub const MAX_CALLSIGN_LEN: usize = 64;
 
 /// Validate the `/ws?callsign=` socket identity, which shares the URL alphabet
-/// with a wire symbol and is bounded for the same reason: it is carried in a
-/// query string with no percent encoding, and it is retained per socket for the
-/// life of the connection.
+/// with a wire symbol and is bounded for the same reason: it is readable in a
+/// query string and a venue log without decoding, and it is retained per socket
+/// for the life of the connection.
 ///
 /// Empty is refused rather than treated as absent. A consumer that sends
 /// `callsign=` has said something, and reading an empty string as "no opinion"
@@ -2924,9 +2924,8 @@ mod tests {
     /// (execution, account and market data), `risk::RiskState` and its nested
     /// `Breach` (published on `GET /account`, pinned by
     /// `a_published_risk_state_refuses_a_numeric_decimal`), and
-    /// `mogwai-venue`'s `OpenAccountRequest.balances` (the `POST /accounts`
-    /// opening balances, pinned by
-    /// `an_opening_balance_must_be_spelled_as_a_string`).
+    /// `http::OpenAccountRequest.balances` (the `POST /accounts` opening
+    /// balances, pinned by `an_opening_balance_must_be_spelled_as_a_string`).
     ///
     /// Tolerant, deliberately, and the list is exhaustive as of this round:
     /// `control::Divergence` (`POST /control/divergence`),
