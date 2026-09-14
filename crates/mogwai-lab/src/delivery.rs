@@ -52,18 +52,53 @@ pub fn sha256_file(path: &Path) -> LabResult<String> {
     Ok(hex_digest(&hasher.finalize()))
 }
 
+/// `analysis/databento-jobs.json`. Every key the ledger carries is named, the
+/// ones this module never consults under underscore bindings, so a renamed
+/// `state` or `files` refuses instead of decoding to `None` or an empty map.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobsManifest {
+    #[serde(rename = "_version")]
+    _version: u32,
     #[serde(default)]
     jobs: BTreeMap<String, DeliveryEntry>,
 }
 
+/// One ledger entry. Two entry generations exist: the submitted form
+/// (`compression`, `encoding`, `planned_quote`, `split_duration`,
+/// `submitted_at`) and the reconciled form (`intent_at`,
+/// `live_quote_at_intent`, `reconciled_at`), so those keys are optional.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeliveryEntry {
     state: Option<String>,
     job_id: Option<String>,
     #[serde(default)]
     files: BTreeMap<String, String>,
+    #[serde(rename = "schema")]
+    _schema: String,
+    #[serde(rename = "scope")]
+    _scope: String,
+    #[serde(rename = "window")]
+    _window: String,
+    #[serde(rename = "live_quote_at_submit")]
+    _live_quote_at_submit: f64,
+    #[serde(rename = "compression", default)]
+    _compression: Option<String>,
+    #[serde(rename = "encoding", default)]
+    _encoding: Option<String>,
+    #[serde(rename = "planned_quote", default)]
+    _planned_quote: Option<f64>,
+    #[serde(rename = "split_duration", default)]
+    _split_duration: Option<String>,
+    #[serde(rename = "submitted_at", default)]
+    _submitted_at: Option<String>,
+    #[serde(rename = "intent_at", default)]
+    _intent_at: Option<String>,
+    #[serde(rename = "live_quote_at_intent", default)]
+    _live_quote_at_intent: Option<f64>,
+    #[serde(rename = "reconciled_at", default)]
+    _reconciled_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,14 +111,34 @@ struct Manifest {
 /// Two delivered-manifest generations exist on disk: the July-era map of
 /// `filename -> sha256`, and the vendor-native batch list of objects whose
 /// `hash` carries a `sha256:` prefix. Both normalize to the same map.
-#[derive(Deserialize, Default)]
-#[serde(untagged)]
+///
+/// The generation is chosen by the JSON shape rather than by `untagged`: an
+/// untagged enum tries each variant in turn and reports only that none
+/// matched, so a malformed entry in either generation would surface as an
+/// opaque "did not match any variant" instead of the field that is wrong.
+#[derive(Default)]
 enum ManifestFiles {
     #[default]
-    #[serde(skip)]
     Empty,
     Map(BTreeMap<String, String>),
     List(Vec<ManifestFileEntry>),
+}
+
+impl<'de> Deserialize<'de> for ManifestFiles {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        match serde_json::Value::deserialize(deserializer)? {
+            map @ serde_json::Value::Object(_) => serde_json::from_value(map)
+                .map(Self::Map)
+                .map_err(D::Error::custom),
+            list @ serde_json::Value::Array(_) => serde_json::from_value(list)
+                .map(Self::List)
+                .map_err(D::Error::custom),
+            other => Err(D::Error::custom(format!(
+                "manifest files must be a filename map or a vendor file list, not {other}"
+            ))),
+        }
+    }
 }
 
 #[derive(Deserialize)]

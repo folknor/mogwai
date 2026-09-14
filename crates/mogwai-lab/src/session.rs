@@ -69,16 +69,39 @@ struct Transition {
     after_s: i64,
 }
 
+/// The frozen authority's shape. Every key is named, the documentation ones
+/// under underscore bindings, so the decode refuses a key it does not know.
+/// The hash pin already refuses any byte change to the committed file; this is
+/// what still holds for a re-extracted authority whose hash is being re-pinned.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthorityFile {
+    #[serde(rename = "_purpose")]
+    _purpose: String,
     zone: String,
     tzdb_release: String,
+    #[serde(rename = "source")]
+    _source: String,
+    /// Not enforced: `offset_at_utc_s` extrapolates the first and last
+    /// transitions' offsets to instants outside this window.
+    #[serde(rename = "coverage_utc")]
+    _coverage_utc: AuthorityCoverage,
     standard_offset_s: i64,
     daylight_offset_s: i64,
     transitions: Vec<AuthorityTransition>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorityCoverage {
+    #[serde(rename = "start")]
+    _start: String,
+    #[serde(rename = "end")]
+    _end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthorityTransition {
     utc_instant: String,
     offset_before_s: i64,

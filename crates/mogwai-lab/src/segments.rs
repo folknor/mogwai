@@ -133,6 +133,7 @@ pub fn window_by_name(name: &str) -> LabResult<SessionWindow> {
 /// shared length, stored so a reader can refuse a truncated artifact without
 /// trusting any one array.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Segment {
     /// The CME trade date whose session this slice came from.
     pub trade_date: String,
@@ -159,6 +160,7 @@ pub struct Segment {
 /// Where a library's contents came from, so a chart the owner is looking at can
 /// always be traced back to the delivered bytes behind it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LibraryProvenance {
     pub symbol: String,
     pub month: String,
@@ -169,6 +171,7 @@ pub struct LibraryProvenance {
 
 /// A cut library: every segment of one window from one month.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SegmentLibrary {
     #[serde(rename = "_doc")]
     pub doc: String,
@@ -802,7 +805,13 @@ mod tests {
     fn the_conformance_fixture_round_trips_through_the_writer_types() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../analysis/segment_library_conformance.json");
-        let library = SegmentLibrary::load(&path).expect("the committed fixture");
+        // The library is the fixture's `library` object; `units` and `rules`
+        // document it from outside, since this type refuses unknown keys.
+        let text = std::fs::read_to_string(&path).expect("the committed fixture");
+        let raw: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let library: SegmentLibrary =
+            serde_json::from_value(raw["library"].clone()).expect("the fixture's library parses");
+        library.validate().expect("the fixture's library is valid");
         assert_eq!(library.version, SEGMENT_LIBRARY_VERSION);
         assert_eq!(library.window, ASIA.name);
         assert_eq!(library.segments.len(), 3);

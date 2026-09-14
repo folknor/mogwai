@@ -14,7 +14,12 @@ use serde::{Deserialize, Serialize};
 /// anchor. Nothing
 /// that varies per river or boat appears here. Venue identity for attach is
 /// `addr` plus `run_seed`.
+///
+/// Refuses unknown fields. The launcher and the venue build from one tree, so
+/// a field the reader does not know is a mismatch to surface, not a newer
+/// record to read around.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReadyRecord {
     /// Wire schema version of this record. A launcher reads it first and
     /// refuses a record it does not understand; see [`ReadyRecord::VERSION`].
@@ -100,5 +105,10 @@ mod tests {
             r#"{"version":8,"addr":"127.0.0.1:41235","pid":42,"run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"reset_account_on_reconnect":false,"account_ttl_ms":0,"version_string":"test"}"#
         );
         assert_eq!(serde_json::from_str::<ReadyRecord>(&json).unwrap(), value);
+
+        let stray = json.replacen('{', r#"{"not_a_field":1,"#, 1);
+        let err = serde_json::from_str::<ReadyRecord>(&stray)
+            .expect_err("an unknown field must be refused");
+        assert!(err.to_string().contains("not_a_field"), "{err}");
     }
 }

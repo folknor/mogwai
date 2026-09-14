@@ -29,6 +29,7 @@ struct SegmentAcc {
 
 /// The pooled sufficient statistics Stage A reads for one hour and window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenWindow {
     pub scheduled: u64,
     pub zeros: u64,
@@ -40,6 +41,7 @@ pub struct ScreenWindow {
 
 /// The complete typed projection consumed by the Stage A gates.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenReduced {
     pub sessions: u64,
     pub parent_counts: BTreeMap<u32, BTreeMap<u32, u64>>,

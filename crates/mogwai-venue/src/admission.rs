@@ -800,7 +800,7 @@ mod tests {
 
     fn refusal() -> VenueMessage {
         VenueMessage::AdmissionRejected {
-            subject: AdmissionSubject::Frame,
+            subject: AdmissionSubject::Frame {},
             reason: "bad frame".into(),
             retryable: true,
             ts_event: 1,

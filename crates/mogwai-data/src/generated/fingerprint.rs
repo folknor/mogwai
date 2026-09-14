@@ -67,6 +67,7 @@ pub struct Cadence {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CadenceTargets {
     pub mean_event_duration_s: AnchorRange,
     pub children_mean: AnchorRange,
@@ -80,6 +81,7 @@ pub struct CadenceTargets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PerSecondCounts {
     pub mean: f64,
     pub median: u32,
@@ -98,6 +100,7 @@ pub struct DwellTargets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AbsReturnAcf {
     pub lag1: AnchorRange,
     pub lag10: AnchorRange,
@@ -105,12 +108,14 @@ pub struct AbsReturnAcf {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnchorRange {
     pub anchor: f64,
     pub range: MinMedianMax,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MinMedianMax {
     pub min: f64,
     pub median: f64,
@@ -274,6 +279,7 @@ fn default_size_log_sigma() -> f64 {
 pub const MAX_MEAN_EVENT_DURATION_S: f64 = 1_000.0;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneratorScalars {
     #[serde(default)]
     pub symbol: String,
@@ -885,6 +891,104 @@ pub enum GeneratedSourceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unknown key inside the fingerprint's leaf structs is refused rather
+    /// than decoded around. The committed artifact is the base, so every case
+    /// differs from a parse that succeeds by exactly one key, and the error
+    /// must name that key: a misspelled leaf in `analysis/fingerprint.json`
+    /// would otherwise decode, keep its old value or fail on a missing field
+    /// elsewhere, and move nothing a test could see.
+    #[test]
+    fn a_fingerprint_leaf_with_an_unknown_key_is_refused() {
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../analysis/fingerprint.json"
+        ));
+        let base: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        serde_json::from_value::<Fingerprint>(base.clone()).expect("the committed base parses");
+
+        let cases: [(&[&str], &str); 5] = [
+            (&["cadence", "targets"], "levels_meen"),
+            (&["cadence", "targets", "children_mean"], "anchr"),
+            (&["cadence", "targets", "children_mean", "range"], "p95"),
+            (&["cadence", "targets", "per_second_counts"], "p99"),
+            (&["golden_targets", "abs_return_acf"], "lag100"),
+        ];
+        for (path, key) in cases {
+            let mut value = base.clone();
+            let mut cursor = &mut value;
+            for step in path {
+                cursor = &mut cursor[*step];
+            }
+            cursor
+                .as_object_mut()
+                .expect("the path names an object")
+                .insert((*key).to_string(), serde_json::json!(0.0));
+            let err = serde_json::from_value::<Fingerprint>(value)
+                .expect_err("an unknown key must be refused")
+                .to_string();
+            assert!(
+                err.contains("unknown field") && err.contains(key),
+                "expected an unknown-field refusal naming {key} under {path:?}, got {err}"
+            );
+        }
+    }
+
+    /// The same refusal on the scalar schema and its calibration seams, which
+    /// operator config reaches. The unit-variant hazard is the case that
+    /// matters most: a stray key beside `kind = "uncalibrated"` is exactly
+    /// what serde tolerates on a unit variant of an internally tagged enum.
+    #[test]
+    fn generator_scalars_with_an_unknown_key_are_refused() {
+        let base = serde_json::json!({
+            "symbol": "MNQ",
+            "modal_tick": "0.25",
+            "price_decimals": 2,
+            "mean_event_duration_s": 0.5,
+            "children_mean": 2.0,
+            "children_single_frac": 0.5,
+            "levels_mean": 1.5,
+            "size_round_frac": 0.0,
+            "start_price": "20000",
+            "latent_size_median": "1",
+            "vol_scalar": 0.0001,
+            "quoted_width": { "ticks": 1, "provenance": { "kind": "uncalibrated" } },
+            "top_sizes": { "bid": "1", "ask": "1", "provenance": { "kind": "fitted", "corpus": "c" } },
+            "depth_levels": { "levels": 8 },
+            "depth_growth": { "growth": "1" },
+            "trade_displacement_ticks": { "ticks": 0.5 }
+        });
+        serde_json::from_value::<GeneratorScalars>(base.clone()).expect("the base parses");
+
+        let cases: [(&[&str], &str); 8] = [
+            (&[], "vol_scalr"),
+            (&["quoted_width"], "tikcs"),
+            (&["top_sizes"], "bidd"),
+            (&["depth_levels"], "level"),
+            (&["depth_growth"], "grwth"),
+            (&["trade_displacement_ticks"], "tick"),
+            (&["quoted_width", "provenance"], "corpus"),
+            (&["top_sizes", "provenance"], "window"),
+        ];
+        for (path, key) in cases {
+            let mut value = base.clone();
+            let mut cursor = &mut value;
+            for step in path {
+                cursor = &mut cursor[*step];
+            }
+            cursor
+                .as_object_mut()
+                .expect("the path names an object")
+                .insert((*key).to_string(), serde_json::json!("x"));
+            let err = serde_json::from_value::<GeneratorScalars>(value)
+                .expect_err("an unknown key must be refused")
+                .to_string();
+            assert!(
+                err.contains("unknown field") && err.contains(key),
+                "expected an unknown-field refusal naming {key} under {path:?}, got {err}"
+            );
+        }
+    }
 
     /// `mean_event_duration_s` is bounded above. It was validated
     /// strictly-positive-finite only, so an operator override could buy an

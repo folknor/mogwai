@@ -38,6 +38,7 @@ pub enum SampleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StratumId {
     pub family: Family,
     pub level: u8,
@@ -57,12 +58,14 @@ impl StratumId {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProbabilityRatio {
     pub numerator: u32,
     pub denominator: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PanelCell {
     pub family: Family,
     pub level: u8,
@@ -78,6 +81,7 @@ pub struct PanelCell {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StratumPlan {
     pub id: StratumId,
     pub population_size: u32,
@@ -93,6 +97,7 @@ pub struct StratumPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectionSeeds {
     pub anchor: u64,
     pub pilot: u64,
@@ -101,12 +106,14 @@ pub struct SelectionSeeds {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RefinementCap {
     pub family: Family,
     pub cap: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchManifest {
     pub schema_version: u32,
     pub estimator_version: u32,
@@ -126,6 +133,7 @@ pub struct BatchManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PilotCell {
     pub family: Family,
     pub level: u8,
@@ -147,6 +155,7 @@ pub fn resolve_cell(family: Family, level: u8, lattice: &[u32]) -> LabResult<Cel
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PilotReading {
     pub family: Family,
     pub level: u8,
@@ -158,6 +167,7 @@ pub struct PilotReading {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PilotArtifact {
     pub schema_version: u32,
     pub selection_seed: u64,
@@ -1191,6 +1201,52 @@ mod tests {
         let rebuilt = build_manifest(manifest.measurement_sha256.clone(), &pilot)
             .expect("manifest re-derives from the committed pilot");
         assert_eq!(rebuilt, manifest);
+    }
+
+    /// An unknown key anywhere in the manifest refuses at decode. The plan
+    /// hash cannot catch one: it is taken over the typed fields, so a key the
+    /// types dropped would hash identically and the manifest would validate.
+    /// Each case differs from the committed artifact by exactly one key, and
+    /// the refusal must name it.
+    #[test]
+    fn a_manifest_with_an_unknown_key_is_refused_at_decode() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../analysis/stage-a-batch-manifest.json"
+        ));
+        let base: serde_json::Value = serde_json::from_slice(bytes).expect("valid JSON");
+        parse_manifest(bytes).expect("the committed base validates");
+
+        let cases: [(&[&str], &str); 5] = [
+            (&[], "tape_protocol_versoin"),
+            (&["selection_seeds"], "final"),
+            (&["full", "0"], "weight"),
+            (&["full", "0", "cell"], "tau"),
+            (&["full", "0", "stratum"], "regoin"),
+        ];
+        for (path, key) in cases {
+            let mut value = base.clone();
+            let mut cursor = &mut value;
+            for step in path {
+                cursor = match step.parse::<usize>() {
+                    Ok(index) => &mut cursor[index],
+                    Err(_) => &mut cursor[*step],
+                };
+            }
+            cursor
+                .as_object_mut()
+                .expect("the path names an object")
+                .insert((*key).to_string(), serde_json::json!(1));
+            let text = serde_json::to_vec(&value).expect("serializes");
+            let err = format!(
+                "{:#}",
+                parse_manifest(&text).expect_err("an unknown key must be refused")
+            );
+            assert!(
+                err.contains("unknown field") && err.contains(key),
+                "expected an unknown-field refusal naming {key} under {path:?}, got {err}"
+            );
+        }
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub fn now_unix_nanos() -> u64 {
 /// specifically to dodge this loss, so only the *offset* from the anchor is
 /// exposed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimClock {
     pub sim_epoch_ns: u64,
     pub wall_anchor_ns: u64,
@@ -134,6 +135,7 @@ impl SimClock {
 /// request for a `start` below it is refused. The span is echoed so the consumer
 /// can report the floor in its own terms.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VenueClock {
     /// The affine wall-to-sim map the adapter feeds to the nautilus node.
     pub sim: SimClock,
@@ -318,6 +320,21 @@ mod tests {
         );
         let decoded: VenueClock = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, clock);
+
+        // A key the snapshot does not have is refused, on the envelope and on
+        // the nested map alike: the retired `boat_clock` flag is the worked
+        // example of a field one side could send and the other silently drop.
+        for stray in [
+            json.replacen('{', r#"{"boat_clock":true,"#, 1),
+            json.replacen(r#""speed""#, r#""not_a_knob":1,"speed""#, 1),
+        ] {
+            let err = serde_json::from_str::<VenueClock>(&stray)
+                .expect_err("an unknown key must be refused");
+            assert!(
+                err.to_string().contains("boat_clock") || err.to_string().contains("not_a_knob"),
+                "{stray}: {err}"
+            );
+        }
     }
 
     #[test]

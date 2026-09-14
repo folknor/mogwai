@@ -234,6 +234,7 @@ pub fn validate_tape_window(
 /// the last bit and would each strand a river of their own against a cap that
 /// never evicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneratorArm {
     /// Offset from the run origin at which the window opens.
     pub start_offset_ns: u64,
@@ -593,5 +594,17 @@ mod window_tests {
             .expect("the bounded window is valid")
             .expect("both bounds name a window");
         assert_eq!(window.data_origin_ns, 1_000);
+    }
+
+    /// The arm is river identity, so a stray key beside it must be refused
+    /// rather than decode to an arm the writer did not describe.
+    #[test]
+    fn a_generator_arm_refuses_an_unknown_key() {
+        let body = r#"{"start_offset_ns":0,"duration_ms":1000,"rate_mult_ppm":2000000,"children_mult_ppm":2000000}"#;
+        serde_json::from_str::<super::GeneratorArm>(body).expect("the exact body decodes");
+        let stray = body.replacen('{', r#"{"not_a_knob":1,"#, 1);
+        let err = serde_json::from_str::<super::GeneratorArm>(&stray)
+            .expect_err("an unknown key must be refused");
+        assert!(err.to_string().contains("not_a_knob"), "{err}");
     }
 }

@@ -1398,8 +1398,16 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
 /// `AccountState` itself is unchanged - it is also the pushed frame's payload,
 /// and the pushed path is per-boat and already correct. The label is added by
 /// this response only, and `serde(flatten)` keeps every existing field at the
-/// same position in the object, so a consumer that ignores unknown fields
-/// (`mogwai-adapter`'s `client/shared.rs` among them) parses it unchanged.
+/// same position in the object. `AccountState` refuses unknown keys, so a
+/// consumer decoding this body as one must first take off the two keys this
+/// response adds, `clock` and `sweep_passes`; `mogwai-adapter`'s
+/// `fetch_account` does exactly that, by name.
+///
+/// Risk rides inside the flattened account as `AccountState::risk`, always
+/// `Some` here, rather than as a sibling field. The wire is the same top-level
+/// `risk` key either way, but a sibling beside a flattened `AccountState` that
+/// also carries `risk` would serialize the key twice the moment a snapshot
+/// arrived with it set.
 #[derive(Serialize)]
 pub(crate) struct AccountSnapshot {
     /// Always `"venue"` today. Present so a consumer can never mistake the
@@ -1407,11 +1415,6 @@ pub(crate) struct AccountSnapshot {
     clock: ClockAxis,
     #[serde(flatten)]
     account: AccountState,
-    /// What the venue is enforcing against this account right now. A sibling
-    /// rather than part of `AccountState`, because that type is also the pushed
-    /// frame's payload and risk state is an evaluator's concern rather than
-    /// something every fill should carry.
-    risk: mogwai_protocol::risk::RiskState,
     /// The fill sweeper's completed-pass count on each boat this account is
     /// seated on, sorted by symbol.
     ///
@@ -1498,7 +1501,7 @@ pub(crate) async fn account(
     };
     let ts = sim_now_ns(state.venue_sim());
     let mut sweep_passes = Vec::new();
-    let (account, risk) = match state.run.peek_account(&account_id) {
+    let (mut account, risk) = match state.run.peek_account(&account_id) {
         Some(account_state) => {
             for boat in state.run.boatyard.boats() {
                 if account_state.is_seated_on(&boat.key()) {
@@ -1533,10 +1536,10 @@ pub(crate) async fn account(
             (account, risk)
         }
     };
+    account.risk = Some(risk);
     Json(AccountSnapshot {
         clock: ClockAxis::Venue,
         account,
-        risk,
         sweep_passes,
     })
     .into_response()

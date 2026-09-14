@@ -329,13 +329,18 @@ and equal to the readiness record's - venue-wide facts, naming no account.
 They are there for the consumer that attached to a venue it did not spawn:
 the readiness line is readable only by the spawning launcher, and a posted
 ledger's survival depends on exactly these two settings, so an attaching
-consumer verifies them here instead of resting on an operator's word. New
-fields on `/health` are additive; a consumer must tolerate ones it does not
-know.
+consumer verifies them here instead of resting on an operator's word. The body
+is not additive: the venue and every Rust consumer build from one working tree,
+so a field one side writes and the other does not know is a mismatch to
+surface, and the shared type refuses it.
 
 A Rust consumer does not spell these grammars by hand. `mogwai_protocol::http`
-exports the `/health` body as `Health`, which decodes a newer venue's extra
-fields and fault kinds, beside the request carriers the venue itself decodes:
+exports the `/health` body as `Health`, which refuses an unknown field on the
+body and on its `fault` object alike. The fault `kind` is a string in an open
+taxonomy rather than a field, so a kind the reader has never seen still
+decodes. A reader that wants only a slice of the body reads it as an untyped
+JSON value instead, as the adapter's run-identity probe does for `run_seed`.
+`Health` sits beside the request carriers the venue itself decodes:
 `SocketQuery` for the `/ws` upgrade, `AccountQuery`, `HistoryQuery` for the
 operator history routes, `OpenAccountRequest` and `DivergenceRequest`. Each
 query carrier writes its own query string, so a renamed key is a build failure

@@ -49,11 +49,19 @@ use crate::{TickEvent, TickSource};
 /// what fails when it does not.
 pub const SEGMENT_LIBRARY_VERSION: u32 = 1;
 
-/// The reader's view of one cut segment. Deliberately a subset: the writer
-/// records provenance fields the composer has no business reading.
+/// The reader's view of one cut segment.
+///
+/// It names every field the writer records, including the provenance the
+/// composer never reads, and refuses any key it does not name. A reader that
+/// took a subset would have to tolerate unknown keys, and then a renamed or
+/// misspelled array would decode as absent rather than as a refusal.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Segment {
     pub trade_date: String,
+    /// The window's UTC start instant, provenance only: the composer
+    /// re-anchors time and never reads it.
+    pub window_start_ns: u64,
     pub trade_count: usize,
     pub open_gap_ret: Option<i64>,
     pub dt_ns: Vec<u64>,
@@ -62,13 +70,30 @@ pub struct Segment {
     pub side: Vec<char>,
 }
 
-/// The reader's view of a library.
+/// The reader's view of a library. Like [`Segment`], it names every key the
+/// writer emits and refuses the rest.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SegmentLibrary {
+    #[serde(rename = "_doc")]
+    pub doc: String,
     pub version: u32,
     pub window: String,
     pub tick_size: String,
+    pub provenance: LibraryProvenance,
     pub segments: Vec<Segment>,
+}
+
+/// Where a library's contents came from. Read so an unknown key refuses, never
+/// consulted by the composer.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryProvenance {
+    pub symbol: String,
+    pub month: String,
+    pub source_dir: String,
+    pub source_files: Vec<String>,
+    pub cut_at: String,
 }
 
 /// A library that failed to load, or that this build cannot compose from.
@@ -655,6 +680,7 @@ mod tests {
     fn segment(date: &str, gap: Option<i64>, rets: &[i64]) -> Segment {
         Segment {
             trade_date: date.into(),
+            window_start_ns: 0,
             trade_count: rets.len(),
             open_gap_ret: gap,
             dt_ns: vec![1_000_000; rets.len()],
@@ -666,9 +692,17 @@ mod tests {
 
     fn library(segments: Vec<Segment>) -> SegmentLibrary {
         SegmentLibrary {
+            doc: String::new(),
             version: SEGMENT_LIBRARY_VERSION,
             window: "asia".into(),
             tick_size: "0.25".into(),
+            provenance: LibraryProvenance {
+                symbol: "MNQ".into(),
+                month: "2026-04".into(),
+                source_dir: String::new(),
+                source_files: Vec::new(),
+                cut_at: String::new(),
+            },
             segments,
         }
     }
@@ -1204,7 +1238,11 @@ mod tests {
     fn the_conformance_fixture_composes() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../analysis/segment_library_conformance.json");
-        let library = SegmentLibrary::load(&path).expect("the committed fixture");
+        let text = std::fs::read_to_string(&path).expect("the committed fixture");
+        let raw: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let library: SegmentLibrary =
+            serde_json::from_value(raw["library"].clone()).expect("the fixture's library parses");
+        library.validate().expect("the fixture's library is valid");
         assert_eq!(library.window, "asia");
         let mut source = SegmentSource::new(library, SegmentCompose::new("MNQ", 42))
             .expect("the fixture composes");
@@ -1212,6 +1250,36 @@ mod tests {
             assert!(
                 source.next_tick().is_some(),
                 "the composed river is endless"
+            );
+        }
+    }
+
+    /// A key the reader does not name is refused at every level of the
+    /// library, not decoded around. The fixture's own library is the base, so
+    /// each case differs from an accepted artifact by exactly one key, and the
+    /// error must name that key.
+    #[test]
+    fn a_segment_library_with_an_unknown_key_is_refused() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/segment_library_conformance.json");
+        let text = std::fs::read_to_string(&path).expect("the committed fixture");
+        let raw: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let base = raw["library"].clone();
+        serde_json::from_value::<SegmentLibrary>(base.clone()).expect("the base parses");
+
+        let mut top = base.clone();
+        top["tick_sise"] = serde_json::json!("0.25");
+        let mut segment = base.clone();
+        segment["segments"][0]["rets"] = serde_json::json!([0]);
+        let mut provenance = base;
+        provenance["provenance"]["symbl"] = serde_json::json!("MNQ");
+        for (value, key) in [(top, "tick_sise"), (segment, "rets"), (provenance, "symbl")] {
+            let err = serde_json::from_value::<SegmentLibrary>(value)
+                .expect_err("an unknown key must be refused")
+                .to_string();
+            assert!(
+                err.contains("unknown field") && err.contains(key),
+                "expected an unknown-field refusal naming {key}, got {err}"
             );
         }
     }

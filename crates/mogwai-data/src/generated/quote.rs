@@ -10,17 +10,29 @@ use serde::Deserialize;
 
 use super::numeric::decimal_from_f64;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+/// Where a calibration seam's value came from.
+///
+/// `Uncalibrated` is an empty struct variant rather than a unit variant, with
+/// an unchanged wire form (`kind = "uncalibrated"`). serde ignores unknown keys
+/// beside the tag of a unit variant in an internally tagged enum even under
+/// `deny_unknown_fields`, so `{ kind = "uncalibrated", corpus = "..." }` would
+/// decode as uncalibrated with the corpus silently dropped; a struct variant is
+/// what lets the attribute refuse it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum CalibrationProvenance {
-    #[default]
-    Uncalibrated,
-    Fitted {
-        corpus: String,
-    },
+    Uncalibrated {},
+    Fitted { corpus: String },
+}
+
+impl Default for CalibrationProvenance {
+    fn default() -> Self {
+        Self::Uncalibrated {}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuotedWidth {
     ticks: NonZeroU32,
     #[serde(default)]
@@ -35,7 +47,7 @@ impl QuotedWidth {
 
     #[must_use]
     pub fn uncalibrated(ticks: NonZeroU32) -> Self {
-        Self::new(ticks, CalibrationProvenance::Uncalibrated)
+        Self::new(ticks, CalibrationProvenance::Uncalibrated {})
     }
 
     #[must_use]
@@ -56,6 +68,7 @@ impl Default for QuotedWidth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TopOfBookSizes {
     pub bid: Decimal,
     pub ask: Decimal,
@@ -64,6 +77,7 @@ pub struct TopOfBookSizes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepthLevels {
     levels: u16,
     #[serde(default)]
@@ -75,7 +89,7 @@ impl DepthLevels {
     pub fn uncalibrated(levels: u16) -> Self {
         Self {
             levels,
-            provenance: CalibrationProvenance::Uncalibrated,
+            provenance: CalibrationProvenance::Uncalibrated {},
         }
     }
     #[must_use]
@@ -95,6 +109,7 @@ impl Default for DepthLevels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepthGrowth {
     growth: Decimal,
     #[serde(default)]
@@ -106,7 +121,7 @@ impl DepthGrowth {
     pub fn uncalibrated(growth: Decimal) -> Self {
         Self {
             growth,
-            provenance: CalibrationProvenance::Uncalibrated,
+            provenance: CalibrationProvenance::Uncalibrated {},
         }
     }
     #[must_use]
@@ -131,7 +146,7 @@ impl TopOfBookSizes {
         Self {
             bid: min_size,
             ask: min_size,
-            provenance: CalibrationProvenance::Uncalibrated,
+            provenance: CalibrationProvenance::Uncalibrated {},
         }
     }
 }
@@ -143,6 +158,7 @@ impl Default for TopOfBookSizes {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeDisplacement {
     ticks: f64,
     #[serde(default)]
@@ -157,7 +173,7 @@ impl TradeDisplacement {
 
     #[must_use]
     pub fn uncalibrated(ticks: f64) -> Self {
-        Self::new(ticks, CalibrationProvenance::Uncalibrated)
+        Self::new(ticks, CalibrationProvenance::Uncalibrated {})
     }
 
     #[must_use]

@@ -2879,26 +2879,42 @@ fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f6
 /// direction - `mogwai-lab` depends on `mogwai-data`.
 #[test]
 fn empty_hour_stats_match_the_shared_conformance_fixture() {
+    // Every key the fixture carries is named, the documentation ones included
+    // under underscore bindings, so a misspelled case field refuses instead of
+    // decoding around.
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Expect {
         empty_hour_frac: f64,
         max_empty_hour_run_h: f64,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Case {
         name: String,
+        #[serde(rename = "why")]
+        _why: String,
         first_ts_s: f64,
         last_ts_s: f64,
         occupied_hours: Vec<u64>,
         expect: Expect,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Epoch {
         seconds: u64,
+        #[serde(rename = "why")]
+        _why: String,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Spec {
+        _doc: String,
         version: u32,
+        #[serde(rename = "units")]
+        _units: std::collections::BTreeMap<String, String>,
+        #[serde(rename = "rules")]
+        _rules: std::collections::BTreeMap<String, String>,
         tolerance: f64,
         epoch: Epoch,
         cases: Vec<Case>,
@@ -3847,7 +3863,11 @@ fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
 /// rules while still passing its own tests.
 #[test]
 fn stratified_roll_matches_the_shared_conformance_fixture() {
+    // Every key the fixture carries is named, the documentation ones included
+    // under underscore bindings, so a misspelled case field refuses instead of
+    // decoding around.
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Expect {
         status: String,
         pairs: usize,
@@ -3855,8 +3875,11 @@ fn stratified_roll_matches_the_shared_conformance_fixture() {
         roll_ticks: Option<f64>,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Case {
         name: String,
+        #[serde(rename = "why")]
+        _why: String,
         tick: f64,
         prices: Vec<f64>,
         change_vol: Vec<Option<f64>>,
@@ -3866,8 +3889,14 @@ fn stratified_roll_matches_the_shared_conformance_fixture() {
         expect: Expect,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Spec {
+        _doc: String,
         version: u32,
+        #[serde(rename = "units")]
+        _units: std::collections::BTreeMap<String, String>,
+        #[serde(rename = "rules")]
+        _rules: std::collections::BTreeMap<String, String>,
         tolerance: f64,
         cases: Vec<Case>,
     }

@@ -39,7 +39,7 @@ pub enum OmsType {
 /// - `Future`, `Perpetual` and `Inverse` credit neither. They move only cash in
 ///   the settlement currency, with the exposure carried as a marked position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "class", rename_all = "snake_case")]
+#[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstrumentClass {
     Spot {
         base: String,
@@ -355,6 +355,7 @@ impl FundingTerms {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstrumentDef {
     pub symbol: Symbol,
     pub class: InstrumentClass,
@@ -544,6 +545,19 @@ mod tests {
             assert!(json.contains(tag), "wire tag must be exact: {json}");
             let decoded: InstrumentDef = serde_json::from_str(&json).unwrap();
             assert_eq!(decoded, def);
+
+            // A stray key is refused on the def and inside every class
+            // variant, so a term one side states and the other drops cannot
+            // decode as a different instrument. The tag is the first key inside
+            // the class object, so the stray lands inside the variant.
+            let top = json.replacen('{', r#"{"not_a_term":1,"#, 1);
+            let err = serde_json::from_str::<InstrumentDef>(&top)
+                .expect_err("an unknown def field must be refused");
+            assert!(err.to_string().contains("not_a_term"), "{top}: {err}");
+            let nested = json.replacen(tag, &format!("{tag},\"not_a_term\":1"), 1);
+            let err = serde_json::from_str::<InstrumentDef>(&nested)
+                .expect_err("an unknown class term must be refused");
+            assert!(err.to_string().contains("not_a_term"), "{nested}: {err}");
         }
     }
 

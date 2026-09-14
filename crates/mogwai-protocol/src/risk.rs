@@ -59,6 +59,7 @@ pub enum TrailingBasis {
 /// A trailing drawdown: a floor that follows the account up and never comes
 /// back down.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrailingDrawdown {
     /// How far below the ratcheted high-water mark the floor sits.
     pub amount: Decimal,
@@ -86,6 +87,7 @@ fn terminate() -> BreachAction {
 /// Not derivable from the trailing drawdown and not the same mechanism. This
 /// one forgets: crossing a session boundary restores the whole budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DailyLossLimit {
     /// How far below the day's opening equity the floor sits.
     pub amount: Decimal,
@@ -102,6 +104,7 @@ pub struct DailyLossLimit {
 /// forward test that only models the trail tests the wrong account for the
 /// static programme.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OverallDrawdown {
     /// How far below the opening equity the floor sits.
     pub amount: Decimal,
@@ -127,6 +130,7 @@ pub struct OverallDrawdown {
 /// the next; a cap meant for one instrument is worth checking against every
 /// instrument the account will touch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaxPosition {
     pub quantity: Decimal,
 }
@@ -325,7 +329,12 @@ impl AccountPolicy {
 /// tolerance would have bitten unobserved. It is a deliberate inclusion, not
 /// an oversight: [`AccountPolicy`] beside it stays number-tolerant because a
 /// policy is also TOML config, while a published state is only ever wire.
+///
+/// Unknown fields are refused on decode, on the same one-tree grounds as every
+/// shared type: a field the venue publishes and a consumer's decoder silently
+/// drops is the evaluator reading a state that is not the one enforced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskState {
     /// Equity at the last evaluation: balances plus unrealized.
     #[serde(with = "rust_decimal::serde::str")]
@@ -387,6 +396,7 @@ pub struct RiskState {
 /// A rule that fired, and what it did. Published inside [`RiskState`] and
 /// string-spelled on the same grounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Breach {
     pub rule: BreachedRule,
     pub action: BreachAction,
@@ -857,6 +867,31 @@ mod tests {
                 .validate()
                 .expect("a minute of the day is accepted");
         }
+    }
+
+    /// Every policy rule and the published state refuse a key they do not have,
+    /// at every depth. Each probe is a valid body plus one stray key, so the
+    /// refusal can only be about that key; the nested probes go through the
+    /// already-strict `AccountPolicy` and `RiskState` so they catch a rule type
+    /// that lost its own attribute.
+    #[test]
+    fn every_policy_rule_and_the_published_state_refuse_an_unknown_key() {
+        fn refused<T: serde::de::DeserializeOwned>(json: &str) {
+            let err = serde_json::from_str::<T>(json)
+                .err()
+                .unwrap_or_else(|| panic!("{json} decoded with an unknown key"));
+            assert!(err.to_string().contains("not_a_knob"), "{json}: {err}");
+        }
+        refused::<AccountPolicy>(r#"{"trailing_drawdown":{"amount":"1","not_a_knob":1}}"#);
+        refused::<AccountPolicy>(r#"{"daily_loss_limit":{"amount":"1","not_a_knob":1}}"#);
+        refused::<AccountPolicy>(r#"{"overall_drawdown":{"amount":"1","not_a_knob":1}}"#);
+        refused::<AccountPolicy>(r#"{"max_position":{"quantity":"1","not_a_knob":1}}"#);
+        refused::<RiskState>(
+            r#"{"equity":"1","peak_equity":"1","day_open_equity":"1","not_a_knob":1}"#,
+        );
+        refused::<RiskState>(
+            r#"{"equity":"1","peak_equity":"1","day_open_equity":"1","breached":{"rule":"daily_loss_limit","action":"terminate","ts_event":1,"equity":"1","threshold":"1","not_a_knob":1}}"#,
+        );
     }
 
     /// The default reset is a convention and the default breach actions differ

@@ -973,7 +973,7 @@ fn deliver(
     originated: usize,
     ts: u64,
 ) {
-    let subject = (!events.is_empty()).then_some(AdmissionSubject::Frame);
+    let subject = (!events.is_empty()).then_some(AdmissionSubject::Frame {});
     let mut closed = Vec::new();
     enum Route {
         Everyone,

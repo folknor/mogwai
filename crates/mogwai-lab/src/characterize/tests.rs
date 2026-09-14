@@ -317,26 +317,42 @@ fn a_price_decimals_tie_keeps_the_first_count_seen() {
 /// it is lab-local and the fixture structurally cannot express it.
 #[test]
 fn dwell_stats_matches_the_shared_conformance_fixture() {
+    // Every key the fixture carries is named, the documentation ones included
+    // under underscore bindings, so a misspelled case field refuses instead of
+    // decoding around.
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Expect {
         empty_hour_frac: f64,
         max_empty_hour_run_h: i64,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Case {
         name: String,
+        #[serde(rename = "why")]
+        _why: String,
         first_ts_s: f64,
         last_ts_s: f64,
         occupied_hours: Vec<i64>,
         expect: Expect,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Epoch {
         seconds: i64,
+        #[serde(rename = "why")]
+        _why: String,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Spec {
+        _doc: String,
         version: u32,
+        #[serde(rename = "units")]
+        _units: std::collections::BTreeMap<String, String>,
+        #[serde(rename = "rules")]
+        _rules: std::collections::BTreeMap<String, String>,
         tolerance: f64,
         epoch: Epoch,
         cases: Vec<Case>,

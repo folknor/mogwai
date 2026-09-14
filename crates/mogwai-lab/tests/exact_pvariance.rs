@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Case {
     why: String,
     gaps: Vec<String>,

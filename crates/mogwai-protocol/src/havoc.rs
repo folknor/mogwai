@@ -47,8 +47,12 @@ pub struct HavocSpec {
 /// zeroed `reconnect_backoff_factor` fails `validate_conn_havoc`. The container
 /// default routes every omission through this struct's `Default` impl, which
 /// carries the real production-shaped values (`1.0`s/`2.0` factor).
+///
+/// Filling omissions and refusing unknown keys are independent: a misspelled
+/// knob is refused by name rather than decoding to the default it meant to
+/// override.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConnHavoc {
     /// Idle read timeout in ms. If no inbound application-data frame arrives
     /// within this window, the socket is declared dead and reconnected. Ping
@@ -159,8 +163,12 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
 /// refuses a `Subscribe` frame outright. `GET /trades` takes no `regime`
 /// parameter either, and it never travels the `/control/divergence` control
 /// plane.
+///
+/// Every variant carries fields, so `deny_unknown_fields` reaches each one: a
+/// unit variant of an internally tagged enum would ignore unknown keys, and a
+/// fieldless regime added later must be written as an empty struct variant.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum MarketRegime {
     /// Multiply the GARCH return RMS by `vol_mult` and lift clamps with it.
     VolStorm { vol_mult: f64 },
@@ -353,6 +361,7 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
 
 /// Inbound, in-adapter havoc knobs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct InboundHavoc {
     /// Added delay before each inbound event reaches the sink.
     #[serde(default)]
@@ -373,6 +382,7 @@ pub struct InboundHavoc {
 
 /// Static inbound-latency knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HavocLatency {
     /// Base delay added to every inbound event.
     #[serde(default)]
@@ -813,6 +823,33 @@ mod tests {
         let retired = serde_json::from_str::<HavocSpec>(r#"{"client":{}}"#)
             .expect_err("the retired client field must not be silently ignored");
         assert!(retired.to_string().contains("unknown field `client`"));
+    }
+
+    /// Every nested havoc shape refuses a key it does not have, directly and
+    /// as it arrives inside a whole spec. Each probe is a valid body plus one
+    /// stray key, so a refusal can only be about that key.
+    #[test]
+    fn every_nested_havoc_shape_refuses_an_unknown_key() {
+        fn refused<T: serde::de::DeserializeOwned>(json: &str) {
+            let err = serde_json::from_str::<T>(json)
+                .err()
+                .unwrap_or_else(|| panic!("{json} decoded with an unknown key"));
+            assert!(err.to_string().contains("not_a_knob"), "{json}: {err}");
+        }
+        refused::<ConnHavoc>(r#"{"heartbeat_interval_ms":2000,"not_a_knob":1}"#);
+        refused::<InboundHavoc>(r#"{"drop_prob":0.1,"not_a_knob":1}"#);
+        refused::<HavocLatency>(r#"{"base_nanos":1,"not_a_knob":1}"#);
+        for regime in [
+            r#"{"type":"VolStorm","vol_mult":2.0,"not_a_knob":1}"#,
+            r#"{"type":"LiquidityDrought","thin_factor":2.0,"not_a_knob":1}"#,
+            r#"{"type":"SessionEdgeSpike","start_hour":1,"end_hour":2,"extra_vol_mult":1.0,"not_a_knob":1}"#,
+            r#"{"type":"ReopenGap","at_ts":1,"halt_secs":1,"gap_frac":0.0,"not_a_knob":1}"#,
+        ] {
+            refused::<MarketRegime>(regime);
+        }
+        refused::<HavocSpec>(r#"{"conn":{"not_a_knob":1}}"#);
+        refused::<HavocSpec>(r#"{"inbound":{"latency":{"not_a_knob":1}}}"#);
+        refused::<HavocSpec>(r#"{"data":{"type":"VolStorm","vol_mult":2.0,"not_a_knob":1}}"#);
     }
 
     #[test]

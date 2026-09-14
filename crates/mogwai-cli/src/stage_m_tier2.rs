@@ -136,16 +136,22 @@ struct Coordinate {
 /// An executable, mechanism-neutral vocabulary over exactly the frozen field
 /// and its cross-fitted scores. New vocabulary is an implementation change,
 /// never an implicit interpretation of an already committed specification.
+///
+/// The fieldless variants are spelled as empty struct variants, `Variant {}`,
+/// and that is load-bearing: serde ignores unknown keys on a unit variant of an
+/// internally tagged enum even under `deny_unknown_fields`, so a
+/// `{ "kind": "score_variance", "minimum_days": 5 }` would decode with the
+/// parameter dropped. The wire form is unchanged.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Statistic {
-    ResidualVariance,
-    SessionMeanVariance,
-    SessionMeanOneDayCovariance,
-    CrossHourCoherence,
-    SessionMeanVarianceRatio,
-    PermutationStandardizedLeadingCovarianceShare,
-    ScoreVariance,
+    ResidualVariance {},
+    SessionMeanVariance {},
+    SessionMeanOneDayCovariance {},
+    CrossHourCoherence {},
+    SessionMeanVarianceRatio {},
+    PermutationStandardizedLeadingCovarianceShare {},
+    ScoreVariance {},
     ScoreGapCovariance {
         minimum_days: u64,
         maximum_days: Option<u64>,
@@ -162,7 +168,9 @@ enum JointRule {
     /// from its exact finite-sample F distribution, not supplied by a user.
     HotellingPredictive { ridge: f64 },
     /// Bonferroni Student predictive maximum at the declared joint level.
-    StudentMax,
+    /// An empty struct variant so a stray key beside the tag refuses; see
+    /// [`Statistic`].
+    StudentMax {},
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -647,8 +655,8 @@ fn project(spec: &Candidate, m: &Month) -> anyhow::Result<Vec<f64>> {
     let needs_c3 = spec.coordinates.iter().any(|coordinate| {
         matches!(
             coordinate.statistic,
-            Statistic::SessionMeanVarianceRatio
-                | Statistic::PermutationStandardizedLeadingCovarianceShare
+            Statistic::SessionMeanVarianceRatio {}
+                | Statistic::PermutationStandardizedLeadingCovarianceShare {}
         )
     });
     let c3 = needs_c3.then(|| c3_coordinates(m)).transpose()?;
@@ -656,23 +664,23 @@ fn project(spec: &Candidate, m: &Month) -> anyhow::Result<Vec<f64>> {
         .iter()
         .map(|c| {
             let x = match c.statistic {
-                Statistic::ResidualVariance => {
+                Statistic::ResidualVariance {} => {
                     variance(&m.cells.iter().map(|x| x.residual).collect::<Vec<_>>())
                 }
-                Statistic::SessionMeanVariance => session_means(m).and_then(|x| {
+                Statistic::SessionMeanVariance {} => session_means(m).and_then(|x| {
                     (x.len() >= 2)
                         .then(|| variance(&x.values().copied().collect::<Vec<_>>()))
                         .ok_or_else(|| anyhow!("fewer than 2 eligible sessions"))
                 })?,
-                Statistic::SessionMeanOneDayCovariance => one_day_covariance(m)?,
-                Statistic::CrossHourCoherence => cross_hour_result(&m.cells)?,
-                Statistic::SessionMeanVarianceRatio => {
+                Statistic::SessionMeanOneDayCovariance {} => one_day_covariance(m)?,
+                Statistic::CrossHourCoherence {} => cross_hour_result(&m.cells)?,
+                Statistic::SessionMeanVarianceRatio {} => {
                     c3.expect("C3 coordinates were precomputed").0
                 }
-                Statistic::PermutationStandardizedLeadingCovarianceShare => {
+                Statistic::PermutationStandardizedLeadingCovarianceShare {} => {
                     c3.expect("C3 coordinates were precomputed").1
                 }
-                Statistic::ScoreVariance => (m.scores.len() >= 8)
+                Statistic::ScoreVariance {} => (m.scores.len() >= 8)
                     .then(|| variance(&m.scores.values().copied().collect::<Vec<_>>()))
                     .ok_or_else(|| anyhow!("fewer than 8 scored sessions"))?,
                 Statistic::ScoreGapCovariance {
@@ -887,7 +895,7 @@ fn score_gap(m: &Month, min: u64, max: Option<u64>) -> f64 {
 }
 
 fn joint(rule: &JointRule, train: &[Vec<f64>], held: &[f64]) -> anyhow::Result<Verdict> {
-    if matches!(rule, JointRule::StudentMax) {
+    if matches!(rule, JointRule::StudentMax {}) {
         return student_max(train, held);
     }
     let JointRule::HotellingPredictive { ridge } = *rule else {
@@ -1428,6 +1436,52 @@ mod tests {
         // F(1,6; .90) = t(6; .95)^2.
         assert!((f_quantile_90(1, 6) - 3.775_949).abs() < 1e-5);
         assert!((f_quantile_90(4, 3) - 5.342_644).abs() < 1e-5);
+    }
+
+    /// A candidate specification refuses a key it does not read at every level
+    /// a committed specification is decoded through, including beside the tag
+    /// of a fieldless statistic and joint rule - the arm a unit variant would
+    /// silently accept. The well-formed twin decodes and round-trips to the
+    /// same wire form, so the empty struct variants did not move the spelling.
+    #[test]
+    fn a_candidate_specification_refuses_unknown_keys_at_every_level() {
+        let good = json!({
+            "id": "T",
+            "coordinates": [{ "name": "a", "statistic": { "kind": "score_variance" } }],
+            "joint": { "kind": "student_max" },
+            "refusals": {
+                "missing_cells": "include",
+                "score_refusal": "include",
+                "nonfinite_statistic": "include",
+                "singular_predictive_fit": "include",
+                "thin_month": "include",
+                "finer_than_session_hour_input": "include"
+            },
+            "thin_months": "t"
+        });
+        let spec: Candidate =
+            serde_json::from_value(good.clone()).expect("well-formed twin decodes");
+        assert_eq!(serde_json::to_value(&spec).expect("serializes"), good);
+
+        let mut statistic = good.clone();
+        statistic["coordinates"][0]["statistic"]["minimum_days"] = json!(5);
+        let mut joint = good.clone();
+        joint["joint"]["ridge"] = json!(0.1);
+        let mut top = good.clone();
+        top["surprise"] = json!(true);
+        let mut refusals = good;
+        refusals["refusals"]["surprise"] = json!("include");
+        for (bad, key) in [
+            (statistic, "minimum_days"),
+            (joint, "ridge"),
+            (top, "surprise"),
+            (refusals, "surprise"),
+        ] {
+            let error = serde_json::from_value::<Candidate>(bad)
+                .expect_err("an unread key must refuse")
+                .to_string();
+            assert!(error.contains(key), "the refusal must name {key}: {error}");
+        }
     }
 
     /// The `excess` draw is keyed on the session date, so the order the cells

@@ -1164,9 +1164,14 @@ async fn serve_exec_message<S>(
 }
 
 /// Builds the canonical `GET /account` body, including the required account id.
+///
+/// Venue-shaped rather than a bare `AccountState`: the real pull response adds
+/// `clock` and `sweep_passes` beside the account, and the client refuses a body
+/// without them, so a stub serving the bare account would be testing a venue
+/// that does not exist.
 pub fn account_json(account_id: &str, positions: &str, ts_event: u64) -> String {
     format!(
-        r#"{{"account_id":"{account_id}","balances":[{{"currency":"USDT","total":"10000","free":"10000","locked":"0"}}],"positions":{positions},"ts_event":{ts_event}}}"#
+        r#"{{"clock":"venue","account_id":"{account_id}","balances":[{{"currency":"USDT","total":"10000","free":"10000","locked":"0"}}],"positions":{positions},"ts_event":{ts_event},"sweep_passes":[]}}"#
     )
 }
 

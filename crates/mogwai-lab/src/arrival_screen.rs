@@ -158,7 +158,7 @@ impl Family {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "family", rename_all = "snake_case")]
+#[serde(tag = "family", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Cell {
     EventMarkov {
         switch_rate: f64,
@@ -309,6 +309,7 @@ pub fn coarse_grid(family: Family) -> Vec<Cell> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenRefusal {
     pub variant: String,
     pub clock_ns: u64,
@@ -322,6 +323,7 @@ pub struct ScreenRefusal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeedWalk {
     pub seed: u64,
     pub projection: ScreenReduced,
@@ -372,6 +374,7 @@ pub struct CellVerdict {
 /// Coarse coordinates are multiples of four, round-1 coordinates are even,
 /// and round-2 coordinates may be odd.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LatticeCell {
     pub cell: Cell,
     pub lattice: Vec<u32>,

@@ -11,12 +11,16 @@
 //! `routes`, makes the venue's decoder and every writer one definition, so a
 //! moved name is a build failure wherever it is written.
 //!
-//! The request carriers deny unknown fields and the response does not, and the
-//! asymmetry is deliberate. On a request, accepted-and-ignored is the worst
-//! reading: a misspelled key is served as a wider or different request than the
-//! consumer wrote, so it is refused with a `400` naming the key. On `/health`,
-//! fields are additive, so a consumer decoding it must tolerate one it does not
-//! know or every new field would break every existing reader.
+//! Every carrier here denies unknown fields, the requests and the `/health`
+//! response alike. On a request, accepted-and-ignored is the worst reading: a
+//! misspelled key is served as a wider or different request than the consumer
+//! wrote, so it is refused with a `400` naming the key. On the response the
+//! reasoning is the same from the other end. The venue, the adapter and every
+//! Rust consumer build from one working tree, so there is no older reader for a
+//! tolerance to protect, and a field the venue writes that a decoder silently
+//! drops is exactly the gate that reads as green and checks nothing. A reader
+//! that wants only a slice defines its own projection or reads a
+//! `serde_json::Value`; the shared type stays strict.
 //!
 //! Account resolution, boat placement, divergence routing and every other
 //! state-dependent decision stay in the venue. What lives here is grammar only.
@@ -43,7 +47,14 @@ fn encode_query<T: Serialize>(query: &T) -> String {
 /// `Faulted` the moment one does.
 ///
 /// Field order is wire order, because `serde_json` writes fields as declared.
+///
+/// Denies unknown fields: a body carrying a field this build does not know is
+/// a decode failure, not a newer venue to read around. Fields are not additive
+/// for a typed reader. A reader that needs to survive a body it did not build
+/// against - the adapter's identity probe, which reads `run_seed` alone - reads
+/// it as an untyped `serde_json::Value` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Health {
     /// The one word a fleet poller gates on. It was the constant `ok` once,
     /// which made a status field that could not vary and scored a run with a
@@ -113,16 +124,19 @@ impl HealthStatus {
     }
 }
 
-/// The tape fault `/health` reports.
+/// The tape fault `/health` reports. Denies unknown fields, like [`Health`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthFault {
     /// The river that faulted.
     pub symbol: String,
     /// The fault taxonomy name, shared verbatim with the venue's exit line.
     ///
-    /// A string rather than an enum because the taxonomy grows with every new
-    /// tick-fault shape, and a consumer built against an older list must still
-    /// decode `/health` from a newer venue.
+    /// A string rather than an enum because the taxonomy is open: it grows
+    /// with every new tick-fault shape, and a kind is a value naming what went
+    /// wrong rather than a key in the body's shape. Strictness governs which
+    /// fields the body has; it has nothing to say about which kinds exist, so
+    /// an unfamiliar kind decodes.
     pub kind: String,
     /// The source cursor the fault is dated by. Zero for a fault no source's
     /// cursor dates, such as an injected one; `kind` says which.
@@ -484,14 +498,29 @@ mod tests {
         assert_eq!(decoded, faulted);
     }
 
-    /// Additive fields must not break a reader, and a fault kind this build has
-    /// never heard of must still decode. The facts a consumer gates on stay
-    /// required: an absent one is a decode failure, not a default.
+    /// The body's shape is exact in both directions: an unknown field is
+    /// refused on `Health` and on the nested `HealthFault`, and a missing fact
+    /// is refused rather than defaulted. The fault kind is a value in an open
+    /// taxonomy, so a kind this build has never named still decodes.
     #[test]
-    fn health_tolerates_new_fields_and_kinds_but_not_missing_facts() {
-        let newer = r#"{"status":"faulted","oms_type":"netting","run_seed":7,"fault":{"symbol":"MNQ","kind":"some.future_fault","clock_ns":0},"reset_account_on_reconnect":true,"account_ttl_ms":5,"added_later":1}"#;
-        let decoded: Health = serde_json::from_str(newer).expect("a newer venue's body decodes");
+    fn health_refuses_unknown_and_missing_fields_but_not_unknown_kinds() {
+        let exact = r#"{"status":"faulted","oms_type":"netting","run_seed":7,"fault":{"symbol":"MNQ","kind":"some.future_fault","clock_ns":0},"reset_account_on_reconnect":true,"account_ttl_ms":5}"#;
+        let decoded: Health = serde_json::from_str(exact).expect("the exact body decodes");
         assert_eq!(decoded.fault.unwrap().kind, "some.future_fault");
+
+        let top = exact.replacen(
+            r#""account_ttl_ms":5"#,
+            r#""account_ttl_ms":5,"added_later":1"#,
+            1,
+        );
+        let err = serde_json::from_str::<Health>(&top).expect_err("an unknown field is refused");
+        assert!(err.to_string().contains("added_later"), "{err}");
+
+        let nested = exact.replacen(r#""clock_ns":0"#, r#""clock_ns":0,"added_later":1"#, 1);
+        let err =
+            serde_json::from_str::<Health>(&nested).expect_err("an unknown fault field is refused");
+        assert!(err.to_string().contains("added_later"), "{err}");
+
         let missing =
             r#"{"status":"ok","oms_type":"netting","run_seed":7,"fault":null,"account_ttl_ms":0}"#;
         assert!(

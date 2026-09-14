@@ -1392,13 +1392,14 @@ mod tests {
         assert_eq!(record.run_duration_ns, None);
     }
 
-    /// `ReadyRecord` does not set `deny_unknown_fields`, so serde happily
-    /// ignores the `symbol` key version 5 carried: the raw version check in
-    /// `parse_ready` is the only thing that refuses a stale record. Both halves
-    /// are asserted, because the refusal alone would hold just as well if serde
-    /// were strict, and then the test would be documenting the wrong mechanism.
+    /// Two independent refusals of the `symbol` key version 5 carried. A stale
+    /// version is refused by the raw version check in `parse_ready` before the
+    /// body is decoded, so it names the version rather than the key. At the
+    /// current version the key is refused by `ReadyRecord`'s own unknown-field
+    /// denial, so a writer that still emits it cannot pass by bumping the number.
+    /// Both halves are asserted because each is a different mechanism.
     #[test]
-    fn a_record_carrying_a_symbol_is_refused_by_version_alone() {
+    fn a_record_carrying_a_symbol_is_refused_by_version_and_by_field() {
         match parse_ready(&record_json_with_symbol(ReadyRecord::VERSION - 1)) {
             Err(LaunchError::Version {
                 reported,
@@ -1410,9 +1411,13 @@ mod tests {
             other => panic!("expected a version refusal, got {other:?}"),
         }
 
-        let record = parse_ready(&record_json_with_symbol(ReadyRecord::VERSION))
-            .expect("serde ignores the removed field once the version matches");
-        assert_eq!(record.version, ReadyRecord::VERSION);
+        match parse_ready(&record_json_with_symbol(ReadyRecord::VERSION)) {
+            Err(LaunchError::Malformed { source, .. }) => assert!(
+                source.contains("symbol"),
+                "refused for another reason: {source}"
+            ),
+            other => panic!("expected the removed field to be refused, got {other:?}"),
+        }
     }
 
     /// A reader that reports how many bytes it was actually asked to hand over.

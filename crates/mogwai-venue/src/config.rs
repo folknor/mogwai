@@ -730,6 +730,18 @@ fn effective_preset_walk(
                 .ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
             toml::from_str(text)?
         };
+        // A preset document is two tables and nothing else. Only those two are
+        // read below, so any other top-level key - a `[generator]` written one
+        // level too shallow, a misspelled `[provenence]` - would be dropped
+        // with the knobs it meant left at the inherited value.
+        for key in raw.keys() {
+            if key != "instrument" && key != "provenance" {
+                anyhow::bail!(
+                    "preset {name} has unknown top-level key {key}; a preset carries only \
+                     [instrument] and [provenance]"
+                );
+            }
+        }
         let mut instrument = raw
             .get("instrument")
             .and_then(toml::Value::as_table)
@@ -1158,10 +1170,12 @@ pub struct ConfiguredInstrument {
 /// NVDA default's `start_price` - without transcribing a whole fitted
 /// generator it has no fit for. A full table overlays every field, which is
 /// exactly the old all-or-nothing form; an absent table is the pure baseline.
-/// Unknown keys are refused by `refuse_unknown_subtable_keys` against
-/// `GENERATOR_KEYS` before this deserializes, so the permissive shape here
-/// swallows no typo.
+/// Unknown keys are refused twice: by `refuse_unknown_subtable_keys` against
+/// `GENERATOR_KEYS` before this deserializes, which names the table the
+/// operator wrote, and by `deny_unknown_fields` here, which holds for any
+/// decode that does not pass through that guard.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PartialGeneratorScalars {
     pub(crate) symbol: Option<String>,
     pub(crate) modal_tick: Option<Decimal>,
@@ -1437,8 +1451,11 @@ pub struct ConfiguredFees {
     pub(crate) taker: FeeRate,
 }
 
+/// Internally tagged, so the unknown-field refusal has to be stated: without
+/// it a `[fees.maker]` table with `basis = "per_contract"` and a stray
+/// `rate` beside `amount` decodes with the `rate` dropped.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(tag = "basis", rename_all = "snake_case")]
+#[serde(tag = "basis", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum FeeRate {
     BasisPoints { rate: Decimal },
     PerContract { amount: Decimal },
@@ -3381,17 +3398,17 @@ mod tests {
         let profile = profile_from_preset(name).unwrap();
         assert_eq!(
             profile.scalars.quoted_width.provenance(),
-            &CalibrationProvenance::Uncalibrated,
+            &CalibrationProvenance::Uncalibrated {},
             "{name} quoted width"
         );
         assert_eq!(
             profile.scalars.top_sizes.provenance,
-            CalibrationProvenance::Uncalibrated,
+            CalibrationProvenance::Uncalibrated {},
             "{name} top sizes"
         );
         assert_eq!(
             profile.scalars.trade_displacement_ticks.provenance(),
-            &CalibrationProvenance::Uncalibrated,
+            &CalibrationProvenance::Uncalibrated {},
             "{name} trade displacement"
         );
         for name in ["MNQ", "MES"] {
@@ -3523,6 +3540,70 @@ mod tests {
         let profile = profile_for(&cfg, Some("MNQ")).unwrap();
         assert!(matches!(profile.def.class, InstrumentClass::Spot { .. }));
         assert_eq!(profile.def.symbol.as_ref(), "MNQ");
+    }
+
+    /// A preset document is read for `[instrument]` and `[provenance]` alone,
+    /// so a third top-level table is refused by name rather than dropped. The
+    /// twin without the stray table resolves, so the refusal is the key's.
+    #[test]
+    fn a_preset_with_an_unknown_top_level_key_refuses() {
+        let good: toml::Table = toml::from_str(preset_text("BTCUSDT").unwrap()).unwrap();
+        let mut cfg = Config::default();
+        cfg.instrument_presets.insert("custom".into(), good.clone());
+        effective_preset_from(Some(&cfg), "custom").expect("well-formed twin resolves");
+        let mut bad = good;
+        bad.insert(
+            "generator".into(),
+            toml::Value::Table(toml::from_str("start_price = \"1\"").unwrap()),
+        );
+        cfg.instrument_presets.insert("custom".into(), bad);
+        let error = effective_preset_from(Some(&cfg), "custom")
+            .expect_err("an unread top-level table must refuse")
+            .to_string();
+        assert!(
+            error.contains("unknown top-level key generator"),
+            "the refusal must name the key: {error}"
+        );
+    }
+
+    /// The fee rate is internally tagged, where a stray key beside the tag's
+    /// own fields is dropped unless refusal is stated on the enum.
+    #[test]
+    fn a_fee_rate_with_a_stray_key_refuses() {
+        let good: toml::Table =
+            toml::from_str("basis = \"per_contract\"\namount = \"0.2\"").unwrap();
+        let decoded: Result<FeeRate, _> = good.clone().try_into();
+        decoded.expect("well-formed twin decodes");
+        let mut bad = good;
+        bad.insert("rate".into(), toml::Value::String("5".into()));
+        let decoded: Result<FeeRate, _> = bad.try_into();
+        let error = decoded
+            .expect_err("a key the basis does not read must refuse")
+            .to_string();
+        assert!(
+            error.contains("unknown field `rate`"),
+            "the refusal must name the key: {error}"
+        );
+    }
+
+    /// The generator overlay refuses an unknown key on its own, not only
+    /// through the `GENERATOR_KEYS` guard that `configured_from_table` runs
+    /// first: decoded directly here, past that guard.
+    #[test]
+    fn a_partial_generator_table_refuses_an_unknown_key() {
+        let good: toml::Table = toml::from_str("start_price = \"180\"").unwrap();
+        let decoded: Result<PartialGeneratorScalars, _> = good.clone().try_into();
+        decoded.expect("well-formed twin decodes");
+        let mut bad = good;
+        bad.insert("start_prcie".into(), toml::Value::String("180".into()));
+        let decoded: Result<PartialGeneratorScalars, _> = bad.try_into();
+        let error = decoded
+            .expect_err("a misspelled knob must refuse")
+            .to_string();
+        assert!(
+            error.contains("start_prcie"),
+            "the refusal must name the key: {error}"
+        );
     }
 
     /// Tape protocol 31: on a bundle whose calendar carries an activity

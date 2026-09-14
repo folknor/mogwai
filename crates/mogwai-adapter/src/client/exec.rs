@@ -154,9 +154,33 @@ async fn fetch_account(
             response.status.as_u16()
         )));
     }
-    serde_json::from_slice(&response.body)
+    decode_account_snapshot(&response.body)
         .context("decode account")
         .map_err(FetchAccountError::Other)
+}
+
+/// Decodes a `GET /account` body into the account it describes.
+///
+/// The body is an `AccountState` with two keys the pull response adds beside
+/// it: `clock`, which names the stamp's axis, and `sweep_passes`, which is
+/// evaluator observation this client has no reader for. `AccountState` refuses
+/// unknown keys, so those two are taken off by name first - and required, so a
+/// double serving a bare `AccountState` fails here rather than passing as the
+/// venue - and every other key is then the account's to accept or refuse.
+fn decode_account_snapshot(body: &[u8]) -> anyhow::Result<mogwai_protocol::AccountState> {
+    let mut object: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(body).context("the account body is not a JSON object")?;
+    match object.remove("clock") {
+        Some(serde_json::Value::String(axis)) if axis == "venue" => {}
+        other => anyhow::bail!("the account body must carry clock \"venue\", got {other:?}"),
+    }
+    anyhow::ensure!(
+        object
+            .remove("sweep_passes")
+            .is_some_and(|value| value.is_array()),
+        "the account body must carry a sweep_passes array"
+    );
+    serde_json::from_value(serde_json::Value::Object(object)).map_err(anyhow::Error::from)
 }
 
 /// Notes the venue's account label when it differs from the configured one.
@@ -3398,7 +3422,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                     "venue refused a venue-truth query; failing its waiter now"
                 );
             }
-            mogwai_protocol::AdmissionSubject::Frame => {
+            mogwai_protocol::AdmissionSubject::Frame {} => {
                 // A whole outbound batch the venue discarded, so the events it
                 // carried are simply gone. Same severity and same wording as
                 // the `FeedLagged` arm below, and for the same reason: the
@@ -3432,7 +3456,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
             // host to reconcile a book that was never in doubt.
             //
             // The venue does have a signal for genuinely lost execution output,
-            // and it is the `AdmissionSubject::Frame` arm above: a whole
+            // and it is the `AdmissionSubject::Frame {}` arm above: a whole
             // outbound batch the venue refused. That one means what this one was
             // saying.
             //
@@ -3953,6 +3977,48 @@ mod tests {
             )),
         );
         MogwaiExecutionClient::new(core, config).expect("test client builds")
+    }
+
+    /// The pull body decodes with its two response-only keys taken off by
+    /// name, and refuses everything else it does not know. The venue-shaped
+    /// body decodes and keeps its risk block; a stray key, a bare
+    /// `AccountState` without `clock`, and one without `sweep_passes` each
+    /// refuse. Removing `deny_unknown_fields` from `AccountState` turns the
+    /// stray-key arm green, which is what this pins from the consumer side.
+    #[test]
+    fn the_account_pull_body_decodes_by_name_and_refuses_the_rest() {
+        let venue = serde_json::json!({
+            "clock": "venue",
+            "account_id": "MOGWAI-001",
+            "balances": [],
+            "positions": [],
+            "risk": { "equity": "1", "peak_equity": "1", "day_open_equity": "1" },
+            "ts_event": 7,
+            "sweep_passes": [],
+        });
+        let account = decode_account_snapshot(venue.to_string().as_bytes())
+            .expect("the venue-shaped body decodes");
+        assert_eq!(account.ts_event, 7);
+        assert!(account.risk.is_some(), "the risk block rides the account");
+
+        let mut stray = venue.clone();
+        stray["surprise"] = serde_json::json!(1);
+        let error = format!(
+            "{:#}",
+            decode_account_snapshot(stray.to_string().as_bytes()).expect_err("a stray key refuses")
+        );
+        assert!(error.contains("surprise"), "{error}");
+
+        for missing in ["clock", "sweep_passes"] {
+            let mut body = venue.clone();
+            body.as_object_mut().expect("object").remove(missing);
+            let error = format!(
+                "{:#}",
+                decode_account_snapshot(body.to_string().as_bytes())
+                    .expect_err("a body missing a response key refuses")
+            );
+            assert!(error.contains(missing), "{error}");
+        }
     }
 
     /// A mirror seeded with one order in `status`, plus the context that reads

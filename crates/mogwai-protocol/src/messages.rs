@@ -716,7 +716,7 @@ impl TimeInForce {
 /// is one party and names its own frames, while the inbound side has no
 /// singular party to be named after.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Command {
     SubmitOrder(SubmitOrder),
     /// Submit a linked group in one step: every member accepted, or the whole
@@ -995,6 +995,7 @@ impl WireOrderStatus {
 
 /// One order's venue-truth status row on an [`OrderStatusSnapshot`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderStatusInfo {
     pub client_order_id: ClientOrderId,
     pub venue_order_id: VenueOrderId,
@@ -1066,6 +1067,7 @@ pub struct OrderStatusInfo {
 /// read at `ts_event`. An empty `orders` for a targeted query means the venue
 /// never accepted that id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderStatusSnapshot {
     /// The request's correlation id, echoed verbatim.
     pub request_id: String,
@@ -1077,6 +1079,7 @@ pub struct OrderStatusSnapshot {
 /// order they booked. Each fill appears exactly once regardless of how many
 /// `OrderFilled` events the wire carried for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FillSnapshot {
     /// The request's correlation id, echoed verbatim.
     pub request_id: String,
@@ -1085,6 +1088,7 @@ pub struct FillSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitOrder {
     pub client_order_id: ClientOrderId,
     pub symbol: Symbol,
@@ -1333,6 +1337,7 @@ pub fn validate_submit_group(
 /// the sibling is reaped where the fill is committed, in the same batch, rather
 /// than on a later sweep that a second fill could beat.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct OrderLink {
     /// The list's identity, shared by every member. Carried for the consumer's
     /// benefit (nautilus keys an `OrderList` by it); the venue's own linkage
@@ -1669,7 +1674,7 @@ fn validate_order_link(order: &SubmitOrder, link: &OrderLink) -> Result<(), &'st
 /// live order to Rejected because its cancel was refused would be an invalid
 /// transition (see `VenueMessage::OrderCancelRejected`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", deny_unknown_fields)]
 pub enum AdmissionSubject {
     Submit {
         client_order_id: ClientOrderId,
@@ -1700,7 +1705,12 @@ pub enum AdmissionSubject {
         query: QueryKind,
     },
     /// A frame the venue could not decode, or could not attribute at all.
-    Frame,
+    ///
+    /// An empty struct variant rather than a unit one, with the wire form
+    /// unchanged as the tag alone: serde ignores unknown keys beside the tag of
+    /// a unit variant even under `deny_unknown_fields`, so a unit `Frame` would
+    /// be the one subject that silently drops a key.
+    Frame {},
 }
 
 /// Hand-written so every embedded id is truncated to `MAX_ECHOED_ID_LEN` on a
@@ -1768,7 +1778,7 @@ impl Serialize for AdmissionSubject {
                 request_id: bounded(request_id),
                 query: *query,
             },
-            Self::Frame => BoundedSubject::Frame,
+            Self::Frame {} => BoundedSubject::Frame,
         }
         .serialize(serializer)
     }
@@ -1834,7 +1844,7 @@ pub fn validate_modify_order(
 /// divergences mogwai is built to emit (partials via `leaves_qty`, rejects,
 /// duplicates, delays, drops) are expressed entirely through this stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum VenueMessage {
     /// The run reached its declared simulated duration. Venue-wide: it is true
     /// for every passenger at once and nothing further comes from this venue.
@@ -2192,6 +2202,95 @@ struct TagProbe<'a> {
     kind: std::borrow::Cow<'a, str>,
 }
 
+/// The hot path's `Trade` payload decoder: [`TradeTick`]'s fields plus the tag.
+///
+/// It exists because `TradeTick` refuses unknown fields. The general decoder
+/// strips `type` before the payload sees it, but the hot path streams the
+/// payload from the whole frame, tag included, so decoding `TradeTick` there
+/// directly would refuse every frame. This mirror accepts the tag it was
+/// dispatched on and refuses every other stranger, so the two paths refuse the
+/// same frames. The tag's value is skipped rather than re-read: the probe
+/// already matched it, and skipping a scalar allocates nothing.
+///
+/// Drift is a compile error in one direction only: the `From` below builds a
+/// `TradeTick` literal, so a field added to or removed from `TradeTick` breaks
+/// the build until this mirror follows. A serde attribute changed on one and
+/// not the other is not caught here; the decimal spellings are pinned by
+/// `every_wire_decimal_refuses_a_numeric_spelling`, which drives this path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TradeFrame {
+    #[serde(rename = "type")]
+    _tag: serde::de::IgnoredAny,
+    symbol: Symbol,
+    #[serde(with = "rust_decimal::serde::str")]
+    price: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    size: Decimal,
+    aggressor: AggressorSide,
+    ts_event: u64,
+}
+
+impl From<TradeFrame> for TradeTick {
+    fn from(frame: TradeFrame) -> Self {
+        let TradeFrame {
+            _tag,
+            symbol,
+            price,
+            size,
+            aggressor,
+            ts_event,
+        } = frame;
+        TradeTick {
+            symbol,
+            price,
+            size,
+            aggressor,
+            ts_event,
+        }
+    }
+}
+
+/// The `Quote` twin of [`TradeFrame`], under the same contract.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuoteFrame {
+    #[serde(rename = "type")]
+    _tag: serde::de::IgnoredAny,
+    symbol: Symbol,
+    #[serde(with = "rust_decimal::serde::str")]
+    bid_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    ask_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    bid_sz: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    ask_sz: Decimal,
+    ts_event: u64,
+}
+
+impl From<QuoteFrame> for QuoteTick {
+    fn from(frame: QuoteFrame) -> Self {
+        let QuoteFrame {
+            _tag,
+            symbol,
+            bid_px,
+            ask_px,
+            bid_sz,
+            ask_sz,
+            ts_event,
+        } = frame;
+        QuoteTick {
+            symbol,
+            bid_px,
+            ask_px,
+            bid_sz,
+            ask_sz,
+            ts_event,
+        }
+    }
+}
+
 impl VenueMessage {
     /// Decode a venue frame without serde's internally-tagged content buffer
     /// on the market-data hot path. The small tag probe borrows from `json`,
@@ -2203,8 +2302,8 @@ impl VenueMessage {
     /// see the private `TagProbe` for the escape case that makes that non-obvious.
     pub fn from_json_str(json: &str) -> serde_json::Result<Self> {
         match serde_json::from_str::<TagProbe<'_>>(json)?.kind.as_ref() {
-            "Trade" => serde_json::from_str(json).map(Self::Trade),
-            "Quote" => serde_json::from_str(json).map(Self::Quote),
+            "Trade" => serde_json::from_str::<TradeFrame>(json).map(|f| Self::Trade(f.into())),
+            "Quote" => serde_json::from_str::<QuoteFrame>(json).map(|f| Self::Quote(f.into())),
             _ => serde_json::from_str(json),
         }
     }
@@ -2212,8 +2311,8 @@ impl VenueMessage {
     /// Byte-slice twin of [`Self::from_json_str`].
     pub fn from_json_slice(json: &[u8]) -> serde_json::Result<Self> {
         match serde_json::from_slice::<TagProbe<'_>>(json)?.kind.as_ref() {
-            "Trade" => serde_json::from_slice(json).map(Self::Trade),
-            "Quote" => serde_json::from_slice(json).map(Self::Quote),
+            "Trade" => serde_json::from_slice::<TradeFrame>(json).map(|f| Self::Trade(f.into())),
+            "Quote" => serde_json::from_slice::<QuoteFrame>(json).map(|f| Self::Quote(f.into())),
             _ => serde_json::from_slice(json),
         }
     }
@@ -2291,6 +2390,7 @@ impl VenueMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderFilled {
     pub client_order_id: ClientOrderId,
     pub venue_order_id: VenueOrderId,
@@ -2322,6 +2422,7 @@ pub enum LiquiditySide {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountState {
     pub account_id: AccountId,
     pub balances: Vec<Balance>,
@@ -2344,16 +2445,16 @@ pub struct AccountState {
     /// path, and would publish a budget the enforcement had not acted on. It
     /// carries the same staleness the account's marks already do.
     ///
-    /// Optional on the wire because it is additive: a decoder built before this
-    /// field ignores it and sees exactly what it saw before. That is safe here
-    /// in a way it is not for a terminal frame - a missing budget is a strategy
-    /// that does not size against it, never a false transition.
+    /// Optional on the wire because an unpoliced account has no budget, not for
+    /// skew tolerance: `AccountState` refuses unknown keys, and every reader
+    /// builds from the same tree as the venue, so no decoder predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<crate::risk::RiskState>,
     pub ts_event: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PostedMargin {
     pub symbol: Symbol,
     pub currency: String,
@@ -2364,6 +2465,7 @@ pub struct PostedMargin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Balance {
     pub currency: String,
     #[serde(with = "rust_decimal::serde::str")]
@@ -2402,6 +2504,7 @@ pub struct Balance {
 /// sum to it by construction rather than by a second traversal that could
 /// disagree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeldBreakdown {
     /// Funds reserved against resting orders. Released by cancelling or
     /// filling them.
@@ -2420,6 +2523,7 @@ pub struct HeldBreakdown {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Position {
     pub symbol: Symbol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2445,6 +2549,7 @@ pub struct Position {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeTick {
     pub symbol: Symbol,
     #[serde(with = "rust_decimal::serde::str")]
@@ -2456,6 +2561,7 @@ pub struct TradeTick {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuoteTick {
     pub symbol: Symbol,
     #[serde(with = "rust_decimal::serde::str")]
@@ -3424,7 +3530,7 @@ mod tests {
                 request_id: worst_id.clone(),
                 query: QueryKind::Fills,
             },
-            AdmissionSubject::Frame,
+            AdmissionSubject::Frame {},
         ];
         let mut widest_len = 0usize;
         for subject in subjects {
@@ -3649,5 +3755,119 @@ mod tests {
             validate_submit_order(&bare, SubmitPhase::PostStamp),
             Err("Market order must carry the price the venue stamped")
         );
+    }
+
+    /// Every shared wire type refuses a key it does not declare, in both
+    /// directions. Venue, adapter and consumer build from one tree, so no
+    /// reader can be older than a writer, and a tolerated stranger is only a
+    /// field one side sends and the other silently drops.
+    ///
+    /// Each row is a frame the decoder takes, then the same frame with one
+    /// stranger added at a stated depth. The accepted half is what makes the
+    /// refusal mean "unknown key" rather than "broken fixture". Rows cover a
+    /// newtype-wrapped struct (`SubmitOrder`), a tagged-enum struct variant
+    /// (`CancelOrder`, `Heartbeat`), the converted fieldless variant
+    /// (`AdmissionSubject::Frame {}`, which as a unit variant ignored strangers
+    /// even under the attribute), a nested struct (`Balance` inside
+    /// `AccountState`), and both hot-path frames through all three decoders.
+    #[test]
+    fn every_wire_type_refuses_a_key_it_does_not_declare() {
+        // (accepted frame, the same frame carrying a stranger).
+        let commands = [
+            (
+                r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}"#,
+                r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc","stranger":1}"#,
+            ),
+            (
+                r#"{"type":"CancelOrder","client_order_id":"O-1"}"#,
+                r#"{"type":"CancelOrder","client_order_id":"O-1","stranger":1}"#,
+            ),
+        ];
+        for (accepted, refused) in commands {
+            assert!(
+                serde_json::from_str::<Command>(accepted).is_ok(),
+                "fixture must decode: {accepted}"
+            );
+            assert!(
+                serde_json::from_str::<Command>(refused).is_err(),
+                "a command must refuse an undeclared key: {refused}"
+            );
+        }
+
+        let venue = [
+            (
+                r#"{"type":"Heartbeat","ts_event":1}"#,
+                r#"{"type":"Heartbeat","ts_event":1,"stranger":1}"#,
+            ),
+            (
+                r#"{"type":"AdmissionRejected","subject":{"kind":"Frame"},"reason":"r","retryable":true,"ts_event":1}"#,
+                r#"{"type":"AdmissionRejected","subject":{"kind":"Frame","stranger":1},"reason":"r","retryable":true,"ts_event":1}"#,
+            ),
+            (
+                r#"{"type":"AccountState","account_id":"MOGWAI-001","balances":[{"currency":"USDT","total":"1","free":"1","locked":"0"}],"positions":[],"ts_event":1}"#,
+                r#"{"type":"AccountState","account_id":"MOGWAI-001","balances":[{"currency":"USDT","total":"1","free":"1","locked":"0","stranger":1}],"positions":[],"ts_event":1}"#,
+            ),
+            (
+                r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#,
+                r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11,"stranger":1}"#,
+            ),
+            (
+                r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#,
+                r#"{"stranger":1,"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#,
+            ),
+        ];
+        for (accepted, refused) in venue {
+            assert!(
+                serde_json::from_str::<VenueMessage>(accepted).is_ok(),
+                "fixture must decode: {accepted}"
+            );
+            assert!(
+                VenueMessage::from_json_str(accepted).is_ok(),
+                "hot path must take the fixture: {accepted}"
+            );
+            assert!(
+                VenueMessage::from_json_slice(accepted.as_bytes()).is_ok(),
+                "hot path must take the fixture: {accepted}"
+            );
+            assert!(
+                serde_json::from_str::<VenueMessage>(refused).is_err(),
+                "general decoder must refuse an undeclared key: {refused}"
+            );
+            assert!(
+                VenueMessage::from_json_str(refused).is_err(),
+                "str hot path must refuse an undeclared key: {refused}"
+            );
+            assert!(
+                VenueMessage::from_json_slice(refused.as_bytes()).is_err(),
+                "slice hot path must refuse an undeclared key: {refused}"
+            );
+        }
+
+        // The untagged history row has no attribute of its own to carry; its
+        // strictness is its members'. A trade row with a stranger matches
+        // neither shape and is refused rather than read as a trade.
+        let trade_row =
+            r#"{"symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#;
+        assert!(matches!(
+            serde_json::from_str::<HistoryRow>(trade_row),
+            Ok(HistoryRow::Trade(_))
+        ));
+        let stranger_row = r#"{"symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11,"stranger":1}"#;
+        assert!(serde_json::from_str::<HistoryRow>(stranger_row).is_err());
+    }
+
+    /// The hot path's mirror frames exist only because the payload types
+    /// refuse strangers and the hot path decodes the payload with the tag still
+    /// in the object. Decoding `TradeTick` or `QuoteTick` directly from a
+    /// tagged frame must therefore fail; if it ever succeeds, the payload
+    /// types have lost their strictness and the mirrors are dead weight.
+    #[test]
+    fn a_payload_type_refuses_the_tag_the_mirror_frame_accepts() {
+        let trade = r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#;
+        let quote = r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#;
+        assert!(serde_json::from_str::<TradeTick>(trade).is_err());
+        assert!(serde_json::from_str::<QuoteTick>(quote).is_err());
+        assert!(serde_json::from_str::<TradeFrame>(trade).is_ok());
+        assert!(serde_json::from_str::<QuoteFrame>(quote).is_ok());
     }
 }

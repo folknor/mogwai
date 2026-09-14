@@ -225,7 +225,7 @@ const NS_PER_WEEK: u64 = 7 * 24 * NS_PER_HOUR;
 
 /// Instrument-resolved protocol-12b arrival seam.
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(tag = "family", rename_all = "snake_case")]
+#[serde(tag = "family", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArrivalConfig {
     EventMarkov {
         quiet_share: f64,
@@ -2089,10 +2089,17 @@ mod tests {
         }
     }
 
+    /// Refuses unknown keys, so every key a transcript file carries is a key
+    /// this harness reads. `exposure` and `parameter_point` are descriptive
+    /// prose the regenerator writes; they are named here so a key the
+    /// regenerator adds later is a refusal rather than a silent drop.
     #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Transcript {
         kind: String,
         correctness_claim: String,
+        exposure: String,
+        parameter_point: String,
         family: String,
         seed: u64,
         origin_ns: u64,
@@ -2100,7 +2107,13 @@ mod tests {
         records: Vec<TranscriptRecord>,
     }
 
+    /// The exposure every committed transcript was generated under, and the
+    /// one both replay harnesses below construct: the fingerprint session
+    /// profile, fully open.
+    const TRANSCRIPT_EXPOSURE: &str = "fixed fully-open fingerprint session profile used by the kernel/GeneratedSource parity harness";
+
     #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct TranscriptRecord {
         parent_ts_ns: u64,
         child_count: u32,
@@ -2173,6 +2186,8 @@ mod tests {
             let transcript: Transcript = serde_json::from_str(raw).expect("valid transcript JSON");
             assert_eq!(transcript.kind, "regression-transcript");
             assert_eq!(transcript.correctness_claim, "none");
+            assert_eq!(transcript.exposure, TRANSCRIPT_EXPOSURE);
+            assert!(!transcript.parameter_point.trim().is_empty());
             assert_eq!(transcript.records.len(), 10_000);
 
             let kernel = transcript_kernel(&transcript.family, &transcript.params);
@@ -2254,6 +2269,7 @@ mod tests {
             include_str!("../../tests/fixtures/arrival-transcript-self-exciting-v2-phi085.json");
         let transcript: Transcript = serde_json::from_str(raw).expect("valid pinned V2 walk");
         assert_eq!(transcript.family, "self_exciting");
+        assert_eq!(transcript.exposure, TRANSCRIPT_EXPOSURE);
         assert_eq!(transcript.params["phi"], 0.85);
         let fp = Fingerprint::from_repo_json();
         let kernel = transcript_kernel(&transcript.family, &transcript.params);
@@ -2285,6 +2301,57 @@ mod tests {
             assert_eq!(actual.child_count, expected.child_count);
             assert_eq!(actual.latent_x.to_bits(), expected.latent_x_bits);
         }
+    }
+
+    /// An arrival table carrying a key its family has no reader for is refused,
+    /// not decoded with the key dropped. `tau_s` under `event_markov` is the
+    /// shape: an operator believing they set a time constant that family has
+    /// no use for. The well-formed twin decodes, so the refusal is the key's.
+    #[test]
+    fn an_arrival_config_refuses_a_key_its_family_does_not_read() {
+        let good = serde_json::json!({
+            "family": "event_markov",
+            "quiet_share": 0.5,
+            "switch_rate": 0.1,
+            "rate_ratio": 4.0,
+        });
+        serde_json::from_value::<ArrivalConfig>(good.clone()).expect("well-formed twin decodes");
+        let mut bad = good;
+        bad["tau_s"] = serde_json::json!(10.0);
+        let error = serde_json::from_value::<ArrivalConfig>(bad)
+            .expect_err("an unread key must be refused")
+            .to_string();
+        assert!(error.contains("tau_s"), "refusal names the key: {error}");
+    }
+
+    /// The transcript shape refuses a key it does not read, so a field the
+    /// regenerator starts writing cannot ride along unasserted.
+    #[test]
+    fn a_transcript_refuses_an_unknown_key() {
+        let good = serde_json::json!({
+            "kind": "regression-transcript",
+            "correctness_claim": "none",
+            "exposure": TRANSCRIPT_EXPOSURE,
+            "parameter_point": "p",
+            "family": "log_ou_cox",
+            "seed": 1,
+            "origin_ns": 0,
+            "params": {},
+            "records": [{ "parent_ts_ns": 1, "child_count": 1, "latent_x_bits": 0 }],
+        });
+        serde_json::from_value::<Transcript>(good.clone()).expect("well-formed twin decodes");
+        let mut top = good.clone();
+        top["surprise"] = serde_json::json!(true);
+        let error = serde_json::from_value::<Transcript>(top)
+            .expect_err("an unknown transcript key must be refused")
+            .to_string();
+        assert!(error.contains("surprise"), "refusal names the key: {error}");
+        let mut record = good;
+        record["records"][0]["surprise"] = serde_json::json!(true);
+        let error = serde_json::from_value::<Transcript>(record)
+            .expect_err("an unknown record key must be refused")
+            .to_string();
+        assert!(error.contains("surprise"), "refusal names the key: {error}");
     }
 
     /// `sigma_y` is bounded above, and the bound is the one the constant names

@@ -159,6 +159,7 @@ pub struct SessionAcc {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderedCount {
     pub session_date: String,
     pub segment_index: u8,

@@ -71,8 +71,11 @@ fn process_callsign() -> &'static str {
     })
 }
 
+/// Decoded with missing keys defaulted and unknown keys refused. The two are
+/// orthogonal: a host may omit any knob, but a misspelled one (`dial_timout_secs`)
+/// is an error rather than a silent default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MogwaiDataClientConfig {
     /// The account this client trades under, both as the Nautilus label
     /// attached to client metadata and as the venue ledger named on
@@ -311,8 +314,10 @@ impl ClientConfig for MogwaiDataClientConfig {
     }
 }
 
+/// Decoded on the same terms as [`MogwaiDataClientConfig`]: missing keys
+/// default, unknown keys refuse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MogwaiExecClientConfig {
     pub account_id: AccountId,
     /// Base URL of the running mogwai venue.
@@ -782,6 +787,35 @@ mod tests {
             account_ttl_ms: 0,
             version_string: "test".into(),
         }
+    }
+
+    /// Both configs refuse a misspelled key rather than decoding it as the
+    /// default of the knob it meant. The twin with the key spelled right
+    /// decodes and carries the value, so the refusal is the spelling's, and
+    /// an empty object still decodes, so defaulting survives the refusal.
+    #[test]
+    fn both_configs_refuse_an_unknown_key_and_still_default_missing_ones() {
+        let good = serde_json::json!({ "base_url": "ws://127.0.0.1:1", "dial_timeout_secs": 9 });
+        let data: MogwaiDataClientConfig =
+            serde_json::from_value(good.clone()).expect("well-formed data twin decodes");
+        assert_eq!(data.dial_timeout_secs, 9);
+        let exec: MogwaiExecClientConfig =
+            serde_json::from_value(good).expect("well-formed exec twin decodes");
+        assert_eq!(exec.dial_timeout_secs, 9);
+        serde_json::from_value::<MogwaiDataClientConfig>(serde_json::json!({}))
+            .expect("an empty data config defaults every knob");
+        serde_json::from_value::<MogwaiExecClientConfig>(serde_json::json!({}))
+            .expect("an empty exec config defaults every knob");
+
+        let bad = serde_json::json!({ "base_url": "ws://127.0.0.1:1", "dial_timout_secs": 9 });
+        let data_error = serde_json::from_value::<MogwaiDataClientConfig>(bad.clone())
+            .expect_err("a misspelled data knob must refuse")
+            .to_string();
+        assert!(data_error.contains("dial_timout_secs"), "{data_error}");
+        let exec_error = serde_json::from_value::<MogwaiExecClientConfig>(bad)
+            .expect_err("a misspelled exec knob must refuse")
+            .to_string();
+        assert!(exec_error.contains("dial_timout_secs"), "{exec_error}");
     }
 
     #[test]
