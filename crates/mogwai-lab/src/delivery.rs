@@ -60,7 +60,6 @@ pub fn sha256_file(path: &Path) -> LabResult<String> {
 struct JobsManifest {
     #[serde(rename = "_version")]
     _version: u32,
-    #[serde(default)]
     jobs: BTreeMap<String, DeliveryEntry>,
 }
 
@@ -68,12 +67,15 @@ struct JobsManifest {
 /// (`compression`, `encoding`, `planned_quote`, `split_duration`,
 /// `submitted_at`) and the reconciled form (`intent_at`,
 /// `live_quote_at_intent`, `reconciled_at`), so those keys are optional.
+/// Every entry of both generations carries `state`, `job_id`, `files`,
+/// `schema`, `scope`, `window` and `live_quote_at_submit`, so those are
+/// required: an absent one refuses at decode, naming the key, rather than
+/// reaching the verifier as `None` or an empty inventory.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeliveryEntry {
-    state: Option<String>,
-    job_id: Option<String>,
-    #[serde(default)]
+    state: String,
+    job_id: String,
     files: BTreeMap<String, String>,
     #[serde(rename = "schema")]
     _schema: String,
@@ -101,6 +103,13 @@ struct DeliveryEntry {
     _reconciled_at: Option<String>,
 }
 
+/// The vendor's delivered `manifest.json`. Deliberately tolerant (no
+/// `deny_unknown_fields`, optional `job_id`, defaulted `files`): it is a
+/// third-party document, and no test, fixture or document in this tree
+/// records its full shape, so there is nothing to type it strictly against.
+/// The tolerance is bounded by what follows: a missing `job_id` cannot equal
+/// the ledger's required one, and missing `files` cannot equal a non-empty
+/// inventory.
 #[derive(Deserialize)]
 struct Manifest {
     job_id: Option<String>,
@@ -198,8 +207,12 @@ pub fn input_entry_job_id(jobs_manifest: &Path, delivery_key: &str) -> LabResult
     let jobs: JobsManifest = serde_json::from_str(&std::fs::read_to_string(jobs_manifest)?)?;
     jobs.jobs
         .get(delivery_key)
-        .and_then(|entry| entry.job_id.clone())
-        .ok_or_else(|| LabError::refusal(format!("delivery {delivery_key} carries no job id")))
+        .map(|entry| entry.job_id.clone())
+        .ok_or_else(|| {
+            LabError::refusal(format!(
+                "jobs manifest carries no delivery for {delivery_key}"
+            ))
+        })
 }
 
 fn verify_input_bound(
@@ -215,13 +228,13 @@ fn verify_input_bound(
             "jobs manifest carries no delivery for {delivery_key}"
         ))
     })?;
-    if entry.state.as_deref() != Some("downloaded") {
+    if entry.state != "downloaded" {
         return Err(LabError::refusal(format!(
             "delivery state is {:?}, not downloaded",
             entry.state
         )));
     }
-    if expected_job.is_some_and(|job| entry.job_id.as_deref() != Some(job)) {
+    if expected_job.is_some_and(|job| entry.job_id != job) {
         return Err(LabError::refusal(format!(
             "jobs manifest names job {:?}, the sub-contract binds {}",
             entry.job_id,
@@ -231,7 +244,7 @@ fn verify_input_bound(
     let manifest_path = directory.join("manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)?;
     let manifest: Manifest = serde_json::from_str(&manifest_text)?;
-    if manifest.job_id != entry.job_id {
+    if manifest.job_id.as_deref() != Some(entry.job_id.as_str()) {
         return Err(LabError::refusal(format!(
             "delivered manifest names job {:?}, not jobs-manifest job {:?}",
             manifest.job_id, entry.job_id
@@ -306,4 +319,71 @@ fn verify_input_bound(
         hashes.insert(name, actual);
     }
     Ok(hashes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEDGER: &str = include_str!("../../../analysis/databento-jobs.json");
+
+    /// A reconciled-generation entry with every key present, as a JSON object
+    /// a test can remove one key from.
+    fn entry() -> serde_json::Value {
+        serde_json::json!({
+            "files": {"manifest.json": "00"},
+            "intent_at": "2026-08-05T09:22:34+00:00",
+            "job_id": "GLBX-20260805-JUBCRPRLG8",
+            "live_quote_at_intent": 24.0,
+            "live_quote_at_submit": 24.0,
+            "reconciled_at": "2026-08-05T09:23:54+00:00",
+            "schema": "trades",
+            "scope": "pairv",
+            "state": "downloaded",
+            "window": "2026-07.2wk"
+        })
+    }
+
+    fn decode(entry: &serde_json::Value) -> Result<JobsManifest, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({"_version": 1, "jobs": {"k": entry}}))
+    }
+
+    #[test]
+    fn the_committed_ledger_decodes_under_the_strict_entry() {
+        let jobs: JobsManifest =
+            serde_json::from_str(LEDGER).expect("the committed ledger decodes");
+        assert!(!jobs.jobs.is_empty());
+        assert!(
+            decode(&entry()).is_ok(),
+            "the test entry is itself well formed"
+        );
+    }
+
+    #[test]
+    fn a_ledger_entry_missing_a_required_key_refuses_naming_it() {
+        for key in ["state", "job_id", "files"] {
+            let mut stripped = entry();
+            stripped.as_object_mut().expect("an object").remove(key);
+            let Err(error) = decode(&stripped) else {
+                panic!("an entry without {key} must refuse at decode");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("missing field `{key}`")),
+                "the refusal must name {key}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ledger_without_a_jobs_map_refuses() {
+        let error = serde_json::from_str::<JobsManifest>(r#"{"_version": 1}"#)
+            .err()
+            .expect("a ledger without jobs must refuse");
+        assert!(
+            error.to_string().contains("missing field `jobs`"),
+            "{error}"
+        );
+    }
 }

@@ -327,7 +327,17 @@ pub struct ScreenRefusal {
 pub struct SeedWalk {
     pub seed: u64,
     pub projection: ScreenReduced,
+    /// The walk's per-session JSON, kept in test builds only for the legacy
+    /// differential oracle and the layer-1 reproduction test.
+    ///
+    /// `serde(skip)` so the cache format is the same in every build: without
+    /// it a test build wrote a `sessions` key a normal build's
+    /// `deny_unknown_fields` refused, and a normal build's walk lacked a key a
+    /// test build required. The consequence is that a cache-served walk
+    /// carries no sessions, so anything reading this field must drive the
+    /// projection with `ScreenContext::measured` rather than read the cache.
     #[cfg(test)]
+    #[serde(skip)]
     pub sessions: Vec<Value>,
     pub parents: u64,
     /// Child prints pushed into the accumulator - the screen's work-size
@@ -4400,7 +4410,6 @@ mod tests {
         let refused = SeedWalk {
             seed: 201,
             projection: ScreenReduced::default(),
-            #[cfg(test)]
             sessions: Vec::new(),
             parents: 0,
             prints: 0,
@@ -4430,6 +4439,38 @@ mod tests {
         let encoded = serde_json::to_string(&measured).expect("serializes");
         let decoded: SeedWalk = serde_json::from_str(&encoded).expect("deserializes");
         assert_eq!(decoded.realized_mean_gap_s, Some(0.0608));
+    }
+
+    /// The walk cache is one format in every build. The test-only `sessions`
+    /// field used to serialize, so a test build wrote a key a normal build
+    /// refused under `deny_unknown_fields` and required a key a normal build
+    /// never wrote.
+    #[test]
+    fn a_cached_walk_has_the_same_shape_in_a_test_build() {
+        let walk = SeedWalk {
+            seed: 7,
+            projection: ScreenReduced::default(),
+            sessions: vec![json!({"block1_hist": []})],
+            parents: 3,
+            prints: 9,
+            realized_mean_gap_s: Some(1.0),
+            refusal: None,
+            cost_s: 0.5,
+        };
+        let encoded: Value = serde_json::to_value(&walk).expect("a walk serializes");
+        assert!(
+            encoded.get("sessions").is_none(),
+            "the test-only sessions must not reach the cache: {encoded}"
+        );
+        let decoded: SeedWalk =
+            serde_json::from_value(encoded.clone()).expect("a walk with no sessions key decodes");
+        assert!(decoded.sessions.is_empty());
+        let mut stray = encoded;
+        stray["sessions"] = json!([]);
+        assert!(
+            serde_json::from_value::<SeedWalk>(stray).is_err(),
+            "a sessions key is an unknown field in every build"
+        );
     }
 
     #[test]

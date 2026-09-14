@@ -4,7 +4,7 @@
   "family": "self_exciting",
   "kind": "regression-transcript",
   "origin_ns": 0,
-  "parameter_point": "frozen coarse-grid point nearest the family domain centre",
+  "parameter_point": "phi 0.85, a self-exciting point already valid under arrival kernel version 2 (below its phi 0.90 ceiling), pinned so the version 3 domain enlargement is gated on unchanged output; tau_s is the self-exciting transcript's",
   "params": {
     "phi": 0.85,
     "tau_s": 34.42651863295482

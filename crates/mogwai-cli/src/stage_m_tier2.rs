@@ -208,11 +208,330 @@ struct Month {
     thin: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Verdict {
     rejected: bool,
     statistic: f64,
     critical_value: f64,
+}
+
+/// One line of the append-only Tier 2 ledger. The ledger is this program's own
+/// output, so every record is typed exactly: an unknown `record` tag, an
+/// unknown key, or a missing key refuses at read instead of comparing as JSON
+/// `null` in a check like "was C3 evaluated". Records are written through the
+/// same types, so the reader and the writer cannot drift apart.
+///
+/// `Option` fields that the writer always emits carry
+/// `deserialize_with = "Option::deserialize"`: serde's derive otherwise reads
+/// an absent `Option` key as `None`, which is exactly the silent tolerance
+/// this typing exists to remove.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "record", rename_all = "snake_case")]
+enum Record {
+    ExcessBaseline(ExcessBaselineRecord),
+    CandidateCommitted(CommittedRecord),
+    CandidateEvaluation(EvaluationRecord),
+    Designation(DesignationRecord),
+    Continuation(ContinuationRecord),
+    SearchClosed(SearchClosedRecord),
+}
+
+impl Record {
+    /// The top-level candidate id, carried by commitments and evaluations.
+    fn candidate_id(&self) -> Option<&str> {
+        match self {
+            Self::CandidateCommitted(x) => Some(&x.candidate_id),
+            Self::CandidateEvaluation(x) => Some(&x.candidate_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExcessBaselineRecord {
+    outcome: String,
+    #[serde(rename = "W", deserialize_with = "Option::deserialize")]
+    w: Option<f64>,
+    contributing_new_design_months: usize,
+    months: Vec<BaselineMonth>,
+    definition: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaselineMonth {
+    month: u64,
+    eligible_sessions: Vec<String>,
+    excluded_sessions: Vec<String>,
+    /// `None` below two complete sessions, and also for a nonfinite variance,
+    /// which JSON can only carry as `null`.
+    #[serde(rename = "W_m", deserialize_with = "Option::deserialize")]
+    w_m: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedRecord {
+    candidate_id: String,
+    search_order: usize,
+    specification: Candidate,
+    specification_sha256: String,
+    state: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationRecord {
+    candidate_id: String,
+    search_order: usize,
+    admissible: bool,
+    hurdle: Hurdles,
+    stage_f_handoff: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hurdles {
+    #[serde(rename = "H1")]
+    h1: H1,
+    #[serde(rename = "H2")]
+    h2: H2,
+    #[serde(rename = "H3")]
+    h3: H3,
+    #[serde(rename = "H4")]
+    h4: H4,
+    #[serde(rename = "H5")]
+    h5: H5,
+    #[serde(rename = "H6")]
+    h6: H6,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H1 {
+    passed: bool,
+    coordinates: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H2 {
+    passed: bool,
+    joint_rule: JointRule,
+    level: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H3 {
+    passed: bool,
+    outside_count: usize,
+    months: Vec<H3Month>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H3Month {
+    month: u64,
+    thin: bool,
+    verdict: Verdict,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H4 {
+    passed: bool,
+    rejection_count: usize,
+    controls: Vec<ControlRow>,
+}
+
+/// A control walk either reached a verdict or refused. Untagged because the
+/// written form distinguishes the two only by which key is present; each arm
+/// denies unknown fields, so a row with both, neither, or a stray key refuses.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ControlRow {
+    Judged(JudgedControl),
+    Refused(RefusedControl),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgedControl {
+    walk: u64,
+    verdict: Verdict,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefusedControl {
+    walk: u64,
+    refusal: Refusal,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H5 {
+    passed: bool,
+    required_each: usize,
+    no_slow: NoSlow,
+    excess: Excess,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoSlow {
+    rejection_count: usize,
+    simulations: Vec<SimulationRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Excess {
+    rejection_count: usize,
+    #[serde(rename = "W")]
+    w: f64,
+    #[serde(rename = "W_months")]
+    w_months: Vec<BaselineMonth>,
+    simulations: Vec<SimulationRow>,
+}
+
+/// One H5 simulation, verdict or refusal; untagged for the reason
+/// [`ControlRow`] is.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SimulationRow {
+    Judged(JudgedSimulation),
+    Refused(RefusedSimulation),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgedSimulation {
+    simulation: usize,
+    held_month: u64,
+    seed: u64,
+    incomplete_sessions_unperturbed: usize,
+    verdict: Verdict,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefusedSimulation {
+    simulation: usize,
+    held_month: u64,
+    seed: u64,
+    incomplete_sessions_unperturbed: usize,
+    refusal: Refusal,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "hurdle", deny_unknown_fields)]
+enum Refusal {
+    H4 {
+        walk: u64,
+        reason: String,
+    },
+    H5 {
+        alternative: u64,
+        simulation: usize,
+        held_month: u64,
+        reason: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H6 {
+    passed: bool,
+    refusal_count: usize,
+    refusals: Vec<Refusal>,
+    refusal_semantics: RefusalSemantics,
+    thin_month_treatment: String,
+}
+
+/// Two designation generations exist in the ledger: the premature one
+/// dispatched before search closure, which the continuation record preserves,
+/// and the post-closure one that adds the closure fields. Untagged, and each
+/// arm denies unknown fields, so a record is exactly one generation or refuses.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum DesignationRecord {
+    PostClosure(PostClosureDesignation),
+    Premature(PrematureDesignation),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrematureDesignation {
+    outcome: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    designated_candidate: Option<String>,
+    ordered_rule: Vec<String>,
+    eligible_order: Vec<String>,
+    stage_f_rule: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostClosureDesignation {
+    search_closed: bool,
+    complete_history_through_search_order: usize,
+    supersedes_prior_premature_designation: bool,
+    outcome: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    designated_candidate: Option<String>,
+    ordered_rule: Vec<String>,
+    eligible_order: Vec<String>,
+    stage_f_rule: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationRecord {
+    revision: u32,
+    adjudication: String,
+    preserved_results: Vec<SearchSlot>,
+    preserved_premature_designation: bool,
+    supersedes_terminal_interpretation_of_prior_designation: bool,
+    reason: String,
+    next_candidate: NextCandidate,
+    bounded_search: BoundedSearch,
+    search_closure: String,
+    designation: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchSlot {
+    candidate_id: String,
+    search_order: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NextCandidate {
+    candidate_id: String,
+    search_order: usize,
+    committable: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundedSearch {
+    final_candidate: String,
+    no_c4: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchClosedRecord {
+    after_candidate: String,
+    last_search_order: usize,
+    no_further_candidate: String,
+    designation_scope: String,
 }
 
 pub fn run(args: Tier2Args) -> anyhow::Result<()> {
@@ -229,35 +548,42 @@ pub fn run(args: Tier2Args) -> anyhow::Result<()> {
 
 fn continuation(args: &ArtifactArgs) -> anyhow::Result<()> {
     let records = ledger(&args.artifact)?;
-    if records.iter().any(|x| x["record"] == "continuation") {
+    if records.iter().any(|x| matches!(x, Record::Continuation(_))) {
         bail!("the Tier 2 continuation was already recorded");
     }
     for (id, order) in [("C1", 1), ("C2", 2)] {
-        if !records.iter().any(|x| {
-            x["record"] == "candidate_evaluation"
-                && x["candidate_id"] == id
-                && x["search_order"] == order
-        }) {
+        if !has_evaluation(&records, id, order) {
             bail!("continuation requires the preserved {id} evaluation at search order {order}");
         }
     }
-    if !records.iter().any(|x| x["record"] == "designation") {
+    if !records.iter().any(|x| matches!(x, Record::Designation(_))) {
         bail!("continuation requires the preserved premature designation");
     }
+    let slot = |id: &str, order| SearchSlot {
+        candidate_id: id.into(),
+        search_order: order,
+    };
     append(
         &args.artifact,
-        &json!({
-            "record":"continuation",
-            "revision":4,
-            "adjudication":"reviewer session 019ff6c9",
-            "preserved_results":[{"candidate_id":"C1","search_order":1},{"candidate_id":"C2","search_order":2}],
-            "preserved_premature_designation":true,
-            "supersedes_terminal_interpretation_of_prior_designation":true,
-            "reason":"designation was dispatched before search closure",
-            "next_candidate":{"candidate_id":"C3","search_order":3,"committable":true},
-            "bounded_search":{"final_candidate":"C3","no_c4":true},
-            "search_closure":"append explicit search_closed after C3 evaluation whatever its result",
-            "designation":"run over the complete candidate history after search closure"
+        &Record::Continuation(ContinuationRecord {
+            revision: 4,
+            adjudication: "reviewer session 019ff6c9".into(),
+            preserved_results: vec![slot("C1", 1), slot("C2", 2)],
+            preserved_premature_designation: true,
+            supersedes_terminal_interpretation_of_prior_designation: true,
+            reason: "designation was dispatched before search closure".into(),
+            next_candidate: NextCandidate {
+                candidate_id: "C3".into(),
+                search_order: 3,
+                committable: true,
+            },
+            bounded_search: BoundedSearch {
+                final_candidate: "C3".into(),
+                no_c4: true,
+            },
+            search_closure: "append explicit search_closed after C3 evaluation whatever its result"
+                .into(),
+            designation: "run over the complete candidate history after search closure".into(),
         }),
     )?;
     println!("Tier 2 bounded continuation appended");
@@ -266,33 +592,25 @@ fn continuation(args: &ArtifactArgs) -> anyhow::Result<()> {
 
 fn close_search(args: &ArtifactArgs) -> anyhow::Result<()> {
     let records = ledger(&args.artifact)?;
-    if records.iter().any(|x| x["record"] == "search_closed") {
+    if records.iter().any(|x| matches!(x, Record::SearchClosed(_))) {
         bail!("Tier 2 search is already closed");
     }
-    if !records.iter().any(|x| x["record"] == "continuation") {
+    if !records.iter().any(|x| matches!(x, Record::Continuation(_))) {
         bail!("search closure requires the reviewed continuation record");
     }
-    if !records.iter().any(|x| {
-        x["record"] == "candidate_evaluation" && x["candidate_id"] == "C3" && x["search_order"] == 3
-    }) {
+    if !has_evaluation(&records, "C3", 3) {
         bail!("search closure requires the C3 evaluation at search order 3");
     }
-    if records
-        .iter()
-        .filter(|x| x["record"] == "candidate_committed")
-        .count()
-        != 3
-    {
+    if committed_count(&records) != 3 {
         bail!("bounded search closure requires exactly C1, C2, and C3");
     }
     append(
         &args.artifact,
-        &json!({
-            "record":"search_closed",
-            "after_candidate":"C3",
-            "last_search_order":3,
-            "no_further_candidate":"no C4 under the revision 4 adjudicated boundary",
-            "designation_scope":"complete candidate history"
+        &Record::SearchClosed(SearchClosedRecord {
+            after_candidate: "C3".into(),
+            last_search_order: 3,
+            no_further_candidate: "no C4 under the revision 4 adjudicated boundary".into(),
+            designation_scope: "complete candidate history".into(),
         }),
     )?;
     println!("Tier 2 search closed after C3");
@@ -305,16 +623,22 @@ fn commit(args: &CommitArgs) -> anyhow::Result<()> {
         serde_json::from_slice(&bytes).context("parsing complete candidate specification")?;
     validate_spec(&spec)?;
     let records = ledger(&args.artifact)?;
-    if records.iter().any(|x| x["candidate_id"] == spec.id) {
+    if records
+        .iter()
+        .any(|x| x.candidate_id() == Some(spec.id.as_str()))
+    {
         bail!("candidate id {} is already committed", spec.id);
     }
+    let specification_sha256 = mogwai_lab::delivery::sha256_file(&args.specification)
+        .map_err(|e| anyhow!(e.to_string()))?;
     append(
         &args.artifact,
-        &json!({
-            "record":"candidate_committed", "candidate_id":spec.id,
-            "search_order":records.iter().filter(|x|x["record"]=="candidate_committed").count()+1,
-            "specification":spec, "specification_sha256":mogwai_lab::delivery::sha256_file(&args.specification).map_err(|e|anyhow!(e.to_string()))?,
-            "state":"committed_before_evaluation"
+        &Record::CandidateCommitted(CommittedRecord {
+            candidate_id: spec.id.clone(),
+            search_order: committed_count(&records) + 1,
+            specification: spec,
+            specification_sha256,
+            state: "committed_before_evaluation".into(),
         }),
     )?;
     println!("Tier 2 candidate committed; evaluation requires a separate invocation");
@@ -362,16 +686,13 @@ fn validate_spec(x: &Candidate) -> anyhow::Result<()> {
 fn baseline(args: &CommonArgs) -> anyhow::Result<()> {
     if ledger(&args.artifact)?
         .iter()
-        .any(|x| x["record"] == "excess_baseline")
+        .any(|x| matches!(x, Record::ExcessBaseline(_)))
     {
         bail!("the once-only EXCESS baseline is already recorded");
     }
     let months = load_manifest(&args.manifest)?;
     let (w, table) = excess_baseline(&months);
-    let contributing = table
-        .iter()
-        .filter(|x| x["W_m"].is_number() && x["month"] != 202_607)
-        .count();
+    let contributing = contributing_months(&table);
     let outcome = if contributing >= 4 {
         "completed"
     } else {
@@ -379,8 +700,15 @@ fn baseline(args: &CommonArgs) -> anyhow::Result<()> {
     };
     append(
         &args.artifact,
-        &json!({"record":"excess_baseline","outcome":outcome,"W":w,"contributing_new_design_months":contributing,"months":table,
-        "definition":"unweighted mean of population variances of complete-session unweighted residual means; new-design months only"}),
+        &Record::ExcessBaseline(ExcessBaselineRecord {
+            outcome: outcome.into(),
+            w,
+            contributing_new_design_months: contributing,
+            months: table,
+            definition: "unweighted mean of population variances of complete-session unweighted \
+                         residual means; new-design months only"
+                .into(),
+        }),
     )?;
     println!("Tier 2 EXCESS baseline {outcome}");
     Ok(())
@@ -390,15 +718,18 @@ fn evaluate(args: &EvaluateArgs) -> anyhow::Result<()> {
     let records = ledger(&args.artifact)?;
     if records
         .iter()
-        .any(|x| x["record"] == "candidate_evaluation" && x["candidate_id"] == args.id)
+        .any(|x| matches!(x, Record::CandidateEvaluation(e) if e.candidate_id == args.id))
     {
         bail!("candidate {} was already evaluated", args.id);
     }
     let committed = records
         .iter()
-        .find(|x| x["record"] == "candidate_committed" && x["candidate_id"] == args.id)
+        .find_map(|x| match x {
+            Record::CandidateCommitted(c) if c.candidate_id == args.id => Some(c),
+            _ => None,
+        })
         .ok_or_else(|| anyhow!("candidate {} has no prior committed specification", args.id))?;
-    let spec: Candidate = serde_json::from_value(committed["specification"].clone())?;
+    let spec = committed.specification.clone();
     validate_spec(&spec)?;
     let population = load_manifest(&args.manifest)?;
     let months = population
@@ -414,12 +745,7 @@ fn evaluate(args: &EvaluateArgs) -> anyhow::Result<()> {
     }
     let (w, w_table) = excess_baseline(&population);
     let w = w.ok_or_else(|| anyhow!("excess_baseline_unavailable"))?;
-    if w_table
-        .iter()
-        .filter(|x| x["W_m"].is_number() && x["month"] != 202_607)
-        .count()
-        < 4
-    {
+    if contributing_months(&w_table) < 4 {
         bail!("excess_baseline_unavailable");
     }
 
@@ -433,12 +759,13 @@ fn evaluate(args: &EvaluateArgs) -> anyhow::Result<()> {
             .map(|(_, x)| x.clone())
             .collect::<Vec<_>>();
         let verdict = joint(&spec.joint, &train, &projected[held])?;
-        h3.push(json!({"month":months[held].key,"thin":months[held].thin,"verdict":verdict}));
+        h3.push(H3Month {
+            month: months[held].key,
+            thin: months[held].thin,
+            verdict,
+        });
     }
-    let h3_out = h3
-        .iter()
-        .filter(|x| x["verdict"]["rejected"] == true)
-        .count();
+    let h3_out = h3.iter().filter(|x| x.verdict.rejected).count();
 
     let controls = load_manifest(&args.controls)?;
     if controls.len() != 24 {
@@ -452,17 +779,26 @@ fn evaluate(args: &EvaluateArgs) -> anyhow::Result<()> {
     let mut refusals = Vec::new();
     for control in &controls {
         match project(&spec, control).and_then(|value| joint(&spec.joint, &fit_all, &value)) {
-            Ok(verdict) => h4.push(json!({"walk":control.key,"verdict":verdict})),
+            Ok(verdict) => h4.push(ControlRow::Judged(JudgedControl {
+                walk: control.key,
+                verdict,
+            })),
             Err(error) => {
-                let refusal = json!({"hurdle":"H4","walk":control.key,"reason":error.to_string()});
+                let refusal = Refusal::H4 {
+                    walk: control.key,
+                    reason: error.to_string(),
+                };
                 refusals.push(refusal.clone());
-                h4.push(json!({"walk":control.key,"refusal":refusal}));
+                h4.push(ControlRow::Refused(RefusedControl {
+                    walk: control.key,
+                    refusal,
+                }));
             }
         }
     }
     let h4_count = h4
         .iter()
-        .filter(|x| x["verdict"]["rejected"] == true)
+        .filter(|x| matches!(x, ControlRow::Judged(j) if j.verdict.rejected))
         .count();
 
     let (h5_no_slow, no_slow_detail, no_slow_refusals) = h5(&spec, &months, &projected, 1, w)?;
@@ -476,17 +812,61 @@ fn evaluate(args: &EvaluateArgs) -> anyhow::Result<()> {
     let h5_pass = h5_no_slow >= 160 && h5_excess >= 160;
     let h6 = refusals.is_empty();
     let admissible = h1 && h2 && h3_pass && h4_pass && h5_pass && h6;
-    append(
-        &args.artifact,
-        &json!({
-            "record":"candidate_evaluation","candidate_id":args.id,"search_order":committed["search_order"],"admissible":admissible,
-            "hurdle":{"H1":{"passed":h1,"coordinates":spec.coordinates.len()},"H2":{"passed":h2,"joint_rule":spec.joint,"level":DESIGN_LEVEL},
-            "H3":{"passed":h3_pass,"outside_count":h3_out,"months":h3},"H4":{"passed":h4_pass,"rejection_count":h4_count,"controls":h4},
-            "H5":{"passed":h5_pass,"required_each":160,"no_slow":{"rejection_count":h5_no_slow,"simulations":no_slow_detail},"excess":{"rejection_count":h5_excess,"W":w,"W_months":w_table,"simulations":excess_detail}},
-            "H6":{"passed":h6,"refusal_count":refusals.len(),"refusals":refusals,"refusal_semantics":spec.refusals,"thin_month_treatment":spec.thin_months}},
-            "stage_f_handoff":if admissible{"eligible_for_mechanical_designation"}else{"not_eligible"}
-        }),
-    )?;
+    let refusal_count = refusals.len();
+    let record = EvaluationRecord {
+        candidate_id: args.id.clone(),
+        search_order: committed.search_order,
+        admissible,
+        hurdle: Hurdles {
+            h1: H1 {
+                passed: h1,
+                coordinates: spec.coordinates.len(),
+            },
+            h2: H2 {
+                passed: h2,
+                joint_rule: spec.joint,
+                level: DESIGN_LEVEL,
+            },
+            h3: H3 {
+                passed: h3_pass,
+                outside_count: h3_out,
+                months: h3,
+            },
+            h4: H4 {
+                passed: h4_pass,
+                rejection_count: h4_count,
+                controls: h4,
+            },
+            h5: H5 {
+                passed: h5_pass,
+                required_each: 160,
+                no_slow: NoSlow {
+                    rejection_count: h5_no_slow,
+                    simulations: no_slow_detail,
+                },
+                excess: Excess {
+                    rejection_count: h5_excess,
+                    w,
+                    w_months: w_table,
+                    simulations: excess_detail,
+                },
+            },
+            h6: H6 {
+                passed: h6,
+                refusal_count,
+                refusals,
+                refusal_semantics: spec.refusals,
+                thin_month_treatment: spec.thin_months,
+            },
+        },
+        stage_f_handoff: if admissible {
+            "eligible_for_mechanical_designation"
+        } else {
+            "not_eligible"
+        }
+        .into(),
+    };
+    append(&args.artifact, &Record::CandidateEvaluation(record))?;
     println!(
         "Tier 2 candidate {} evaluation appended: admissible={admissible}",
         args.id
@@ -500,7 +880,7 @@ fn h5(
     projected: &[Vec<f64>],
     alternative: u64,
     w: f64,
-) -> anyhow::Result<(usize, Vec<Value>, Vec<Value>)> {
+) -> anyhow::Result<(usize, Vec<SimulationRow>, Vec<Refusal>)> {
     let mut rejected = 0;
     let mut detail = Vec::with_capacity(ALT_RUNS);
     let mut refusals = Vec::new();
@@ -528,20 +908,34 @@ fn h5(
             .filter(|(i, _)| *i != held)
             .map(|(_, x)| x.clone())
             .collect::<Vec<_>>();
-        let common = json!({"simulation":simulation,"held_month":months[held].key,"seed":tuple_mix(ALT_SEED,&[alternative,simulation as u64]),"incomplete_sessions_unperturbed":excluded});
+        let held_month = months[held].key;
+        let seed = tuple_mix(ALT_SEED, &[alternative, simulation as u64]);
         match project(spec, &changed).and_then(|value| joint(&spec.joint, &train, &value)) {
             Ok(verdict) => {
                 rejected += usize::from(verdict.rejected);
-                let mut row = common;
-                row["verdict"] = serde_json::to_value(verdict)?;
-                detail.push(row);
+                detail.push(SimulationRow::Judged(JudgedSimulation {
+                    simulation,
+                    held_month,
+                    seed,
+                    incomplete_sessions_unperturbed: excluded,
+                    verdict,
+                }));
             }
             Err(error) => {
-                let refusal = json!({"hurdle":"H5","alternative":alternative,"simulation":simulation,"held_month":months[held].key,"reason":error.to_string()});
+                let refusal = Refusal::H5 {
+                    alternative,
+                    simulation,
+                    held_month,
+                    reason: error.to_string(),
+                };
                 refusals.push(refusal.clone());
-                let mut row = common;
-                row["refusal"] = refusal;
-                detail.push(row);
+                detail.push(SimulationRow::Refused(RefusedSimulation {
+                    simulation,
+                    held_month,
+                    seed,
+                    incomplete_sessions_unperturbed: excluded,
+                    refusal,
+                }));
             }
         }
     }
@@ -599,7 +993,7 @@ fn excess(month: &mut Month, simulation: u64, w: f64) -> anyhow::Result<usize> {
     Ok(dates.len() - complete.len())
 }
 
-fn excess_baseline(months: &[Month]) -> (Option<f64>, Vec<Value>) {
+fn excess_baseline(months: &[Month]) -> (Option<f64>, Vec<BaselineMonth>) {
     let mut table = Vec::new();
     let mut values = Vec::new();
     for month in months {
@@ -628,9 +1022,37 @@ fn excess_baseline(months: &[Month]) -> (Option<f64>, Vec<Value>) {
         {
             values.push(x);
         }
-        table.push(json!({"month":month.key,"eligible_sessions":complete,"excluded_sessions":all.difference(&complete).collect::<Vec<_>>(),"W_m":wm}));
+        table.push(BaselineMonth {
+            month: month.key,
+            excluded_sessions: all.difference(&complete).cloned().collect(),
+            eligible_sessions: complete.into_iter().collect(),
+            w_m: wm,
+        });
     }
     ((!values.is_empty()).then(|| mean(&values)), table)
+}
+
+/// New-design months whose `W_m` is a number. Finite rather than merely
+/// present, because the untyped check this replaces read the written JSON,
+/// where a nonfinite variance is `null` and so was never counted.
+fn contributing_months(table: &[BaselineMonth]) -> usize {
+    table
+        .iter()
+        .filter(|x| x.w_m.is_some_and(f64::is_finite) && x.month != 202_607)
+        .count()
+}
+
+fn has_evaluation(records: &[Record], id: &str, order: usize) -> bool {
+    records.iter().any(|x| {
+        matches!(x, Record::CandidateEvaluation(e) if e.candidate_id == id && e.search_order == order)
+    })
+}
+
+fn committed_count(records: &[Record]) -> usize {
+    records
+        .iter()
+        .filter(|x| matches!(x, Record::CandidateCommitted(_)))
+        .count()
 }
 
 fn complete_dates(cells: &[Cell]) -> BTreeSet<String> {
@@ -1112,53 +1534,42 @@ fn invert(mut a: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
 
 fn designate(args: &DesignateArgs) -> anyhow::Result<()> {
     let records = ledger(&args.artifact)?;
-    let closure = records
+    let (closure, closed) = records
         .iter()
-        .rposition(|x| x["record"] == "search_closed")
+        .enumerate()
+        .rev()
+        .find_map(|(i, x)| match x {
+            Record::SearchClosed(c) => Some((i, c)),
+            _ => None,
+        })
         .ok_or_else(|| anyhow!("designation requires an explicit search_closed record"))?;
     if records
         .iter()
         .skip(closure + 1)
-        .any(|x| x["record"] == "designation")
+        .any(|x| matches!(x, Record::Designation(_)))
     {
         bail!("post-closure designation was already recorded");
     }
     let mut eligible = records
         .iter()
-        .filter(|x| x["record"] == "candidate_evaluation" && x["admissible"] == true)
+        .filter_map(|x| match x {
+            Record::CandidateEvaluation(e) if e.admissible => Some(e),
+            _ => None,
+        })
         .collect::<Vec<_>>();
-    eligible.sort_by(|a, b| {
-        let ka = (
-            a["hurdle"]["H1"]["coordinates"].as_u64().unwrap(),
-            std::cmp::Reverse(a["hurdle"]["H4"]["rejection_count"].as_u64().unwrap()),
+    eligible.sort_by_key(|e| {
+        (
+            e.hurdle.h1.coordinates,
+            std::cmp::Reverse(e.hurdle.h4.rejection_count),
             std::cmp::Reverse(
-                a["hurdle"]["H5"]["no_slow"]["rejection_count"]
-                    .as_u64()
-                    .unwrap()
-                    .min(
-                        a["hurdle"]["H5"]["excess"]["rejection_count"]
-                            .as_u64()
-                            .unwrap(),
-                    ),
+                e.hurdle
+                    .h5
+                    .no_slow
+                    .rejection_count
+                    .min(e.hurdle.h5.excess.rejection_count),
             ),
-            a["search_order"].as_u64().unwrap(),
-        );
-        let kb = (
-            b["hurdle"]["H1"]["coordinates"].as_u64().unwrap(),
-            std::cmp::Reverse(b["hurdle"]["H4"]["rejection_count"].as_u64().unwrap()),
-            std::cmp::Reverse(
-                b["hurdle"]["H5"]["no_slow"]["rejection_count"]
-                    .as_u64()
-                    .unwrap()
-                    .min(
-                        b["hurdle"]["H5"]["excess"]["rejection_count"]
-                            .as_u64()
-                            .unwrap(),
-                    ),
-            ),
-            b["search_order"].as_u64().unwrap(),
-        );
-        ka.cmp(&kb)
+            e.search_order,
+        )
     });
     let outcome = eligible.first().map_or(
         "no_one_month_slow_confirmation_design",
@@ -1166,7 +1577,23 @@ fn designate(args: &DesignateArgs) -> anyhow::Result<()> {
     );
     append(
         &args.artifact,
-        &json!({"record":"designation","search_closed":true,"complete_history_through_search_order":records[closure]["last_search_order"],"supersedes_prior_premature_designation":true,"outcome":outcome,"designated_candidate":eligible.first().map(|x|x["candidate_id"].clone()),"ordered_rule":["fewest_coordinates","highest_H4_rejection_count","highest_minimum_H5_rejection_count","earliest_committed"],"eligible_order":eligible.iter().map(|x|x["candidate_id"].clone()).collect::<Vec<_>>(),"stage_f_rule":"freeze unchanged or rerun the entire H1-H6 hurdle for any change"}),
+        &Record::Designation(DesignationRecord::PostClosure(PostClosureDesignation {
+            search_closed: true,
+            complete_history_through_search_order: closed.last_search_order,
+            supersedes_prior_premature_designation: true,
+            outcome: outcome.into(),
+            designated_candidate: eligible.first().map(|x| x.candidate_id.clone()),
+            ordered_rule: [
+                "fewest_coordinates",
+                "highest_H4_rejection_count",
+                "highest_minimum_H5_rejection_count",
+                "earliest_committed",
+            ]
+            .map(String::from)
+            .into(),
+            eligible_order: eligible.iter().map(|x| x.candidate_id.clone()).collect(),
+            stage_f_rule: "freeze unchanged or rerun the entire H1-H6 hurdle for any change".into(),
+        })),
     )?;
     println!("Tier 2 designation: {outcome}");
     Ok(())
@@ -1231,21 +1658,25 @@ fn load_month(path: &Path) -> anyhow::Result<Month> {
         thin: dates.len() < 15,
     })
 }
-fn ledger(path: &Path) -> anyhow::Result<Vec<Value>> {
+fn ledger(path: &Path) -> anyhow::Result<Vec<Record>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     BufReader::new(File::open(path)?)
         .lines()
-        .map(|x| Ok(serde_json::from_str(&x?)?))
+        .enumerate()
+        .map(|(i, x)| {
+            serde_json::from_str(&x?)
+                .with_context(|| format!("{} line {}: not a Tier 2 record", path.display(), i + 1))
+        })
         .collect()
 }
-fn append(path: &Path, value: &Value) -> anyhow::Result<()> {
+fn append(path: &Path, record: &Record) -> anyhow::Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut f, value)?;
+    serde_json::to_writer(&mut f, record)?;
     f.write_all(b"\n")?;
     f.sync_all()?;
     Ok(())
@@ -1482,6 +1913,245 @@ mod tests {
                 .to_string();
             assert!(error.contains(key), "the refusal must name {key}: {error}");
         }
+    }
+
+    fn verdict() -> Verdict {
+        Verdict {
+            rejected: false,
+            statistic: 1.5,
+            critical_value: 2.5,
+        }
+    }
+
+    /// An evaluation record carrying both row arms of H4 and H5 and both
+    /// refusal hurdles, written through the typed record like `evaluate` does.
+    fn evaluation_line() -> Value {
+        let spec: Candidate = serde_json::from_value(json!({
+            "id": "C9",
+            "coordinates": [{ "name": "a", "statistic": { "kind": "score_variance" } }],
+            "joint": { "kind": "student_max" },
+            "refusals": {
+                "missing_cells": "include",
+                "score_refusal": "include",
+                "nonfinite_statistic": "include",
+                "singular_predictive_fit": "include",
+                "thin_month": "include",
+                "finer_than_session_hour_input": "include"
+            },
+            "thin_months": "t"
+        }))
+        .expect("spec");
+        let h4_refusal = Refusal::H4 {
+            walk: 2,
+            reason: "r".into(),
+        };
+        let h5_refusal = Refusal::H5 {
+            alternative: 1,
+            simulation: 2,
+            held_month: 202_509,
+            reason: "r".into(),
+        };
+        let month = BaselineMonth {
+            month: 202_509,
+            eligible_sessions: vec!["2025-09-02".into()],
+            excluded_sessions: Vec::new(),
+            w_m: None,
+        };
+        let simulations = || {
+            vec![
+                SimulationRow::Judged(JudgedSimulation {
+                    simulation: 1,
+                    held_month: 202_509,
+                    seed: u64::MAX,
+                    incomplete_sessions_unperturbed: 0,
+                    verdict: verdict(),
+                }),
+                SimulationRow::Refused(RefusedSimulation {
+                    simulation: 2,
+                    held_month: 202_509,
+                    seed: 7,
+                    incomplete_sessions_unperturbed: 1,
+                    refusal: h5_refusal.clone(),
+                }),
+            ]
+        };
+        let record = Record::CandidateEvaluation(EvaluationRecord {
+            candidate_id: "C9".into(),
+            search_order: 4,
+            admissible: true,
+            hurdle: Hurdles {
+                h1: H1 {
+                    passed: true,
+                    coordinates: 1,
+                },
+                h2: H2 {
+                    passed: true,
+                    joint_rule: spec.joint,
+                    level: DESIGN_LEVEL,
+                },
+                h3: H3 {
+                    passed: true,
+                    outside_count: 0,
+                    months: vec![H3Month {
+                        month: 202_509,
+                        thin: false,
+                        verdict: verdict(),
+                    }],
+                },
+                h4: H4 {
+                    passed: true,
+                    rejection_count: 0,
+                    controls: vec![
+                        ControlRow::Judged(JudgedControl {
+                            walk: 1,
+                            verdict: verdict(),
+                        }),
+                        ControlRow::Refused(RefusedControl {
+                            walk: 2,
+                            refusal: h4_refusal.clone(),
+                        }),
+                    ],
+                },
+                h5: H5 {
+                    passed: true,
+                    required_each: 160,
+                    no_slow: NoSlow {
+                        rejection_count: 0,
+                        simulations: simulations(),
+                    },
+                    excess: Excess {
+                        rejection_count: 0,
+                        w: 0.06,
+                        w_months: vec![month],
+                        simulations: simulations(),
+                    },
+                },
+                h6: H6 {
+                    passed: false,
+                    refusal_count: 2,
+                    refusals: vec![h4_refusal, h5_refusal],
+                    refusal_semantics: spec.refusals,
+                    thin_month_treatment: spec.thin_months,
+                },
+            },
+            stage_f_handoff: "not_eligible".into(),
+        });
+        serde_json::to_value(&record).expect("an evaluation serializes")
+    }
+
+    /// Lines shaped exactly like the sealed Stage M ledger's other records,
+    /// including the premature designation generation.
+    fn other_lines() -> Vec<Value> {
+        vec![
+            json!({"record":"excess_baseline","outcome":"completed","W":0.06,
+                "contributing_new_design_months":8,"definition":"d",
+                "months":[{"month":202509,"eligible_sessions":[],"excluded_sessions":[],"W_m":null}]}),
+            json!({"record":"designation","designated_candidate":null,"eligible_order":[],
+                "ordered_rule":["fewest_coordinates"],"outcome":"o","stage_f_rule":"s"}),
+            json!({"record":"continuation","adjudication":"a","bounded_search":{"final_candidate":"C3","no_c4":true},
+                "designation":"d","next_candidate":{"candidate_id":"C3","committable":true,"search_order":3},
+                "preserved_premature_designation":true,
+                "preserved_results":[{"candidate_id":"C1","search_order":1}],
+                "reason":"r","revision":4,"search_closure":"s",
+                "supersedes_terminal_interpretation_of_prior_designation":true}),
+            json!({"record":"search_closed","after_candidate":"C3","designation_scope":"d",
+                "last_search_order":3,"no_further_candidate":"n"}),
+            json!({"record":"designation","complete_history_through_search_order":3,
+                "designated_candidate":null,"eligible_order":[],"ordered_rule":[],"outcome":"o",
+                "search_closed":true,"stage_f_rule":"s","supersedes_prior_premature_designation":true}),
+        ]
+    }
+
+    /// Every Tier 2 ledger record decodes typed, and a misspelled, stray or
+    /// missing key refuses instead of comparing as `null`. Before the records
+    /// were typed, `x["search_order"] == 3` on a record spelling it
+    /// `search_ordr` was simply false, and `x["admissible"] == true` on a
+    /// record missing the key excluded the candidate from designation silently.
+    #[test]
+    fn tier2_ledger_records_refuse_misspelled_stray_and_missing_keys() {
+        let evaluation = evaluation_line();
+        let decoded: Record =
+            serde_json::from_value(evaluation.clone()).expect("the typed evaluation decodes");
+        assert_eq!(decoded.candidate_id(), Some("C9"));
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("re-serializes"),
+            evaluation,
+            "an evaluation round-trips unchanged"
+        );
+        for line in other_lines() {
+            let decoded: Record = serde_json::from_value(line.clone())
+                .unwrap_or_else(|e| panic!("{line} must decode: {e}"));
+            assert_eq!(serde_json::to_value(&decoded).expect("re-serializes"), line);
+        }
+
+        let refuses = |bad: Value, why: &str| {
+            assert!(
+                serde_json::from_value::<Record>(bad.clone()).is_err(),
+                "{why} must refuse: {bad}"
+            );
+        };
+        let mut misspelled = evaluation.clone();
+        let order = misspelled
+            .as_object_mut()
+            .expect("an object")
+            .remove("search_order")
+            .expect("search_order");
+        misspelled["search_ordr"] = order;
+        refuses(misspelled, "a misspelled top-level key");
+
+        let mut missing = evaluation.clone();
+        missing
+            .as_object_mut()
+            .expect("an object")
+            .remove("admissible");
+        refuses(missing, "a missing admissible");
+
+        let mut deep = evaluation.clone();
+        deep["hurdle"]["H5"]["excess"]["rejection_cnt"] = json!(1);
+        refuses(deep, "a stray key deep in a hurdle");
+
+        let mut both = evaluation.clone();
+        both["hurdle"]["H4"]["controls"][0]["refusal"] =
+            json!({"hurdle":"H4","walk":1,"reason":"r"});
+        refuses(both, "a control row with both a verdict and a refusal");
+
+        let mut neither = evaluation.clone();
+        neither["hurdle"]["H5"]["no_slow"]["simulations"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("verdict");
+        refuses(
+            neither,
+            "a simulation row with neither a verdict nor a refusal",
+        );
+
+        let mut tag = evaluation;
+        tag["record"] = json!("candidate_evaluaton");
+        refuses(tag, "an unknown record tag");
+
+        let mut null_candidate = other_lines().swap_remove(1);
+        null_candidate
+            .as_object_mut()
+            .expect("an object")
+            .remove("designated_candidate");
+        refuses(
+            null_candidate,
+            "a designation missing its nullable candidate",
+        );
+
+        let mut half_closed = other_lines().swap_remove(4);
+        half_closed
+            .as_object_mut()
+            .expect("an object")
+            .remove("search_closed");
+        refuses(half_closed, "a designation that is neither generation");
+
+        let mut baseline = other_lines().swap_remove(0);
+        baseline["months"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("W_m");
+        refuses(baseline, "a baseline month missing its nullable W_m");
     }
 
     /// The `excess` draw is keyed on the session date, so the order the cells

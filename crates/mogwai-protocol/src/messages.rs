@@ -2210,7 +2210,10 @@ struct TagProbe<'a> {
 /// directly would refuse every frame. This mirror accepts the tag it was
 /// dispatched on and refuses every other stranger, so the two paths refuse the
 /// same frames. The tag's value is skipped rather than re-read: the probe
-/// already matched it, and skipping a scalar allocates nothing.
+/// already matched it, and skipping a scalar allocates nothing. A repeated tag
+/// never reaches this skip - the probe refuses it as a duplicate field first,
+/// as the general decoder does - so skipping cannot let a second, disagreeing
+/// tag through; `a_duplicated_key_is_refused_on_every_decode_path` pins that.
 ///
 /// Drift is a compile error in one direction only: the `From` below builds a
 /// `TradeTick` literal, so a field added to or removed from `TradeTick` breaks
@@ -3869,5 +3872,75 @@ mod tests {
         assert!(serde_json::from_str::<QuoteTick>(quote).is_err());
         assert!(serde_json::from_str::<TradeFrame>(trade).is_ok());
         assert!(serde_json::from_str::<QuoteFrame>(quote).is_ok());
+    }
+
+    /// A repeated key is refused on every decode path, the tag and an ordinary
+    /// field alike, whether the repeat agrees with the first spelling or not.
+    ///
+    /// JSON leaves duplicate names to the implementation, and the two readings
+    /// a lenient decoder picks between - first wins, last wins - are exactly
+    /// the silent choice the strict-input ruling forbids. The paths agree by
+    /// construction rather than by a shared rule: the general decoder's
+    /// internally tagged visitor refuses a second tag and hands the buffered
+    /// payload to a derived struct that refuses a second field, while the hot
+    /// path's `TagProbe` refuses a second tag before any mirror is chosen and
+    /// the mirrors refuse a second field. This test is what holds them together,
+    /// so it drives the same bytes through all four entry points.
+    #[test]
+    fn a_duplicated_key_is_refused_on_every_decode_path() {
+        let trade =
+            r#""symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11"#;
+        let quote = r#""symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7"#;
+        let wire = |body: String| format!("{{{body}}}");
+        let accepted = [
+            wire(format!(r#""type":"Trade",{trade}"#)),
+            wire(format!(r#""type":"Quote",{quote}"#)),
+            wire(r#""type":"Heartbeat","ts_event":1"#.to_owned()),
+        ];
+        let refused = [
+            // The tag twice, agreeing, leading and trailing.
+            wire(format!(r#""type":"Trade","type":"Trade",{trade}"#)),
+            wire(format!(r#""type":"Trade",{trade},"type":"Trade""#)),
+            wire(format!(r#""type":"Quote",{quote},"type":"Quote""#)),
+            wire(r#""type":"Heartbeat","type":"Heartbeat","ts_event":1"#.to_owned()),
+            // The tag twice, disagreeing, in both dispatch directions: a hot tag
+            // shadowed by a cold one and the reverse.
+            wire(format!(r#""type":"Trade",{trade},"type":"Heartbeat""#)),
+            wire(r#""type":"Heartbeat","ts_event":1,"type":"Trade""#.to_owned()),
+            wire(format!(r#""type":"Trade",{trade},"type":"Quote""#)),
+            // An ordinary field twice, agreeing and disagreeing.
+            wire(format!(r#""type":"Trade",{trade},"ts_event":11"#)),
+            wire(format!(r#""type":"Trade",{trade},"price":"100""#)),
+            wire(format!(r#""type":"Quote",{quote},"bid_px":"99""#)),
+            wire(r#""type":"Heartbeat","ts_event":1,"ts_event":2"#.to_owned()),
+        ];
+        let decodes = |frame: &str| {
+            [
+                (
+                    "general str",
+                    serde_json::from_str::<VenueMessage>(frame).is_ok(),
+                ),
+                (
+                    "general slice",
+                    serde_json::from_slice::<VenueMessage>(frame.as_bytes()).is_ok(),
+                ),
+                ("hot str", VenueMessage::from_json_str(frame).is_ok()),
+                (
+                    "hot slice",
+                    VenueMessage::from_json_slice(frame.as_bytes()).is_ok(),
+                ),
+            ]
+        };
+        // The fixtures decode on every path, so a refusal below is the repeat's.
+        for frame in &accepted {
+            for (path, ok) in decodes(frame) {
+                assert!(ok, "{path} must take the fixture: {frame}");
+            }
+        }
+        for frame in &refused {
+            for (path, ok) in decodes(frame) {
+                assert!(!ok, "{path} must refuse a repeated key: {frame}");
+            }
+        }
     }
 }

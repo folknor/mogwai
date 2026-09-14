@@ -75,7 +75,12 @@ fn history_is_served_for_a_configured_symbol_that_is_not_the_default_river() {
         "/operator/trades?symbol=MNQ&start=0&limit=5",
     );
     assert_eq!(status, 200, "configured cold history is served: {body}");
-    assert!(body.contains("MNQ"));
+    assert!(
+        history_row_symbols("trades", &body)
+            .iter()
+            .all(|symbol| symbol == "MNQ"),
+        "every row is the requested symbol's: {body}"
+    );
 }
 
 #[test]
@@ -616,7 +621,9 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
         );
         assert_eq!(status, 200, "an unconfigured symbol is served: {body}");
         assert!(
-            body.contains("NOT-A-SYMBOL"),
+            history_row_symbols(endpoint, &body)
+                .iter()
+                .all(|symbol| symbol == "NOT-A-SYMBOL"),
             "the rows wear the requested label: {body}"
         );
     }
@@ -629,7 +636,9 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
         );
         assert_eq!(status, 200, "a miscased label is its own river: {body}");
         assert!(
-            body.contains(&lowercase),
+            history_row_symbols("trades", &body)
+                .iter()
+                .all(|symbol| *symbol == lowercase),
             "and it is served under that label, not folded: {body}"
         );
     }
@@ -1004,8 +1013,9 @@ fn an_account_opens_on_the_balance_its_consumer_named() {
     assert_eq!(status, 200, "the named account answers: {body}");
     let named = snapshot_account(&body);
     assert_eq!(named["account_id"], "WYRD-100");
-    assert!(
-        body.contains("250000"),
+    assert_eq!(
+        balance_total(&body, "USDT"),
+        rust_decimal::Decimal::from(250_000),
         "the consumer's opening balance is the ledger's: {body}"
     );
 
@@ -1047,8 +1057,14 @@ fn an_account_that_is_already_open_is_not_reset() {
 
     let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-101");
     assert_eq!(status, 200, "the account answers: {body}");
-    assert!(
-        body.contains("1000") && !body.contains("9999"),
+    assert_eq!(
+        snapshot(&body).account.account_id.as_str(),
+        "WYRD-101",
+        "the answer is about the account that was asked for: {body}"
+    );
+    assert_eq!(
+        balance_total(&body, "USDT"),
+        rust_decimal::Decimal::from(1000),
         "the refused re-open must not have moved the balance: {body}"
     );
 }
@@ -1094,7 +1110,10 @@ fn a_policed_account_publishes_its_remaining_budget() {
         risk["daily_remaining"], "500",
         "the daily budget starts whole: {body}"
     );
-    assert!(risk["breached"].is_null(), "nothing has fired yet: {body}");
+    assert!(
+        snapshot_risk(&body).breached.is_none(),
+        "nothing has fired yet: {body}"
+    );
 }
 
 /// A policy the venue cannot enforce is refused where it enters, not hours
@@ -1236,9 +1255,8 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     // by the notional would have crossed this account's 1,000,000 trailing
     // drawdown off its 5,000,000 opening and stuck there. The poll can wait for the
     // mark; it cannot wait out a breach that already fired.
-    let value = snapshot_account(&body);
     assert!(
-        value["risk"]["breached"].is_null(),
+        snapshot_risk(&body).breached.is_none(),
         "a purchase is not a drawdown breach: {body}"
     );
 }
@@ -2517,17 +2535,13 @@ fn an_account_naming_no_policy_is_unpoliced() {
     let venue = spawn(&["--config", &fast_config()]);
     let (status, body) = http_get(&venue.http_base(), "/account");
     assert_eq!(status, 200, "the default account answers: {body}");
-    let value = snapshot_account(&body);
-    let risk = &value["risk"];
+    // `snapshot_risk` fails by name if the risk block is absent.
+    let risk = snapshot_risk(&body);
     assert!(
-        risk.is_object(),
-        "an unpoliced account still publishes its risk block: {body}"
-    );
-    assert!(
-        risk["trailing_threshold"].is_null() && risk["daily_remaining"].is_null(),
+        risk.trailing_threshold.is_none() && risk.daily_remaining.is_none(),
         "an unpoliced account states no thresholds: {body}"
     );
-    assert!(risk["breached"].is_null(), "nothing to breach: {body}");
+    assert!(risk.breached.is_none(), "nothing to breach: {body}");
 }
 
 /// The 2026-08-02 defect, stated positively. A divergence armed over the
@@ -3454,12 +3468,69 @@ fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
 /// pass against a body that has no `risk` where it is looked for. The raw
 /// value is what is returned, so decimals are compared in the exact spelling
 /// the venue wrote.
+///
+/// The strict decode does not protect an index into a key the shared type
+/// declares optional and skips when `None`: `risk["breached"]` reads `null`
+/// both when nothing fired and when the key is misspelled at the call site.
+/// An absence claim goes through [`snapshot`] and the typed field instead, so
+/// a renamed field is a compile error rather than a pass.
 fn snapshot_account(body: &str) -> serde_json::Value {
-    let _: mogwai_protocol::http::AccountSnapshot = serde_json::from_str(body)
-        .unwrap_or_else(|err| panic!("the account body is an AccountSnapshot: {err}: {body}"));
+    let _ = snapshot(body);
     let mut value: serde_json::Value =
         serde_json::from_str(body).expect("the account snapshot is json");
     value["account"].take()
+}
+
+/// A `GET /account` body decoded as the strict shared type.
+fn snapshot(body: &str) -> mogwai_protocol::http::AccountSnapshot {
+    serde_json::from_str(body)
+        .unwrap_or_else(|err| panic!("the account body is an AccountSnapshot: {err}: {body}"))
+}
+
+/// The one `currency` balance row's total in a `GET /account` body, compared
+/// as a decimal so `"10000"` can never satisfy a check for `1000`.
+fn balance_total(body: &str, currency: &str) -> rust_decimal::Decimal {
+    let rows: Vec<_> = snapshot(body)
+        .account
+        .balances
+        .into_iter()
+        .filter(|row| row.currency == currency)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one {currency} balance row is reported: {body}"
+    );
+    rows[0].total
+}
+
+/// The risk block of a `GET /account` body, which every pulled account carries.
+fn snapshot_risk(body: &str) -> mogwai_protocol::risk::RiskState {
+    snapshot(body)
+        .account
+        .risk
+        .unwrap_or_else(|| panic!("the pulled account carries its risk block: {body}"))
+}
+
+/// The symbol every row of an `/operator/{endpoint}` history body wears,
+/// decoded as the strict tick type rather than searched as text, and refused if
+/// empty so an absent page cannot read as a correctly labelled one.
+fn history_row_symbols(endpoint: &str, body: &str) -> Vec<String> {
+    let symbols: Vec<String> = match endpoint {
+        "trades" => serde_json::from_str::<Vec<TradeTick>>(body)
+            .unwrap_or_else(|err| panic!("a trade history page: {err}: {body}"))
+            .into_iter()
+            .map(|row| row.symbol.as_ref().to_owned())
+            .collect(),
+        "quotes" => serde_json::from_str::<Vec<QuoteTick>>(body)
+            .unwrap_or_else(|err| panic!("a quote history page: {err}: {body}"))
+            .into_iter()
+            .map(|row| row.symbol.as_ref().to_owned())
+            .collect(),
+        other => panic!("no history endpoint named {other}"),
+    };
+    assert!(!symbols.is_empty(), "the history page is non-empty: {body}");
+    symbols
 }
 
 /// The `sweep_passes` rows one account's snapshot carries, `query` being the
@@ -4392,9 +4463,11 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
 
     // The consumer's own balance is what the account carries, not the venue's
     // configured opening balance a mint on the read path would have handed it.
-    let (_, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
-    assert!(
-        body.contains("1000"),
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
+    assert_eq!(status, 200, "the opened account answers: {body}");
+    assert_eq!(
+        balance_total(&body, "USDT"),
+        rust_decimal::Decimal::from(1000),
         "the opened ledger carries the consumer's balance: {body}"
     );
 }

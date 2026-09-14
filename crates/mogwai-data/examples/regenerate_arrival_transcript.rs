@@ -52,6 +52,13 @@ const PARAMS: ShotNoiseParams = ShotNoiseParams {
     k: 1.0,
     tau_s: 46.415_888_336_127_8,
 };
+/// What `PARAMS` is, written into the transcript's `parameter_point`. It
+/// describes these parameters and no others: retargeting this tool at another
+/// family or point means rewriting it, or the fixture carries a false account
+/// of itself. That already happened once, when the `self-exciting-v2-phi085`
+/// pin was cut from a copy of this template and inherited "nearest the domain
+/// centre" for a point chosen as a pre-enlargement boundary witness.
+const PARAMETER_POINT: &str = "frozen coarse-grid point nearest the family domain centre";
 const FILE_STEM: &str = "shot_noise";
 const FAMILY: &str = "shot_noise";
 const SEED: u64 = 201;
@@ -127,7 +134,7 @@ fn main() {
         "family": FAMILY,
         "kind": "regression-transcript",
         "origin_ns": ORIGIN_NS,
-        "parameter_point": "frozen coarse-grid point nearest the family domain centre",
+        "parameter_point": PARAMETER_POINT,
         "params": {"m": PARAMS.m, "k": PARAMS.k, "tau_s": PARAMS.tau_s},
         "records": records,
         "seed": SEED,
