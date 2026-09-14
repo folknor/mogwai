@@ -54,12 +54,12 @@ impl Engine {
             // no trigger for the engine to wait on and no later ledger for it to
             // be replayed onto - queueing it would leave a dead entry in a book
             // that is about to stop existing.
-            | Divergence::FaultTape => None,
+            | Divergence::FaultTape {} => None,
             queued @ (Divergence::PartialFillNext { .. }
             | Divergence::RejectNextSubmit { .. }
             | Divergence::RejectNextCancel { .. }
-            | Divergence::DuplicateNextFill
-            | Divergence::DropNextAccountUpdate) => {
+            | Divergence::DuplicateNextFill {}
+            | Divergence::DropNextAccountUpdate {}) => {
                 // Bound the queue so control-plane arms cannot accumulate
                 // without limit. At the cap, shed the oldest entry: a
                 // never-triggered targeted `PartialFillNext` sits at the front

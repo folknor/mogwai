@@ -4601,8 +4601,8 @@ mod tests {
         engine.arm(Divergence::RejectNextSubmit {
             reason: "consumer scenario".into(),
         });
-        engine.arm(Divergence::DuplicateNextFill);
-        engine.arm(Divergence::DropNextAccountUpdate);
+        engine.arm(Divergence::DuplicateNextFill {});
+        engine.arm(Divergence::DropNextAccountUpdate {});
 
         let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
         assert_eq!(outcome.originated_orders, 1);
@@ -5450,7 +5450,7 @@ mod tests {
     fn a_duplicate_fill_divergence_applies_to_a_swept_fill() {
         let mut e = banded(1);
         e.process_stamped(Command::SubmitOrder(limit_order("dup", 1)), 10);
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
         // Two wire fills, one booked into the truth store, one account state.
@@ -5521,7 +5521,7 @@ mod tests {
     #[test]
     fn a_dropped_account_update_survives_a_resting_accept_and_applies_to_the_swept_fill() {
         let mut e = banded(1);
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
         let accepted = e.process_stamped(Command::SubmitOrder(limit_order("drop", 1)), 10);
         assert!(matches!(
             accepted.last(),
@@ -6172,7 +6172,7 @@ mod tests {
     #[test]
     fn duplicate_next_fill_doubles_the_wire_event() {
         let mut e = Engine::new();
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
 
         let out = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
 
@@ -6192,7 +6192,7 @@ mod tests {
     #[test]
     fn drop_next_account_update_swallows_the_snapshot() {
         let mut e = Engine::new();
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
 
         let out = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
 
@@ -6206,8 +6206,8 @@ mod tests {
     #[test]
     fn duplicate_and_drop_compose_on_one_submit() {
         let mut e = Engine::new();
-        e.arm(Divergence::DuplicateNextFill);
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DuplicateNextFill {});
+        e.arm(Divergence::DropNextAccountUpdate {});
 
         let out = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
 
@@ -6223,7 +6223,7 @@ mod tests {
         e.arm(Divergence::RejectNextSubmit {
             reason: "risk".into(),
         });
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
 
         let rejected = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(rejected.len(), 1);
@@ -6248,7 +6248,7 @@ mod tests {
             client_order_id: "Z0".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
         let out = e.process_with_market(
             Command::SubmitOrder(limit_order_decimal(
                 "Z0",
@@ -6300,8 +6300,8 @@ mod tests {
             Divergence::RejectNextCancel {
                 reason: "no".into(),
             },
-            Divergence::DuplicateNextFill,
-            Divergence::DropNextAccountUpdate,
+            Divergence::DuplicateNextFill {},
+            Divergence::DropNextAccountUpdate {},
             Divergence::DelayAcks { ms: 100 },
             Divergence::CommandLatency {
                 submit_act_ms: 1,
@@ -6320,7 +6320,7 @@ mod tests {
             Divergence::CancelOpenOrderSilently {
                 client_order_id: "O1".into(),
             },
-            Divergence::FaultTape,
+            Divergence::FaultTape {},
         ]
     }
 
@@ -6346,15 +6346,15 @@ mod tests {
                 Divergence::PartialFillNext { .. }
                 | Divergence::RejectNextSubmit { .. }
                 | Divergence::RejectNextCancel { .. }
-                | Divergence::DuplicateNextFill
-                | Divergence::DropNextAccountUpdate => true,
+                | Divergence::DuplicateNextFill {}
+                | Divergence::DropNextAccountUpdate {} => true,
                 Divergence::DelayAcks { .. }
                 | Divergence::CommandLatency { .. }
                 | Divergence::GoDark { .. }
                 | Divergence::StallData { .. }
                 | Divergence::FeeSurcharge { .. }
                 | Divergence::CancelOpenOrderSilently { .. }
-                | Divergence::FaultTape => false,
+                | Divergence::FaultTape {} => false,
             };
 
             let mut e = Engine::new();
@@ -6384,14 +6384,14 @@ mod tests {
         e.arm(Divergence::DelayAcks { ms: 100 });
         e.arm(Divergence::GoDark { ms: 100 });
         e.arm(Divergence::StallData { ms: 100 });
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
 
         // The queue is the observable, not the event count: four arms, and the
         // one engine-side arm is alone in it and at the front, so the three
         // drops neither queued a dead entry nor sat in front of it.
         assert_eq!(
             e.armed.iter().collect::<Vec<_>>(),
-            vec![&Divergence::DuplicateNextFill]
+            vec![&Divergence::DuplicateNextFill {}]
         );
 
         let out = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
@@ -6413,7 +6413,7 @@ mod tests {
             client_order_id: "O2".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
 
         // O1 is submitted first; the O2-targeted partial must NOT apply to it,
         // but the duplicate behind it must still fire (was silently disarmed).
@@ -8738,7 +8738,7 @@ mod tests {
     #[test]
     fn a_duplicate_group_fill_shrinks_an_ouo_sibling_by_the_booked_quantity_once() {
         let mut e = linked_engine();
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
         let mut stop = limit_order("STOP-DUP", 2);
         stop.side = Side::Sell;
         stop.price = Some(Decimal::from(400));
@@ -9140,8 +9140,8 @@ mod tests {
         );
 
         let mut armed = linked_engine();
-        armed.arm(Divergence::DropNextAccountUpdate);
-        armed.arm(Divergence::DropNextAccountUpdate);
+        armed.arm(Divergence::DropNextAccountUpdate {});
+        armed.arm(Divergence::DropNextAccountUpdate {});
         let out = armed.process_with_market(
             Command::SubmitOrderGroup { orders: bracket() },
             1,
@@ -11236,7 +11236,7 @@ mod tests {
             Some(reading(0)),
         );
 
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
         let modified = e.process_stamped(
             Command::ModifyOrder {
                 client_order_id: "O1".into(),
@@ -11385,7 +11385,7 @@ mod tests {
     #[test]
     fn query_fills_books_each_fill_once_despite_duplicate_wire_events() {
         let mut e = Engine::new();
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
         let out = e.process_stamped(Command::SubmitOrder(order("O1", 10)), 1);
         // The wire carried the fill twice (the injected lie)...
         assert_eq!(
@@ -11588,7 +11588,7 @@ mod tests {
         // The widest submit the engine can answer: a duplicated fill plus a
         // partial plus an IOC remainder cancel plus the account state.
         let mut widest = Engine::new();
-        widest.arm(Divergence::DuplicateNextFill);
+        widest.arm(Divergence::DuplicateNextFill {});
         widest.arm(Divergence::PartialFillNext {
             client_order_id: esc_id.clone(),
             fraction: Decimal::new(5, 1),
@@ -11827,7 +11827,7 @@ mod tests {
             )),
             1,
         );
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
         let mut stop = order_with(&esc_id, Side::Sell, "BTCUSDT", 10, None);
         stop.order_type = OrderType::StopMarket;
         stop.trigger_price = Some(Decimal::from(1_000_000));
@@ -11899,7 +11899,7 @@ mod tests {
             );
             resting.order_type = OrderType::Limit;
             e.process_stamped(Command::SubmitOrder(resting), index as u64);
-            e.arm(Divergence::DuplicateNextFill);
+            e.arm(Divergence::DuplicateNextFill {});
         }
         let scans = e.pending_scans();
         assert_eq!(scans.len(), 3);
@@ -11931,7 +11931,7 @@ mod tests {
         stop.quantity = Decimal::from(10);
         stop.reduce_only = true;
         e.process_stamped(Command::SubmitOrder(stop), 2);
-        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DuplicateNextFill {});
 
         let scan = e.pending_scans().remove(0);
         let shape = e.book_shape();
@@ -12450,7 +12450,7 @@ mod tests {
     fn cancel_consumes_drop_next_account_update() {
         let mut e = banded(1);
         e.process_stamped(Command::SubmitOrder(limit_order("cancel-drop", 1)), 1);
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
         let canceled = e.process_stamped(
             Command::CancelOrder {
                 client_order_id: "cancel-drop".into(),
@@ -12608,7 +12608,7 @@ mod tests {
     #[test]
     fn a_resting_acceptance_leaves_drop_next_account_update_armed() {
         let mut e = banded(1);
-        e.arm(Divergence::DropNextAccountUpdate);
+        e.arm(Divergence::DropNextAccountUpdate {});
         let accepted = e.process_stamped(Command::SubmitOrder(limit_order("rest-keeps", 1)), 1);
         assert!(
             accepted
@@ -12671,7 +12671,7 @@ mod tests {
 
         let mut armed = banded(1);
         armed.process_stamped(Command::SubmitOrder(gtd()), 1);
-        armed.arm(Divergence::DropNextAccountUpdate);
+        armed.arm(Divergence::DropNextAccountUpdate {});
         let expired = armed.expire_orders(60, None, 60);
         assert!(
             expired

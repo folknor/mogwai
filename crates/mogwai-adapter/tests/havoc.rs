@@ -420,7 +420,7 @@ async fn ships_venue_havoc() {
             Divergence::RejectNextSubmit {
                 reason: "nope".into(),
             },
-            Divergence::DropNextAccountUpdate,
+            Divergence::DropNextAccountUpdate {},
             Divergence::GoDark { ms: 250 },
         ],
         data: None,
@@ -527,7 +527,7 @@ async fn ships_venue_havoc() {
         assert!(
             reject
                 .iter()
-                .any(|d| matches!(d, Divergence::DropNextAccountUpdate)),
+                .any(|d| matches!(d, Divergence::DropNextAccountUpdate {})),
             "DropNextAccountUpdate did not round-trip"
         );
     }

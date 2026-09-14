@@ -1036,7 +1036,7 @@ mod tests {
             control::Divergence::RejectNextSubmit {
                 reason: "nope".into(),
             },
-            control::Divergence::DropNextAccountUpdate,
+            control::Divergence::DropNextAccountUpdate {},
         ])
         .validate()
         .expect("every arm the connect-time carrier can deliver stays legal");

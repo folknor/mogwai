@@ -93,7 +93,7 @@ impl Engine {
         if apply_divergences
             && account_changed(out)
             && self
-                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate {}))
                 .is_some()
         {
             return;
@@ -1092,7 +1092,7 @@ impl Engine {
         let drop_update = apply_divergences
             && last_qty > Decimal::ZERO
             && self
-                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate {}))
                 .is_some();
         if !drop_update {
             out.push(VenueMessage::AccountState(self.snapshot(ts)));
@@ -2504,7 +2504,7 @@ impl Engine {
         // of it in the queue cannot block it - see `take_armed`.
         let duplicate = apply_divergences
             && self
-                .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
+                .take_armed(|d| matches!(d, Divergence::DuplicateNextFill {}))
                 .is_some();
         let mut out = Vec::new();
         if duplicate {
@@ -3267,7 +3267,7 @@ impl Engine {
             // holds open for the fill the author is aiming at.
             if !apply_divergences
                 || self
-                    .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                    .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate {}))
                     .is_none()
             {
                 out.push(VenueMessage::AccountState(self.snapshot(ts)));

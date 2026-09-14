@@ -3174,7 +3174,7 @@ pub(crate) mod tests {
         let shed = run
             .arm(
                 None,
-                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
             )
             .await;
         assert!(
@@ -3223,7 +3223,7 @@ pub(crate) mod tests {
         let shed = run
             .arm(
                 None,
-                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
             )
             .await;
         assert!(
@@ -3490,7 +3490,7 @@ pub(crate) mod tests {
             let shed = run
                 .arm(
                     None,
-                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
                 )
                 .await;
             assert!(shed.is_none(), "the record fills before it sheds");
@@ -3597,7 +3597,7 @@ pub(crate) mod tests {
             let shed = run
                 .arm(
                     Some("SCOPED-01"),
-                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
                 )
                 .await;
             assert!(shed.is_none(), "a pending record fills before it sheds");
@@ -3609,7 +3609,7 @@ pub(crate) mod tests {
         assert!(
             run.arm(
                 Some("SCOPED-01"),
-                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
             )
             .await
             .is_some(),
@@ -3618,7 +3618,7 @@ pub(crate) mod tests {
         assert!(
             run.arm(
                 Some("STRANGER-01"),
-                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill {}),
             )
             .await
             .is_none(),

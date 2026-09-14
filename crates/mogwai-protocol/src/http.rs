@@ -416,38 +416,23 @@ impl DivergenceRequest {
     /// The typed divergence this envelope names, refusing an unknown kind or an
     /// argument that kind does not take.
     ///
-    /// The per-kind argument list is checked here rather than left to the
-    /// variant decode, because the tagged enum ignores unknown keys and a
-    /// misspelled knob would otherwise arm the variant at its default.
+    /// An unknown kind is refused against `DIVERGENCE_KINDS`, which is proven
+    /// complete against the enum. An unknown argument is refused by the enum's
+    /// own decode, which denies unknown fields per variant, so there is no second
+    /// list of argument names here to fall out of step with the variants. A
+    /// `type` key inside `args` is refused explicitly, since the outer `kind`
+    /// would otherwise silently replace it.
     ///
     /// # Errors
     /// A message naming the unknown kind, the unknown argument, or the decode
     /// failure.
     pub fn divergence(&self) -> Result<Divergence, String> {
-        let allowed: &[&str] = match self.kind.as_str() {
-            "PartialFillNext" => &["client_order_id", "fraction"],
-            "RejectNextSubmit" | "RejectNextCancel" => &["reason"],
-            "DelayAcks" | "GoDark" | "StallData" => &["ms"],
-            "CommandLatency" => &[
-                "submit_act_ms",
-                "modify_act_ms",
-                "cancel_act_ms",
-                "submit_ack_ms",
-                "modify_ack_ms",
-                "cancel_ack_ms",
-            ],
-            "DuplicateNextFill" | "DropNextAccountUpdate" | "FaultTape" => &[],
-            "FeeSurcharge" => &["mult", "window_ms"],
-            "CancelOpenOrderSilently" => &["client_order_id"],
-            other => return Err(format!("unknown divergence kind {other}")),
-        };
-        if let Some(unknown) = self
-            .args
-            .keys()
-            .find(|key| !allowed.contains(&key.as_str()))
-        {
+        if !crate::control::DIVERGENCE_KINDS.contains(&self.kind.as_str()) {
+            return Err(format!("unknown divergence kind {}", self.kind));
+        }
+        if self.args.contains_key("type") {
             return Err(format!(
-                "unknown field args.{unknown} for divergence kind {}",
+                "unknown field args.type for divergence kind {}",
                 self.kind
             ));
         }
@@ -602,11 +587,10 @@ mod tests {
         );
     }
 
-    /// Every kind survives the envelope, and the scope is carried as given even
-    /// for the kind that refuses one.
-    #[test]
-    fn divergence_request_round_trips_every_kind_and_keeps_the_scope() {
-        let kinds = [
+    /// One instance of every kind, with every optional field set away from its
+    /// default so a dropped field shows as an inequality.
+    fn every_kind() -> [Divergence; 12] {
+        [
             Divergence::PartialFillNext {
                 client_order_id: "O-1".to_owned(),
                 fraction: Decimal::new(5, 1),
@@ -626,8 +610,8 @@ mod tests {
                 modify_ack_ms: 5,
                 cancel_ack_ms: 6,
             },
-            Divergence::DuplicateNextFill,
-            Divergence::DropNextAccountUpdate,
+            Divergence::DuplicateNextFill {},
+            Divergence::DropNextAccountUpdate {},
             Divergence::GoDark { ms: 4 },
             Divergence::StallData { ms: 5 },
             Divergence::FeeSurcharge {
@@ -637,8 +621,15 @@ mod tests {
             Divergence::CancelOpenOrderSilently {
                 client_order_id: "O-2".to_owned(),
             },
-            Divergence::FaultTape,
-        ];
+            Divergence::FaultTape {},
+        ]
+    }
+
+    /// Every kind survives the envelope, and the scope is carried as given even
+    /// for the kind that refuses one.
+    #[test]
+    fn divergence_request_round_trips_every_kind_and_keeps_the_scope() {
+        let kinds = every_kind();
         assert_eq!(kinds.len(), crate::control::DIVERGENCE_KINDS.len());
         for divergence in kinds {
             let request = DivergenceRequest::new(&divergence, Some("WYRD-01".to_owned()));
@@ -653,6 +644,53 @@ mod tests {
             kind: "DelayAcks".to_owned(),
             args: serde_json::from_str(r#"{"msec":3}"#).unwrap(),
         };
-        assert!(typo.divergence().unwrap_err().contains("args.msec"));
+        assert!(typo.divergence().unwrap_err().contains("msec"));
+    }
+
+    /// The argument list is the variants' own fields, with no second list to
+    /// drift: every kind, unit kinds included, refuses a key it does not take,
+    /// both through the control envelope and decoded directly as a havoc
+    /// config does. A `type` smuggled into `args` cannot rename the kind, and a
+    /// kind nobody has is refused by name.
+    #[test]
+    fn every_kind_refuses_an_argument_it_does_not_take() {
+        for divergence in every_kind() {
+            let mut request = DivergenceRequest::new(&divergence, None);
+            request
+                .args
+                .insert("not_a_knob".to_owned(), serde_json::Value::from(1));
+            let refusal = request
+                .divergence()
+                .expect_err("an unknown argument must be refused");
+            assert!(
+                refusal.contains("not_a_knob"),
+                "{} refused for another reason: {refusal}",
+                request.kind
+            );
+
+            let mut direct = serde_json::to_value(&divergence).unwrap();
+            direct["not_a_knob"] = serde_json::Value::from(1);
+            assert!(
+                serde_json::from_value::<Divergence>(direct).is_err(),
+                "{} decoded directly with an unknown key",
+                request.kind
+            );
+
+            let mut retagged = DivergenceRequest::new(&divergence, None);
+            retagged
+                .args
+                .insert("type".to_owned(), serde_json::Value::from("FaultTape"));
+            assert!(retagged.divergence().is_err());
+        }
+        let unknown = DivergenceRequest {
+            symbol: None,
+            account: None,
+            kind: "Earthquake".to_owned(),
+            args: serde_json::Map::new(),
+        };
+        assert_eq!(
+            unknown.divergence().unwrap_err(),
+            "unknown divergence kind Earthquake"
+        );
     }
 }

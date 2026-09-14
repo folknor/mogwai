@@ -3790,7 +3790,7 @@ fn divergence_requests_refuse_unknown_fields_and_acknowledge_in_json() {
     assert!(
         refusal["error"]
             .as_str()
-            .is_some_and(|error| error.contains("args.typo")),
+            .is_some_and(|error| error.contains("unknown field `typo`")),
         "the refusal points at the ignored field: {body}"
     );
 

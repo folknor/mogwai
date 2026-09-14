@@ -1326,7 +1326,7 @@ pub(crate) async fn arm_divergence(
         // queued as a dead entry.
         // terminal, so it is handled before the engine-armed set and never
         // recorded: there is no later ledger for a venue arm to replay onto.
-        Divergence::FaultTape => {
+        Divergence::FaultTape {} => {
             // An account scope was already refused above, through
             // `accepts_account_scope`.
             if !run.fault_venue() {
@@ -1347,8 +1347,8 @@ pub(crate) async fn arm_divergence(
         engine_div @ (Divergence::PartialFillNext { .. }
         | Divergence::RejectNextSubmit { .. }
         | Divergence::RejectNextCancel { .. }
-        | Divergence::DuplicateNextFill
-        | Divergence::DropNextAccountUpdate) => {
+        | Divergence::DuplicateNextFill {}
+        | Divergence::DropNextAccountUpdate {}) => {
             // Relay an eviction in the ack body. The queue is bounded
             // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the oldest
             // entry - so a bare `202` with an empty body would tell an armer

@@ -341,8 +341,17 @@ impl GeneratorArm {
 /// passenger-local by construction. That was true of a one-account venue and
 /// stopped being true when a run started carrying tens of ledgers; the venue and
 /// `docs/havoc.md` both describe the per-account routing above.
+///
+/// Unknown keys are refused per variant, from the variant's own fields. A
+/// divergence knob that is misspelled, renamed or removed must not decode to
+/// the variant at its default: `CommandLatency` with `submit_act_msec` would
+/// otherwise arm a zero act delay, since every field there defaults, and report
+/// success. The kinds without arguments are empty struct variants rather than
+/// unit variants for the same reason - serde checks unknown keys against a
+/// struct variant, including one with no fields, and ignores them on a unit
+/// variant. Pinned by `every_kind_refuses_an_argument_it_does_not_take`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Divergence {
     /// Fill the next matching order only `fraction` of the way, leaving the rest open.
     PartialFillNext {
@@ -403,14 +412,14 @@ pub enum Divergence {
         cancel_ack_ms: u64,
     },
     /// Emit the next fill event twice.
-    DuplicateNextFill,
+    DuplicateNextFill {},
     /// Swallow the next account-state update that follows an order executing or
     /// leaving the book (induce account drift). A fill qualifies, and so does a
     /// cancel freeing a resting order's hold, a funds-check eviction, and a stop
     /// trigger that booked either. An order merely coming to rest does not,
     /// even though its hold moves `locked`: acceptance always precedes
     /// the fill, so an arm spent there could never reach what it was aimed at.
-    DropNextAccountUpdate,
+    DropNextAccountUpdate {},
     /// Stop sending anything for `ms` (simulate a venue blackout), bounded
     /// by `MAX_DIVERGENCE_MS`. Frames produced during the window are
     /// dropped, not buffered. Re-arm with `ms: 0` to lift the window early;
@@ -471,7 +480,7 @@ pub enum Divergence {
     /// usable range - `sigma_y` at 1e308 was the shipped fixture - and both
     /// knobs that allowed it are now bounded at admission. A fault path with no
     /// door is a fault path nothing can test.
-    FaultTape,
+    FaultTape {},
 }
 
 /// Expands to `DIVERGENCE_KINDS` plus a compile-time proof that the list names
@@ -532,13 +541,13 @@ impl Divergence {
             | Self::RejectNextCancel { .. }
             | Self::DelayAcks { .. }
             | Self::CommandLatency { .. }
-            | Self::DuplicateNextFill
-            | Self::DropNextAccountUpdate
+            | Self::DuplicateNextFill {}
+            | Self::DropNextAccountUpdate {}
             | Self::GoDark { .. }
             | Self::StallData { .. }
             | Self::FeeSurcharge { .. }
             | Self::CancelOpenOrderSilently { .. } => true,
-            Self::FaultTape => false,
+            Self::FaultTape {} => false,
         }
     }
 }

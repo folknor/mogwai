@@ -343,11 +343,11 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
-        control::Divergence::DuplicateNextFill
-        | control::Divergence::DropNextAccountUpdate
+        control::Divergence::DuplicateNextFill {}
+        | control::Divergence::DropNextAccountUpdate {}
         // Nothing to validate: it carries no field, and it is legal against any
         // venue at any moment - a venue can always die.
-        | control::Divergence::FaultTape => Ok(()),
+        | control::Divergence::FaultTape {} => Ok(()),
     }
 }
 
@@ -729,7 +729,7 @@ mod tests {
                 },
                 control::Divergence::GoDark { ms: 250 },
                 control::Divergence::StallData { ms: 125 },
-                control::Divergence::FaultTape,
+                control::Divergence::FaultTape {},
             ],
             data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
             conn: ConnHavoc {
@@ -751,12 +751,30 @@ mod tests {
         assert_eq!(decoded, spec);
 
         // A fieldless variant still carries its tag and nothing else, which is
-        // what an externally-tagged enum has to get right for the venue to
-        // route it at all.
-        let fault_json = serde_json::to_string(&control::Divergence::FaultTape).unwrap();
+        // what an internally tagged enum has to get right for the venue to
+        // route it at all. Every fieldless kind is an empty struct variant, and
+        // each keeps the tag-only form in both directions.
+        for (divergence, wire) in [
+            (
+                control::Divergence::DuplicateNextFill {},
+                r#"{"type":"DuplicateNextFill"}"#,
+            ),
+            (
+                control::Divergence::DropNextAccountUpdate {},
+                r#"{"type":"DropNextAccountUpdate"}"#,
+            ),
+            (control::Divergence::FaultTape {}, r#"{"type":"FaultTape"}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&divergence).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<control::Divergence>(wire).unwrap(),
+                divergence
+            );
+        }
+        let fault_json = serde_json::to_string(&control::Divergence::FaultTape {}).unwrap();
         assert_eq!(fault_json, r#"{"type":"FaultTape"}"#);
         let fault: control::Divergence = serde_json::from_str(&fault_json).unwrap();
-        assert_eq!(fault, control::Divergence::FaultTape);
+        assert_eq!(fault, control::Divergence::FaultTape {});
 
         let stall_json =
             serde_json::to_string(&control::Divergence::StallData { ms: 500 }).unwrap();
@@ -1104,9 +1122,9 @@ mod tests {
             control::Divergence::CancelOpenOrderSilently {
                 client_order_id: "O-1".into(),
             },
-            control::Divergence::DuplicateNextFill,
-            control::Divergence::DropNextAccountUpdate,
-            control::Divergence::FaultTape,
+            control::Divergence::DuplicateNextFill {},
+            control::Divergence::DropNextAccountUpdate {},
+            control::Divergence::FaultTape {},
         ] {
             validate_divergence(&div).expect("non-numeric variants are always valid");
         }
