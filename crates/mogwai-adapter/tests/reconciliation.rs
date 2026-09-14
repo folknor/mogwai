@@ -50,7 +50,6 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     *state.account_body.lock().expect("account body mutex") = Some(account_json(
         "MOGWAI-001",
         &format!("[{}]", position_json("1", "100.00")),
@@ -491,7 +490,6 @@ async fn targeted_order_queries_refuse_a_wrong_venue_row() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_stop_report_carries_its_trigger_price_and_status() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut rows = state.venue_orders.lock().expect("venue orders mutex");
         rows.push(venue_stop_order_row(

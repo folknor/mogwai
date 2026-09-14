@@ -286,9 +286,13 @@ pub(crate) struct WsConnectionConfig {
     pub(crate) sink_dead: Option<Arc<AtomicBool>>,
 }
 
-/// What an identity probe established. Three outcomes, not two: only one of
-/// them refuses the connection, and the other two are refused-to-refuse for
-/// different reasons that must not be reported as each other.
+/// What an identity probe established.
+///
+/// There was once a third outcome, a well-formed body carrying no run at all,
+/// read as a venue predating run identity and let through. The venue and this
+/// client build from one tree, so no such venue exists: a JSON answer that is not
+/// this build's health body is someone else holding the address, and it is a
+/// mismatch.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IdentityOutcome {
     /// The venue named this client's run.
@@ -296,12 +300,8 @@ pub(crate) enum IdentityOutcome {
     /// No usable answer - a transport error, an error status, or a body that is
     /// not JSON. Indistinguishable from the socket failing the same way.
     Unreachable(String),
-    /// Answered, well-formed, and carrying no run identity at all. This is
-    /// version skew, not a transport failure: the venue predates run identity.
-    /// It was filed under `Unreachable` once, which made a real skew
-    /// undiscoverable by anyone grepping for the category it was filed under.
-    Unidentified(String),
-    /// Answered, by a different run.
+    /// Answered, as something other than this client's run: a different seed,
+    /// or a body that is not this build's health body.
     Mismatch(String),
 }
 
@@ -310,28 +310,23 @@ pub(crate) enum IdentityOutcome {
 /// Split out so the classification is testable without a socket - the bug this
 /// exists to prevent was a correctly-worded detail filed under a contradicting
 /// headline, which no black-box assertion on behaviour would have caught,
-/// because all three non-mismatch paths behave identically.
+/// because the non-mismatch path behaves like a confirmation.
 pub(crate) fn classify_identity(result: Result<(), String>) -> IdentityOutcome {
     match result {
         Ok(()) => IdentityOutcome::Confirmed,
         Err(reason) if reason.starts_with(IDENTITY_UNREACHABLE) => {
             IdentityOutcome::Unreachable(reason)
         }
-        Err(reason) if reason.starts_with(IDENTITY_NOT_REPORTED) => {
-            IdentityOutcome::Unidentified(reason)
-        }
         Err(reason) => IdentityOutcome::Mismatch(reason),
     }
 }
 
-/// Runs the identity check, turning "could not ask" and "asked, got no answer
-/// to this question" into distinct outcomes from "asked, and it is someone
-/// else".
+/// Runs the identity check, turning "could not ask" into a distinct outcome
+/// from "asked, and it is someone else".
 ///
-/// Neither non-answer is a mismatch. A probe can fail for the same transport
+/// An unanswered probe is not a mismatch: it fails for the same transport
 /// reasons the socket can, and refusing terminally on that would turn a blip
-/// into a dead client; a venue too old to report a run cannot be judged by a
-/// check it does not implement. Only a venue that answers, as a different run,
+/// into a dead client. A venue that answers, as anything other than this run,
 /// earns the refusal.
 async fn verify_run_identity(
     check: &(
@@ -352,16 +347,6 @@ async fn verify_run_identity(
             );
             Ok(())
         }
-        IdentityOutcome::Unidentified(reason) => {
-            tracing::warn!(
-                socket = label,
-                %reason,
-                "this venue does not report a run at all, so this client cannot verify it is \
-                 the one it was launched against; proceeding, but the venue and this build are \
-                 out of step - rebuild the older one to get the check back"
-            );
-            Ok(())
-        }
         IdentityOutcome::Mismatch(reason) => Err(reason),
     }
 }
@@ -369,12 +354,6 @@ async fn verify_run_identity(
 /// Prefix marking an identity probe that got no usable answer - the request
 /// failed, or returned an error status, or returned something that is not JSON.
 pub(crate) const IDENTITY_UNREACHABLE: &str = "unreachable: ";
-
-/// Prefix marking an identity probe that was answered, correctly, by a venue
-/// that reports no run at all. Distinct from [`IDENTITY_UNREACHABLE`] because
-/// nothing failed: this is version skew, and calling it a transport failure
-/// sends whoever reads the log looking for a network problem that is not there.
-pub(crate) const IDENTITY_NOT_REPORTED: &str = "unidentified: ";
 
 /// Asks the venue at this address which run it is serving.
 ///
@@ -1387,23 +1366,20 @@ mod tests {
         );
     }
 
-    /// A venue that answers, correctly, and reports no run is version skew - not
-    /// a transport failure, and not a mismatch.
-    ///
-    /// All three non-mismatch paths behave identically (the connection
-    /// proceeds), so no assertion on behaviour can tell them apart; only the
-    /// category distinguishes them, and only this test pins it. The skew case
-    /// was filed under `Unreachable` once, which put a correct detail under a
-    /// headline contradicting it and hid a real version mismatch from anyone
-    /// grepping the category it was filed as.
+    /// An unanswered probe is unreachable and proceeds; an answered one that is
+    /// not this run - a different seed, or JSON that is not this build's health
+    /// body - is a mismatch and refuses. The not-a-health-body case once read as
+    /// version skew and proceeded; in one tree it is someone else at the address.
     #[test]
-    fn a_venue_that_reports_no_run_is_skew_not_a_transport_failure() {
-        let skew = classify_identity(Err(format!(
-            "{IDENTITY_NOT_REPORTED}http://x/health answered without a run_seed"
-        )));
+    fn an_answer_that_is_not_this_run_is_a_mismatch_and_no_answer_is_unreachable() {
+        let foreign = classify_identity(Err(
+            "http://x/health answered JSON that is not this build's health body, so it is not \
+             the run this client was given: missing field `run_seed`"
+                .to_owned(),
+        ));
         assert!(
-            matches!(skew, IdentityOutcome::Unidentified(_)),
-            "an answered probe with no run is skew, got {skew:?}"
+            matches!(foreign, IdentityOutcome::Mismatch(_)),
+            "an answered probe that is not this build's health body refuses, got {foreign:?}"
         );
 
         for unreachable in [

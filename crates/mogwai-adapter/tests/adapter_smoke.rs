@@ -13,7 +13,7 @@ mod common;
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -53,7 +53,6 @@ use tokio::sync::mpsc::unbounded_channel;
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn connect_seeds_initial_account_state() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
@@ -68,7 +67,6 @@ async fn connect_seeds_initial_account_state() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_cash_configured_client_still_connects_to_a_futures_run() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(sink_tx);
@@ -107,7 +105,6 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     // The exec leg, built exactly as every other test in this binary builds one,
@@ -328,7 +325,6 @@ fn callsign_query_value(request_line: &str) -> Option<String> {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_submitted_position_id_reaches_the_wire() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     state.ws_exec_frames.lock().unwrap().push(
         r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
             .into(),
@@ -396,7 +392,6 @@ async fn adapter_submit_drives_live_exec_events() {
     // and account frames. The fill names order `O-1`, venue id `V-1`, qty `1`,
     // price `100.00`; the account snapshot carries a `9900` USDT balance.
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(
@@ -498,7 +493,6 @@ async fn adapter_submit_drives_live_exec_events() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn an_account_labelled_differently_is_still_served() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(
@@ -605,7 +599,6 @@ async fn an_account_labelled_differently_is_still_served() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn adapter_submits_a_stop_market_and_sees_the_fill_with_no_triggered() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(
@@ -698,7 +691,6 @@ async fn adapter_submits_a_stop_market_and_sees_the_fill_with_no_triggered() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn an_order_list_reaches_the_wire_as_linked_legs() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
@@ -796,7 +788,6 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_trigger_less_trailing_stop_with_activation_reaches_the_venue() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
@@ -848,7 +839,6 @@ async fn a_trigger_less_trailing_stop_with_activation_reaches_the_venue() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
@@ -904,7 +894,6 @@ async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn unsupported_init_shapes_are_refused_before_submitted() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
@@ -1031,7 +1020,6 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered() {
     let state = Arc::new(StubState::default());
-    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(

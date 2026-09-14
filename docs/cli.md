@@ -339,8 +339,9 @@ A Rust consumer does not spell these grammars by hand. `mogwai_protocol::http`
 exports the `/health` body as `Health`, which refuses an unknown field on the
 body and on its `fault` object alike. The fault `kind` is a string in an open
 taxonomy rather than a field, so a kind the reader has never seen still
-decodes. A reader that wants only a slice of the body reads it as an untyped
-JSON value instead, as the adapter's run-identity probe does for `run_seed`.
+decodes. The adapter's run-identity probe decodes the whole `Health` and reads
+`run_seed` off it. A reader outside the tree that wants only a slice of the body
+can read it as an untyped JSON value.
 `Health` sits beside the request carriers the venue itself decodes:
 `SocketQuery` for the `/ws` upgrade, `AccountQuery`, `HistoryQuery` for the
 operator history routes, `OpenAccountRequest` and `DivergenceRequest` - and
@@ -444,13 +445,14 @@ sense - it reports tape faults, not a connection's delivery backlog - and a faul
 may also die on its own terminal-fault path, which is separate. What the field
 buys is seeing the fault before that.
 
-Two outcomes are deliberately not a mismatch, and they are reported as different
-things because they are different things. A probe that gets no usable answer -
+One outcome is deliberately not a mismatch. A probe that gets no usable answer -
 the request failed, or returned an error status, or returned something that is
 not JSON - is a transport failure, indistinguishable from the socket failing the
-same way, so the connection proceeds. A probe that is answered by a venue
-reporting no `run_seed` is version skew: nothing failed, the venue simply
-predates run identity, and the log says so rather than blaming the network.
+same way, so the connection proceeds. A probe answered with JSON is decoded as
+this build's strict `/health` body, and one that is not that shape - a missing
+`run_seed` included - is refused as a mismatch: the venue and the adapter build
+from one tree, so there is no older venue that could answer that way, only
+something else holding the address.
 
 A launcher that captures the child's stderr must also drain it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly

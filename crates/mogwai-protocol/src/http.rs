@@ -52,8 +52,9 @@ fn encode_query<T: Serialize>(query: &T) -> String {
 /// Denies unknown fields: a body carrying a field this build does not know is
 /// a decode failure, not a newer venue to read around. Fields are not additive
 /// for a typed reader. A reader that needs to survive a body it did not build
-/// against - the adapter's identity probe, which reads `run_seed` alone - reads
-/// it as an untyped `serde_json::Value` instead.
+/// against reads it as an untyped `serde_json::Value` instead. The adapter's
+/// identity probe is not one: it decodes this type whole, and a JSON body that is
+/// not this shape is refused as someone else holding the address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Health {

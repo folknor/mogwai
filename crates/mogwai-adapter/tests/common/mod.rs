@@ -316,10 +316,9 @@ pub struct StubState {
     /// a test on `fail_clock` counts the attempts rather than inferring them
     /// from how long the connect took.
     pub clock_hits: AtomicUsize,
-    /// When true, `GET /account` returns an empty account snapshot. Defaults to
-    /// false so older-venue compatibility remains the default stub behavior.
-    pub serve_account: AtomicBool,
-    /// Body served for `GET /account` when `serve_account` is set.
+    /// Body served for `GET /account`, which the stub always answers, like the
+    /// venue: there is no older venue without the route for it to model, and the
+    /// client now fails connect on a missing one.
     pub account_body: Mutex<Option<String>>,
     /// The request line of every `GET /account` this stub served, in order.
     ///
@@ -602,28 +601,22 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
 
     if path.starts_with("/ws") {
         serve_ws(stream, head, state).await;
-    } else if path.starts_with("/account") {
-        // `path` is the whole request target, query string included, so the
-        // prefix match already accepts `/account?account=...`. Record the
-        // target before answering, including on the 404 arm: a client that
-        // named the wrong account against an older venue named it just the
-        // same.
+    } else if path == "/account" || path.starts_with("/account?") {
+        // `path` is the whole request target, query string included. Matched on
+        // the route exactly, so `/accounts` is not answered with a snapshot.
+        // Record the target before answering.
         state
             .account_requests
             .lock()
             .expect("account requests mutex")
             .push(path.to_string());
-        if state.serve_account.load(Ordering::Relaxed) {
-            let body = state
-                .account_body
-                .lock()
-                .expect("account body mutex")
-                .clone()
-                .unwrap_or_else(|| account_json("MOGWAI-001", "[]", 0));
-            respond_json(stream, "200 OK", &body).await;
-        } else {
-            respond_json(stream, "404 Not Found", "").await;
-        }
+        let body = state
+            .account_body
+            .lock()
+            .expect("account body mutex")
+            .clone()
+            .unwrap_or_else(|| account_json("MOGWAI-001", "[]", 0));
+        respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/health") {
         state.health_hits.fetch_add(1, Ordering::Relaxed);
         if state.fail_health.load(Ordering::Relaxed) {
@@ -643,12 +636,24 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             .clone();
         // Status and fault are one decision on the real endpoint and cannot
         // disagree there, so they are derived together here too.
-        let body = match fault {
-            Some(symbol) => format!(
-                r#"{{"status":"faulted","oms_type":"netting","run_seed":{run_seed},"fault":{{"symbol":"{symbol}","kind":"arrival.intensity_ceiling","clock_ns":0}}}}"#
-            ),
-            None => format!(r#"{{"status":"ok","oms_type":"netting","run_seed":{run_seed}}}"#),
-        };
+        // Written through the shared type, so the stub's body is the venue's
+        // shape by construction: the client decodes it strictly, and a
+        // hand-spelled body missing a field would read as someone else holding
+        // the address.
+        let fault = fault.map(|symbol| mogwai_protocol::http::HealthFault {
+            symbol,
+            kind: "arrival.intensity_ceiling".to_owned(),
+            clock_ns: 0,
+        });
+        let body = serde_json::to_string(&mogwai_protocol::http::Health {
+            status: mogwai_protocol::http::HealthStatus::from_faulted(fault.is_some()),
+            oms_type: mogwai_protocol::OmsType::Netting,
+            run_seed,
+            fault,
+            reset_account_on_reconnect: false,
+            account_ttl_ms: 0,
+        })
+        .expect("a health body serializes");
         respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/clock") {
         state.clock_hits.fetch_add(1, Ordering::Relaxed);
@@ -1440,7 +1445,23 @@ pub async fn connected_exec_client(
     );
     let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
     client.start().expect("start grabs sink");
+    connect_seeding_account(&mut client, &cache, sink_rx).await;
+    client
+}
 
+/// Connect an exec client, playing the runner's part for the initial account.
+///
+/// `connect()` pulls `GET /account`, forwards the snapshot, and then waits for
+/// the account row to reach the cache before returning - which only happens if
+/// something drains the forwarded event into the cache, the job a node's runner
+/// does. A test that calls `connect()` bare waits out the registration timeout.
+/// The drained `AccountState` is consumed here, so the caller's first event is
+/// whatever follows it.
+pub async fn connect_seeding_account(
+    client: &mut MogwaiExecutionClient,
+    cache: &Rc<RefCell<Cache>>,
+    sink_rx: &mut UnboundedReceiver<ExecutionEvent>,
+) {
     let account_id = client.account_id();
     let drain_account = async {
         match next_exec_event(
@@ -1460,9 +1481,9 @@ pub async fn connected_exec_client(
             other => panic!("expected initial AccountState, got {other:?}"),
         }
     };
-    let (connect, ()) = tokio::join!(client.connect(), drain_account);
+    let (connect, ()) =
+        connect_with_deadline(async { tokio::join!(client.connect(), drain_account) }).await;
     connect.expect("connect seeds account");
-    client
 }
 
 /// The single-symbol instrument id every test trades.

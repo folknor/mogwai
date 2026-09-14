@@ -70,40 +70,6 @@ use crate::{
 const ACCOUNT_REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const ACCOUNT_REGISTRATION_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Distinguishes a 404 (older venue without GET /account, the only
-/// warn-and-continue case) from every other pull failure (decode, 5xx, timeout,
-/// transport), which must fail connect() rather than silently recreate the
-/// first-fill `account not found in cache` this fix exists to eliminate.
-#[derive(Debug)]
-enum FetchAccountError {
-    NotFound,
-    Other(anyhow::Error),
-}
-
-impl std::fmt::Display for FetchAccountError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => write!(f, "fetch account returned 404"),
-            Self::Other(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl std::error::Error for FetchAccountError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::NotFound => None,
-            Self::Other(err) => err.source(),
-        }
-    }
-}
-
-impl From<anyhow::Error> for FetchAccountError {
-    fn from(err: anyhow::Error) -> Self {
-        Self::Other(err)
-    }
-}
-
 /// Pull the configured account's ledger from `GET /account`.
 ///
 /// The account is always named, for the reason `ws_url` names it on the socket:
@@ -117,12 +83,17 @@ impl From<anyhow::Error> for FetchAccountError {
 /// The query is written by the venue's own carrier,
 /// `mogwai_protocol::http::AccountQuery`, so the key cannot be misspelled here
 /// and the id is form-encoded the way the venue's decoder reads it.
+///
+/// Every failure is one kind. A 404 once meant a venue predating the route and
+/// was let through with the account left to seed off the first fill; the venue
+/// and this client build from one tree and the route always answers, so a 404
+/// now means the address is not this venue, and it fails like any other.
 async fn fetch_account(
     http: &HttpClient,
     quota: &HttpQuota,
     base: &str,
     account_id: AccountId,
-) -> Result<mogwai_protocol::AccountState, FetchAccountError> {
+) -> anyhow::Result<mogwai_protocol::AccountState> {
     quota.wait().await;
     let query = mogwai_protocol::http::AccountQuery {
         account: Some(account_id.as_ref().to_owned()),
@@ -145,15 +116,11 @@ async fn fetch_account(
         )
         .await
         .context("fetch account")?;
-    if response.status.as_u16() == 404 {
-        return Err(FetchAccountError::NotFound);
-    }
-    if !response.status.is_success() {
-        return Err(FetchAccountError::Other(anyhow::anyhow!(
-            "fetch account returned {}",
-            response.status.as_u16()
-        )));
-    }
+    anyhow::ensure!(
+        response.status.is_success(),
+        "fetch account returned {}",
+        response.status.as_u16()
+    );
     // The venue's own body type, strict at the snapshot and the nested account,
     // so a key either side moves is a decode failure here rather than a list of
     // names this client keeps by hand. `sweep_passes` is evaluator observation
@@ -162,7 +129,6 @@ async fn fetch_account(
     serde_json::from_slice::<mogwai_protocol::http::AccountSnapshot>(&response.body)
         .map(|snapshot| snapshot.account)
         .context("decode account")
-        .map_err(FetchAccountError::Other)
 }
 
 /// Notes the venue's account label when it differs from the configured one.
@@ -1326,31 +1292,20 @@ impl ExecutionClient for MogwaiExecutionClient {
         // deliberately; see the reattach comment in lifecycle.rs for why
         // auto-healing it would undo an armed divergence.
         //
-        // Failure policy: a 404 means a venue predating GET /account; warn and
-        // fall back to the legacy reactive path (the account seeds off the first
-        // fill, as before this fix). Any other failure against a venue that does
-        // publish the route is fatal - warn-and-continue there would silently
-        // recreate the exact first-fill cache-miss this fix exists to eliminate.
-        match fetch_account(
+        // Failure policy: every failure is fatal. Warn-and-continue would
+        // silently recreate the first-fill cache miss this pull exists to
+        // eliminate, and there is no older venue without the route to excuse.
+        let state = fetch_account(
             &self.http,
             &self.http_quota,
             &http_base_url,
             self.config.account_id,
         )
         .await
-        {
-            Ok(state) => {
-                note_account_label(&state, self.config.account_id);
-                handle_exec_message(VenueMessage::AccountState(state), &self.exec_context());
-                self.await_account_registered().await?;
-            }
-            Err(FetchAccountError::NotFound) => {
-                tracing::warn!("venue predates GET /account; account will seed on first fill");
-            }
-            Err(err) => {
-                return Err(anyhow::Error::new(err).context("initial account snapshot"));
-            }
-        }
+        .context("initial account snapshot")?;
+        note_account_label(&state, self.config.account_id);
+        handle_exec_message(VenueMessage::AccountState(state), &self.exec_context());
+        self.await_account_registered().await?;
         let inbound_havoc = inbound_havoc(&self.config.havoc);
 
         // `ws_url` already carries the `/ws` path.
@@ -1833,34 +1788,21 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// A failed pull propagates rather than falling back to any client-side
     /// belief: an error makes reconciliation fail loudly, whereas a silent
     /// fallback would reintroduce the stale confirmation this exists to remove.
-    /// The one exception is a 404, which `connect` already treats as a venue
-    /// predating the route and continues past - failing here would turn that
-    /// documented legacy path into a hard failure of the whole mass status,
-    /// taking the order and fill reports down with it.
+    /// A 404 once reported no positions here, for a venue predating the route;
+    /// that was position reconciliation going blind with a green result, and no
+    /// such venue exists in one tree, so it fails like every other error.
     async fn generate_position_status_reports(
         &self,
         cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        let state = match fetch_account(
+        let state = fetch_account(
             &self.http,
             &self.http_quota,
             &self.config.http_base_url(),
             self.config.account_id,
         )
         .await
-        {
-            Ok(state) => state,
-            Err(FetchAccountError::NotFound) => {
-                tracing::warn!(
-                    "venue predates GET /account; reporting no positions rather than failing \
-                     the whole mass status - position reconciliation is blind against this venue"
-                );
-                return Ok(Vec::new());
-            }
-            Err(err) => {
-                return Err(anyhow::Error::new(err).context("position status venue truth"));
-            }
-        };
+        .context("position status venue truth")?;
         note_account_label(&state, self.config.account_id);
         // The venue's snapshot instant is the honest `ts_last` for every row:
         // the wire `Position` carries no per-symbol activity timestamp, and

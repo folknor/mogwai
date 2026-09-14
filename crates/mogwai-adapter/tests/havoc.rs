@@ -254,7 +254,7 @@ async fn submit_exec_client(
     state: Arc<StubState>,
 ) -> (MogwaiExecutionClient, UnboundedReceiver<ExecutionEvent>) {
     let base_url = bound_stub(state).await;
-    let (sink_tx, sink_rx) = unbounded_channel::<ExecutionEvent>();
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(sink_tx);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -272,13 +272,11 @@ async fn submit_exec_client(
         config.account_id,
         config.account_type,
         None,
-        cache,
+        Rc::clone(&cache),
     );
     let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
     client.start().expect("start grabs sink");
-    common::connect_with_deadline(client.connect())
-        .await
-        .expect("connect opens transports");
+    common::connect_seeding_account(&mut client, &cache, &mut sink_rx).await;
     client
         .submit_order(SubmitOrder::new(
             TraderId::from("MOGWAI-001"),
@@ -309,7 +307,7 @@ async fn submit_stop_exec_client(
     havoc: HavocSpec,
 ) -> (MogwaiExecutionClient, UnboundedReceiver<ExecutionEvent>) {
     let base_url = bound_stub(state).await;
-    let (sink_tx, sink_rx) = unbounded_channel::<ExecutionEvent>();
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(sink_tx);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -330,13 +328,11 @@ async fn submit_stop_exec_client(
         config.account_id,
         config.account_type,
         None,
-        cache,
+        Rc::clone(&cache),
     );
     let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
     client.start().expect("start grabs sink");
-    common::connect_with_deadline(client.connect())
-        .await
-        .expect("connect opens transports");
+    common::connect_seeding_account(&mut client, &cache, &mut sink_rx).await;
     client
         .submit_order(submit_command(&order, order.init_event().clone()))
         .expect("a stop-market is no longer refused at conversion");
@@ -432,7 +428,7 @@ async fn ships_venue_havoc() {
     // one outright. This test cares only about the HTTP control leg,
     // but it still has to be a client that could hear an answer; hold the
     // receiver alive for the duration rather than dropping it.
-    let (sink_tx, _sink_rx) = unbounded_channel::<ExecutionEvent>();
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(sink_tx);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -450,13 +446,11 @@ async fn ships_venue_havoc() {
         exec_config.account_id,
         AccountType::Cash,
         None,
-        cache,
+        Rc::clone(&cache),
     );
     let mut exec_client = MogwaiExecutionClient::new(core, exec_config).expect("client builds");
     exec_client.start().expect("start exec client");
-    common::connect_with_deadline(exec_client.connect())
-        .await
-        .expect("exec connect ships havoc");
+    common::connect_seeding_account(&mut exec_client, &cache, &mut sink_rx).await;
 
     assert_eq!(state.control_hits.load(Ordering::Relaxed), 3);
     // The control bodies must round-trip the actual payload values, not merely

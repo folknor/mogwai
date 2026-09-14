@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 use crate::{
     clock::fetch_clock,
     convert,
-    lifecycle::{HttpQuota, IDENTITY_NOT_REPORTED, IDENTITY_UNREACHABLE, RunIdentityCheck},
+    lifecycle::{HttpQuota, IDENTITY_UNREACHABLE, RunIdentityCheck},
 };
 
 /// One message queued for timed delivery through the latency pump: the wall
@@ -573,18 +573,21 @@ pub(crate) fn run_identity_check(
                         response.status.as_u16()
                     ));
                 }
-                let health: serde_json::Value = serde_json::from_slice(&response.body)
+                let body: serde_json::Value = serde_json::from_slice(&response.body)
                     .map_err(|err| format!("{IDENTITY_UNREACHABLE}{url} is not JSON: {err}"))?;
-                // A venue too old to report its run is unidentifiable rather than
-                // wrong, and refusing it would make this field's arrival a breaking
-                // change for a client that opted in.
-                let Some(reported) = health.get("run_seed").and_then(serde_json::Value::as_u64)
-                else {
-                    return Err(format!(
-                        "{IDENTITY_NOT_REPORTED}{url} answered without a run_seed; the venue \
-                         predates run identity"
-                    ));
-                };
+                // Decoded as this build's strict `Health`. The venue and this client
+                // build from one tree, so a JSON body that is not that shape - a
+                // missing `run_seed` included - is not a venue of this build that
+                // could be judged some other way: whoever answered is not the run
+                // this client was given, which is exactly what a mismatch refuses.
+                let health: mogwai_protocol::http::Health =
+                    serde_json::from_value(body).map_err(|err| {
+                        format!(
+                            "{url} answered JSON that is not this build's health body, so it \
+                             is not the run this client was given: {err}"
+                        )
+                    })?;
+                let reported = health.run_seed;
                 if reported == expected {
                     Ok(())
                 } else {
