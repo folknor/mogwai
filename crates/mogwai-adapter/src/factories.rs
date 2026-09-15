@@ -97,6 +97,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
         name: &str,
         config: &dyn ClientConfig,
         cache: CacheView,
+        _clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn ExecutionClient>> {
         let config = config
             .as_any()

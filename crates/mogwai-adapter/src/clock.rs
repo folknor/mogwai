@@ -19,7 +19,7 @@ use nautilus_common::{
     runner::{TimeEventMessage, TimeEventSender, try_get_time_event_sender},
     timer::{TimeEvent, TimeEventCallback, create_valid_interval},
 };
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{DurationNanos, UUID4, UnixNanos};
 use nautilus_network::http::HttpClient;
 use ustr::Ustr;
 
@@ -187,7 +187,7 @@ impl Clock for MogwaiClock {
     fn set_timer_ns(
         &mut self,
         name: &str,
-        interval_ns: u64,
+        interval_ns: DurationNanos,
         start_time_ns: Option<UnixNanos>,
         stop_time_ns: Option<UnixNanos>,
         callback: Option<TimeEventCallback>,
@@ -290,7 +290,7 @@ struct MogwaiTimerSpec {
 
 impl MogwaiTimer {
     fn new(spec: MogwaiTimerSpec, sim: SimClock, sender: Option<Arc<dyn TimeEventSender>>) -> Self {
-        let interval_ns = create_valid_interval(spec.interval_ns).get();
+        let interval_ns = create_valid_interval(DurationNanos::new(spec.interval_ns)).get();
         let next_time = if spec.fire_immediately {
             spec.start_time_ns.as_u64()
         } else {
@@ -775,7 +775,7 @@ mod tests {
         clock
             .set_timer_ns(
                 "past-stop",
-                interval_ns,
+                DurationNanos::new(interval_ns),
                 None,
                 Some(UnixNanos::from(stop)),
                 None,
@@ -834,7 +834,7 @@ mod tests {
         clock
             .set_timer_ns(
                 "catchup",
-                interval_ns,
+                DurationNanos::new(interval_ns),
                 Some(UnixNanos::from(start)),
                 Some(UnixNanos::from(stop)),
                 None,

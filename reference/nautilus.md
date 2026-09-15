@@ -6,14 +6,15 @@ about mogwai, and each one is load-bearing because nothing in nautilus will
 catch us being wrong about the thing it describes.
 
 Read the source from `research/nautilus_trader`; build against the crates.io
-release pinned in `mogwai-adapter/Cargo.toml`, currently 0.63. The two are kept
+release pinned in `mogwai-adapter/Cargo.toml`, currently 0.64. The two are kept
 in sync, so what is read here is what compiles.
 
 Provenance, because it bears on how far each claim can be trusted. The spine of
 this document came out of three read-only investigations of nautilus on
 2026-08-14, made against HEAD `409214a` rather than against the pin. The claims
-marked verified below were re-derived against the in-tree copy on 2026-08-29,
-and every claim here was re-swept at the 0.63 pin on 2026-09-02.
+marked verified below were re-derived against the in-tree copy on 2026-08-29;
+every claim here was re-swept at the 0.63 pin on 2026-09-02, and again at the
+0.64 pin on 2026-09-15.
 
 That first sweep was worth its cost, which is the argument for repeating it
 after any pin bump: four claims had moved or were wrong. The equity double count
@@ -152,10 +153,14 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    Stated more narrowly than it was on 2026-08-14, deliberately. That version
    justified the rule by saying reconciliation-flagged fills take a different
    path through the commission-void logic. Audited 2026-08-29: no consumer in
-   the execution or portfolio crates branches on the flag at all, and the
-   commission-void path keys on voided quantity rather than on it. The rule is
-   kept because a truthful label costs nothing and a false one is unrecoverable
-   downstream, not because a divergent path was found.
+   the execution or portfolio crates branched on the flag at all, and the
+   commission-void path keys on voided quantity rather than on it. That changed
+   at 0.64: `has_active_inferred_fill` in the live crate's reconciliation skips
+   fills whose flag is false when it looks for an inferred fill still in force,
+   so a venue fill falsely flagged true would now be mistaken for a synthesized
+   one there. The rule was kept before that consumer existed because a truthful
+   label costs nothing and a false one is unrecoverable downstream; it now also
+   has a divergent path behind it.
 
 ## The live inbound channel is closed
 
@@ -256,7 +261,7 @@ Four traps, each of which must be guarded rather than exposed as a knob:
   construction errors.
 - **`Equity` has no size precision, size increment or multiplier.** Verified:
   the trait hardcodes size precision zero, size increment one and multiplier
-  one, so fractional-share equities are not expressible at the 0.63 pin. The
+  one, so fractional-share equities are not expressible at the 0.64 pin. The
   hardcoded multiplier is the same mechanism that makes the `forex` refusal
   necessary rather than fixable with an info bag, since nautilus computes
   notional itself at an implicit multiplier of one.
@@ -268,9 +273,13 @@ Four traps, each of which must be guarded rather than exposed as a knob:
   constructors; 0.63 removed the panicking `new` and made `new_checked` private,
   leaving the builder as the only public way in.
 
-And one place nautilus will not catch a misdeclaration. Verified 2026-09-02 at
-the 0.63 pin: the
-backtest exchange refuses a cash account trading a perpetual, but the check is a
-hardcoded match over the two crypto perpetual types and the generic perpetual
-type only. `FuturesContract` is absent, so a cash account holds a dated future
-with no complaint. Do not rely on nautilus to catch a misdeclared future.
+The 0.64 sweep moved two claims and no trap: the cash-account guard below now
+covers dated futures, and rule 8's audit sentence gained a consumer of the flag.
+
+One guard is backtest-only. Verified 2026-09-15 at the 0.64 pin:
+`SimulatedExchange::add_instrument` refuses a cash account trading
+`CryptoPerpetual`, `CryptoFuture`, `FuturesContract` or `PerpetualContract`. At
+0.63 the match left out both dated types, so a cash account held a dated future
+with no complaint. The check lives in the backtest exchange, so a live node
+against this venue still meets no such refusal: do not rely on nautilus to catch
+a misdeclared future on the live path.
