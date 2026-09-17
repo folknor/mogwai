@@ -5892,28 +5892,44 @@ fn book_cascade_config() -> CascadeConfig {
 
 /// Two phase rows so the minute-of-session table lookup is exercised.
 fn book_config() -> BookDynamicsConfig {
-    let row = |start_minute: u32, replenish_mean: f64| BookPhaseKnobs {
-        start_minute,
-        replenish_mean,
-        touch_by_spread: 2.0,
-        target_one: 0.5,
-        target_two: 0.4,
-        p_widen: 0.28,
-        p_narrow: 0.7,
-        p_follow: 0.6,
-        p_dep_lt: 0.19,
-        p_dep_eq: 0.45,
-        p_dep_gt: 0.6,
-        p_size_match: 0.42,
-        p_split: 0.05,
-        impact_permanent_ticks: 0.34,
-        impact_transient_ticks: 0.32,
-        impact_transient_decay: 0.9,
-        slack_ticks: 0.5,
+    let row = |start_minute: u32, replenish_one: f64| {
+        // The size law concentrates its mass at two units, keeping the
+        // non-match arm deterministic in value.
+        let mut size_law = vec![0.0; mogwai_data_size_law_entries()];
+        size_law[1] = 1.0;
+        BookPhaseKnobs {
+            start_minute,
+            replenish_one,
+            replenish_two: 3.2,
+            replenish_three: 3.0,
+            p_join: 0.15,
+            join_mean: 2.0,
+            join_cap_factor: 1.5,
+            target_one: 0.5,
+            target_two: 0.4,
+            p_widen: 0.28,
+            p_narrow: 0.7,
+            p_follow: 0.6,
+            p_dep_lt: 0.19,
+            p_dep_eq: 0.45,
+            p_dep_gt: 0.6,
+            p_match: [0.77, 0.37, 0.25, 0.18, 0.14, 0.09, 0.07],
+            size_law,
+            p_split: 0.05,
+            impact_permanent_ticks: 0.34,
+            impact_transient_ticks: 0.32,
+            impact_transient_decay: 0.9,
+            slack_ticks: 0.5,
+        }
     };
     BookDynamicsConfig {
+        depth_ratios: vec![2.0, 2.4, 2.5, 2.83, 3.0, 3.0, 3.33],
         phases: vec![row(0, 2.2), row(600, 1.05)],
     }
+}
+
+fn mogwai_data_size_law_entries() -> usize {
+    crate::SIZE_LAW_ENTRIES
 }
 
 fn book_calendar() -> SessionCalendar {

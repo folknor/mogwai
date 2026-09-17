@@ -677,3 +677,784 @@ Two findings landed during it, both binding on the transcription:
 - Checked timestamp advancement everywhere on the new path: the
   current `saturating_add` sites would produce tied timestamps at
   overflow where the contract says exhaustion.
+
+## Third spar, 2026-09-16: the refit rulings
+
+A fresh codex session (01a0aad0) re-derived the transfer failure with two
+new measurements and reached consensus on the refit's mechanism. The
+option-A framing ("cap the widening, refit `touch_by_spread`") was
+incomplete on three counts, and one causal claim in the earlier account
+was wrong.
+
+### The failure re-derived
+
+The prototype's passing re-check (pooled 0.117) ran on a doubling ladder
+(`depth_growth` 2.0) while the engine walks the declared MNQ ladder
+(growth 1, flat) - the frozen-ladder rule binds the generator to the
+preset's declaration, and the two were never the same object. Probed at
+the prototype defaults: the doubling ladder carries a hidden spread tail
+(6.6 percent at 5+, p99 7, invisible because the score keyed only
+spread states 1 and 2), and the declared flat ladder reproduces the
+engine failure quantitatively (19.5 percent at 5+, touch mean 18.2
+against the engine's parent-size mean of 16).
+
+The instability is coupled links, not one loop: the ladder converts
+parent quantity into recession distance; witnessed recession widens the
+book and suppresses same-parent relaxation; spread-keyed replenishment
+converts width into touch quantity; size matching converts touch
+quantity back into parent quantity. One correction to the earlier
+account: a size-matched parent equals the struck touch exactly, so it
+exhausts exactly one level - the size-match channel amplifies parent
+size directly but never recession distance. Multi-level recession rides
+on independent draws and on residual growth under a growing ladder, and
+the refit's ablations separate those channels.
+
+### The rulings
+
+- **The exponential replenishment law is falsified by the data and
+  retired.** The real conditional touch is non-monotone in spread (p50
+  2 at spread 1, 5 at spread 2, 3 at spread 3+), which no monotone
+  exponential carries at any exponent. Replenishment becomes a fitted
+  per-spread-state table over the model's three states, matched
+  distributionally (p50, p90, mean per state, buckets if a geometric
+  cannot carry them), never only by means. A draw uses the state
+  immediately after the transition creating the queue; an existing
+  queue is never redrawn because a later transition changed the
+  spread. Cancellation widening makes no draw at all - it exposes the
+  ladder level behind the pulled touch.
+- **The recession cap is a saturated state transition, not a clamp.**
+  `visible_recede = min(levels_exhausted.max(1), room below
+  MAX_SPREAD_TICKS)`; the struck side and the follow-in both move by
+  the recede actually applied; the exact residual survives only when
+  the visible touch lands on the level it belongs to, otherwise the
+  capped touch takes a replenishment draw; only a positive applied
+  recession suppresses same-parent relaxation. The cap is a safety
+  boundary - the spread fit is carried by the expanded score, not by
+  the ceiling.
+- **The witness is measured, never read off the coin.** The scored
+  witness is the observed one - the next parent's pre-trade touch moved
+  through the struck side, the real extractor's exact rule, trichotomy
+  on executed quantity - and the internal depletion probability is an
+  unobserved parameter calibrated so the observed witness matches. A
+  ceiling-blocked recession is whatever the observation says it is;
+  projection can still move the touch.
+- **The score carries the tail.** Spread states 3 and 4+, the 3+
+  transition row (recovery from the tail is the gate most able to catch
+  a book that enters wide states too often and escapes too fast), touch
+  p50 at 3+ and p90s at 1 and 2, the observed witness per arm, executed
+  size buckets and p99, and levels mean; spread p99/5+ share, executed
+  mean, unexecuted share and the coin rate ride as unscored
+  diagnostics.
+- **The ladder is measured before it is parameterized.** A new
+  `depth-profile` subcommand reads the mbp-10 corpus (56 days on the
+  pool as of 2026-09-16, top-up continuing) into a non-parametric
+  conditioned profile: occupancy, level gaps, per-level quantities and
+  ratios to touch, cumulative depth by level and by tick distance,
+  spread-state and touch-bucket conditioning, monthly stability, and
+  the size-over-depth diagnostic. The family is selected from the
+  profile, not assumed: the first day already shows jump-then-plateau
+  ratios (2.0 at level 1 saturating toward 3.4 by level 9) that no
+  single multiplier expresses, so the shared definition extends to a
+  fitted per-level vector - still frozen per parent, still walked
+  identically by generator and crossing, which is what the second
+  spar's consensus actually requires (shared frozen arithmetic, not a
+  one-parameter family).
+- **`depth_levels` is a display bound, declared, never fitted terminal
+  depth.** mbp-10 sees ten published levels and cannot identify where
+  liquidity ends; the venue's contract is that displayed depth is what
+  an order can cross. The shape is fitted, the bound is declared, and
+  the bound's adequacy is checked at fit time: the joint tail of
+  requested size against cumulative depth, conditioned on phase and
+  spread, compared across a deeper bound. First-day reading: executed
+  size exceeds eight fitted levels 0.07 percent of the time.
+- **Deterministic depth ships if it passes; stochastic depth waits for
+  evidence.** The conditional deep-liquidity variation the frozen
+  vector omits is re-tested against the mbp-10 profile (does it
+  materially control sweep length or exhaustion); if the deterministic
+  profile passes the conditional gates, the omission is recorded as a
+  model limit. Any stochastic extension is a separate sparred change -
+  it is a wire-contract question, since generator-private randomness
+  would break the shared-book contract.
+- **Ablations distinguish cause from bound.** Fitted ladder with the
+  exponential law (`--replenish-exp`), per-state table with the flat
+  ladder, both without the cap, full mechanism with it - so the landing
+  can state what the table fixes, what the ladder fixes, and what the
+  cap merely bounds.
+
+The Sep 11 fitted per-phase knob values were never persisted (they lived
+in the reverted working-tree preset table); the refit re-derives them
+and the landing persists them in the preset with provenance.
+
+## The refit run, 2026-09-16: pooled convergence and the fourth spar
+
+### The diffusion pin
+
+Free-fitting the prototype's diffusion drifted to sig_ln 2.1 - the
+score buying the dmid tail from vol-of-vol the engine does not have,
+the transfer-divergence class the first transcription paid for. The
+knobs are pinned by measurement instead: a protocol-34 placed-book
+quotes week has mid equal to the rounded latent, and
+`analysis/tape-v2/mnq-impact-off.toml` (the MNQ preset with the
+propagator zeroed through the override mechanism) removes the impact
+term at the source, so its tape's per-parent mid changes are the
+cascade's external diffusion alone. The pin
+(`diffusion_pin.py` against `engine_diffusion_probe.py` output) lands
+on sigma_e 0.9, sig_ln 0.4, df 6 at 0.027 mean log miss - and the
+same triple whether pinned against the impact-off tape or the full
+tape decomposed through the p34 propagator constants, which closes the
+fourth spar's contamination objection with the pin validated rather
+than revised. Per-phase engine diffusion barely moves (asia mean 0.885
+ticks, ny_open 0.822, pooled 0.79 with impact, 0.68 without), so the
+phase fits share the pin. The book impact terms (g, a_t, rho) stay
+free: they replace the propagator on the book path.
+
+### The pooled fit
+
+Converged at 0.153 over the expanded 33-target score, 400k parents:
+slack 2.0, p_dep lt/eq/gt 0.0/0.65/0.6, p_narrow 0.88, p_target_1/2
+0.35/0.40, p_widen 0.14, p_follow 0.7, p_size_match 0.18 (see the
+deconvolution gate below), replenish table 1.6/5.5/3.0, g 0.33, a_t
+0.32, rho 0.9, on the one-day ladder ratios. Residual misses:
+touch_p50_2 3 against 4, witness eq 0.67 against 0.74, spr_1_stay 0.79
+against 0.68, size_gt 0.18 against 0.08, dmid-1 0.28 against 0.235.
+
+p_dep_lt fitted to zero: at the pinned diffusion, projection alone
+produces the lt-arm observed witness (0.17 against 0.183 real). The
+parameter stays available for phase tables; the pooled fit does not
+identify it. Ruled acceptable in the fourth spar with diagnostics
+separating projection-produced from depletion-produced witness.
+
+### The target-share cliff
+
+At slack 2.0, moving p_target_2 from 0.40 to 0.45 (target-3 share 0.25
+to 0.20) collapses the impact curve (0.46/0.69/0.68 to 0.35/0.51/0.45)
+and inflates dmid-0 (0.40 to 0.50): with a loose projection band the
+book tracks the anchor mainly through directional narrowing and
+depletion, and parking more books at one tick dries the narrowing
+channel up. The anchor-tracking regime is carried by spread
+composition, not by g and a_t alone. The operating point is the
+healthy side (0.40); slack 1.5 sits further from the cliff but softens
+impact measurably (0.163 pooled).
+
+### The ablations
+
+At the operating point (score, spread 5+ share, spread p99): the
+exponential law on the fitted ladder 0.168 / 0.009 / 4; the per-state
+table on the flat declared ladder 0.284 / 0.046 / 7; both fixes
+uncapped 0.143 / 0.010 / 5; the full mechanism 0.153 / 0.009 / 4. The
+flat ladder is the dominant structural cause, the exponential law is
+the amplifier that engages once width appears, and the cap binds
+rarely, costing 0.01 pooled - retained per the consensus as the
+boundary for phase configs the pooled fit never tested.
+
+### Fourth-spar gates, owed before the transcription
+
+A fresh codex session (01a0ab3c) reviewed the run. The cap ruling, the
+zero lt coin, and the per-level ladder vector stand. Three gates bind
+before any fitted constant ships, plus smaller owed items:
+
+1. ~~Pin the external diffusion from an uncontaminated engine
+   quantity~~ - closed above via the impact-off config, same triple.
+2. **Deconvolve the size law.** Drawing the non-match arm from the
+   observed marginal double-counts matching behaviour
+   (M_V = p M_T + (1 - p) F), so the fitted p_size_match 0.18 is an
+   effective coefficient, not the behavioural probability. The
+   identifier is the exact-match share conditioned on the touch value
+   (`match_by_touch` in `micro_stats.py`, landed): coincidental
+   matches vanish at large touches, so the conditional rate converges
+   on p. Fit p and the independent law F jointly; reject any candidate
+   giving F negative mass.
+3. **Demonstrate a robust neighbourhood around every phase fit,** not
+   a passing point: vary both target shares on the simplex, slack,
+   narrowing, widening and impact jointly, across seeds and monthly
+   holdouts, and measure the distance to the tracking-regime boundary.
+   A phase whose acceptable fits occupy only a narrow ridge falsifies
+   the tracking mechanism for that phase and wants a tracking channel
+   that does not depend on the book being wide enough to narrow - a
+   new mechanism and a new spar, not to be added pre-emptively.
+
+Also owed: hard per-target tolerances for the load-bearing statistics
+(trichotomy, witness arms, transition rows, impact lags, tail,
+exhaustion) rather than the mean-log score alone, so correlated easy
+targets cannot dilute a load-bearing failure; multi-seed ablations
+(one common-seed run does not cleanly price the cap); cap-hit-rate
+diagnostics; and the 8-versus-10 display-bound replay (same requested
+parents through both bounds, comparing fill shortfall, sweep length,
+last price and impact - the 0.07 percent executed-size figure is a
+diagnostic, not an identification of unmet demand).
+
+## The floor artifact and the final prototype state, 2026-09-16
+
+### The attractor was the price floor
+
+Executing the fifth spar's slack-table fix produced a paradox - it
+healed seed 3 but collapsed the previously healthy seed 1, the seeds
+swapping basins - and a windowed regime dump showed the collapse as
+sharp 120k-parent epochs with the depletion coin firing normally
+(0.44) while the observed witness sat at 0.09 and the mid froze. The
+contradiction located the cause: the prototype initialized the latent
+price at 1000 ticks while projection and settle clamp the bid at one,
+so a 400k-parent walk at sigma 0.9 reaches the floor and the book jams
+against an absorbing boundary. At a realistic origin (100,000 ticks,
+where real MNQ trades) every collapse disappears: the bistability, the
+fourth spar's target-share cliff, and the robustness ridge all trace
+to the floor. A doubled-origin run reproduces every statistic to the
+printed digit (translation invariance proven), and the boundary budget
+for an engine week is 56 walk standard deviations. Flat slack is
+restored as the mechanism of record; the per-state slack table remains
+as plumbing defaulting to the shared value, unadopted because its
+justification was the artifact.
+
+### The size law on integer support
+
+The sixth spar found the grouped deconvolution incoherent with the
+simulator's bucket representatives (coincidence in 6-10 landed only on
+the representative 7). The mixture is now solved on integer support:
+`parent_size_pmf_full` and `touch_pmf_full` (masses at 1..30, pooled
+tail) from the real extraction, exact within-bucket coincidence,
+matched mass subtracted at each integer, convergence checked, negative
+mass rejecting. The simulation draws integer sizes from the deconvolved
+F and carries the full seven-bucket match table (deconvolved p(t) about
+0.77/0.37/0.25/0.18/0.14/0.09/0.07, matched total about 0.38); all
+seven simulated match cells sit inside the real cross-month band.
+
+### The band rule (two tiers, declared)
+
+Every score key is gated by the real cross-month p10-p90. Tier 1,
+prototype-mandatory: impact lags and by-spread, witness arms, all seven
+match cells, the size and touch statistics, spread pmf, dprice pmf,
+levels mean, plus diagnostics spread 5+ share and unexecuted share.
+Tier 2, not identified by the parent-indexed prototype (it cannot
+condition on elapsed time) and therefore engine-mandatory through the
+gen-quotes micro-stats convention: the dmid buckets and the three
+stay-rates. A tier-2 prototype miss is not evidence of anything; the
+engine transcription is not accepted unless every tier-2 target passes
+there.
+
+### The final pooled row and the named exceptions
+
+Pooled at 400k, fixed origin, replenish table 1.3/5.5/3.0 (state 1
+re-selected on the size cluster directly after the mean-log grid proved
+flat there): score 0.083, all impact, witness, match, spread and touch
+targets inside band, cap-hit rate 0.001, witness attribution 0.79
+coin-produced against a 0.17 projection background, reconstructed
+executed-size marginal at TV 0.035 from the real median (real months
+sit 0.002-0.014). Three tier-1 cells remain beyond every real month by
+one to two percent relative and are carried as named frozen exceptions,
+engine-gated: size_gt_touch 0.097 against a worst real month of 0.095,
+levels_mean 1.067 against a real minimum of 1.076, dprice-1 0.419
+against a real maximum of 0.413. A truncation channel (a large parent
+executing only the touch) could move them but is deliberately not
+added: the deconvolved match table already absorbs real truncation, so
+adding it without re-deriving the three-way mixture would double-count.
+
+The exception semantics, exactly (seventh spar): these three cells are
+the only tier-1 exemptions the prototype carries - the phase deferrals
+below are a different instrument and never become exceptions. At the engine gate
+each binds one-sided at its frozen value with a sampling allowance -
+size_gt_touch not above 0.097, levels_mean not below 1.067, dprice-1
+not above 0.419 - while every other tier-1 cell takes its ordinary
+real-month band. The fitted rows live in one source of truth,
+`analysis/tape-v2/book-config.json`, which the prototype CLI defaults,
+the robustness battery and the ablation runner all read; the battery
+emits an executable verdict (zero unexpected tier-1 misses at the
+center, all three impact lags at three quarters of real or better
+across the whole neighborhood, the one-sided tail and unexecuted
+contracts) and exits nonzero on failure. The integer-support
+deconvolution is pinned by a shared fixture
+(`analysis/tape-v2/deconvolution-fixture.json`: inputs, expected p(t)
+and F, the declared rules, and a rejecting case) that the Rust
+transcription's test consumes, so the two implementations cannot
+drift apart unnoticed.
+
+### Gate results at the final state
+
+- Ten-seed centers, five rows: impact kept 10/10 everywhere, seed
+  variation within 0.004 of score.
+- Neighborhood surfaces (7-knob joint jitter, 24 samples, 2 seeds):
+  impact kept in 100 percent of samples in every phase, worst points
+  graceful (0.54-0.87 of real), pooled tier-1 misses in the
+  neighborhood matching the center (p50 5).
+- Monthly holdouts, fixed origin: pooled 0.102-0.287 over 14 months,
+  median 0.15, the known 2026-06 outlier.
+- Ablations, two seeds, fixed origin: flat ladder 0.23 (dominant
+  defect), exponential law 0.11, uncapped 0.085-0.088 against capped
+  0.085-0.088 - the cap costs nothing measurable and binds one parent
+  in a thousand.
+- Phase rows (fixed origin): asia 0.124, london 0.155, ny_open 0.111,
+  ny_close 0.112, impact centers on target (0.91/0.82, 0.93/0.91,
+  0.66/0.58, 0.58/0.60) with the impact terms as phase knobs (g quiet
+  0.40-0.47 against active 0.27-0.33, a_t 0.42-0.52 against 0.32).
+
+## The join channel and the phase rulings, 2026-09-16 (spars seven to nine)
+
+### The replacement-queue renewal
+
+The phase rows failed the per-phase tier-1 gate after every knob was
+exhausted (a diagnostic grid over the previously untouched p_dep_lt,
+p_dep_gt, per-phase slack, rho, g and a_t moved nothing that mattered:
+rho to 0.98 does not close the close's impact-100 and no knob moves its
+spread-2 touch). The queue attribution then identified a reachability
+defect: the observed spread-2 touch at the close decomposes as
+recession residuals 0.34, partial residuals 0.22, follow 0.18, widening
+exposure 0.11 - and the replenishment path that samples the fitted
+thick law has share zero. The model lacked any event adding depth to a
+surviving standing queue.
+
+The sanctioned extension - a replacement-queue renewal - was
+implemented at the ruled placement: immediately after the parent's
+diffusion and projection, before the pre-trade book is recorded, both
+standing sides in fixed order (bid then ask), keyed by the spread at
+the observation boundary, with exact surviving residuals untouched at
+the fill instant and the join recorded as secondary provenance so the
+attribution that justified it is not erased. Unbounded, the join fixed
+its targets and blew the touch tails exactly as predicted (touch p90-1
+to 12 against 7; the full-bucket gate caught it), so the adopted form
+bounds eligibility: only a queue below join_cap_factor times the
+current state's replenish mean attracts a join, because real queues
+are stationary - arrivals balance cancellations - and the model has no
+cancel channel. Three constants (p_join, join_mean, join_cap_factor),
+in the phase tables. The close adopts it (0.15, 2.0, 2.0); every other
+phase fits p_join zero, consistent with the attribution being
+close-specific.
+
+### The phase-acceptance ruling (ninth spar)
+
+The phase rows are approved as transcription candidates. Their
+enumerated prototype residuals are a closed adjudication ledger of
+prototype deferrals - never frozen exceptions; the three pooled cells
+remain the only frozen tier-1 exceptions. At the engine gate every
+deferred cell is remeasured under the matched convention (real arrival
+timing, elapsed-gap conditioning, the actual wire) against its
+original phase band: a cell inside clears; a cell outside fails
+acceptance and blocks the tape bless; no frozen prototype value
+becomes an alternative bound. No further prototype mechanism is
+authorized without a new diagnostic that identifies it - the recurring
+witness-arm pattern is structurally unidentifiable under the
+parent-indexed clock (the real witness conditions on gaps under 100
+milliseconds; the prototype cannot), so the engine measurement is the
+proper experiment for it.
+
+The deferral ledger, at 400k parents against the phase bands:
+- asia (3): witness lt 0.225 against hi 0.199; witness eq 0.786
+  against lo 0.793; size_pmf_11_20 0.015 against hi 0.014.
+- london (6): witness lt 0.258 against hi 0.207; witness eq 0.791
+  against lo 0.817; witness gt 0.787 against hi 0.759; size_pmf_1
+  0.568 against lo 0.590; size_pmf_11_20 0.016 against hi 0.013;
+  dprice-0 at the exact band edge.
+- ny_open (5): witness eq 0.692 against lo 0.705; touch_p90_1 7
+  against hi 5.7; touch_p90_2 12 against hi 10.7; size_p99 17 against
+  hi 15; size_pmf_11_20 0.015 against hi 0.012.
+- ny_close (4): witness gt 0.620 against hi 0.610; witness eq at the
+  exact upper edge; touch_p50_3 4 against hi 3; size_pmf_1 0.576
+  against lo 0.589.
+
+Handoff conditions: the bounded join enters the engine exactly as
+tested (placement, order, eligibility, provenance), and the engine
+comparison classifies band-edge cells at full float precision, never
+from rounded report text.
+
+### The transcription work list
+
+The fitted rows live in `analysis/tape-v2/book-config.json` (pooled
+base plus per-phase overrides), the deconvolution contract in
+`analysis/tape-v2/deconvolution-fixture.json`. The Rust landing:
+per-state replenish table; saturated recession; the seven-bucket match
+channel with F and p(t) computed from preset-carried integer pmfs at
+build time against the shared fixture; the per-level ratio ladder
+shared verbatim with the crossing (the scalar depth_growth is not a
+transcription of it); the bounded join inside the parent transition on
+the book rng with a fixed draw schedule; per-phase tables keyed by
+minute of session with provenance; checked timestamp advancement; the
+realistic origin question does not arise in the engine (real price
+levels); VolTrace emission per parent and the arrival-kernel swap
+stripping the book (closed-12b); then the MNQ preset table,
+`TAPE_PROTOCOL_VERSION` bump, golden re-bless, checkpoint byte-replay
+gates including intervals with successful and unsuccessful joins, the
+engine micro-stats gates (tier-2 mandatory, the deferral ledger
+adjudicated, the three pooled exceptions one-sided at frozen values),
+the minute gates on a composed walk, and the owner chart.
+
+## Tenth spar, 2026-09-17: the artifact chain, the shared ladder, and the transcription landing
+
+One codex session (01a0ac17), five exchanges to consensus. Three new
+decisions were settled and the Rust side of the work list landed green
+through `brokkr check --gate`; then the executable-verdict work below
+uncovered that the recorded battery adjudication did not reproduce, and
+two further exchanges settled the corrected gate semantics and a refit
+experiment.
+
+### The deconvolution placement, ratified with gates
+
+The engine consumes the deconvolved outputs (`p_match`, `size_law`) as
+preset data; Rust never implements the deconvolution. This supersedes
+the work-list line above that had Rust computing F and p(t) at build
+time: one offline implementation plus executable artifact-coherence
+gates beats two implementations that can drift. The gates that make it
+sound, all landed:
+
+- `deconvolution-fixture.json` version 2 carries, per phase (pooled
+  plus the four fitted), the median-month inputs, expected p and F to
+  full precision, and the identifiability evidence: per-bucket touch
+  observation counts by month and the per-month deconvolved p spread -
+  the joint inputs propagated through the derivation, because
+  p = (match - coincidence) / (1 - coincidence) and a stable observed
+  match rate can conceal an unstable inferred p when coincidence moves.
+- The declared thin-bucket rule: a bucket whose median monthly
+  observations fall under 2000 takes the pooled p fixed inside the
+  joint solve (`deconvolve_sizes(fixed_p=...)`) and the phase F is
+  recomputed under it - never patched after solving, which would break
+  the mixture. Measured: no bucket fires; the thinnest anywhere
+  (london 11+) never falls under 5900 in any month, and every phase
+  supports its own full seven-bucket table.
+- `deconvolution_check.py` is the regression gate, data-free: it
+  re-derives every phase block from the fixture's own committed inputs,
+  checks the expected outputs, pushes p and F back through the mixture
+  against declared reconstruction tolerances, and refuses the rejecting
+  case. Exit nonzero on any failure.
+- The artifact chain is closed: `deconvolve_phases.py --write-config`
+  is where derivation lands in `book-config.json`; the prototype CLI,
+  the battery and the ablations consume the adopted arrays from the
+  config (`adopted_size_channel`) and never re-derive, so no runner can
+  validate a law the preset does not ship. Adopted arrays verified
+  bit-identical to the runtime derivation they replaced.
+- A Rust test asserting the committed preset rows equal the fixture's
+  expected values (all seven probabilities, all thirty-one masses per
+  row) is owed with the preset authoring.
+
+### The shared ladder across crates, landed
+
+`mogwai_protocol::ladder_level_units` is the one definition: level zero
+the touch, level k behind it `max(1, round_ties_even(touch * r[k-1]))`
+units, the vector's length defining the display bound (`len + 1`
+levels), no run-out fallback - a level past the vector is a programming
+error, never manufactured tail liquidity. Rounding is ties-to-even,
+declared: the prototype is Python, whose `round` is ties-to-even, and
+Rust's default rounds ties away - touch 1 at ratio 2.5 is 2 units, not
+3; the discriminating case is pinned on both sides. `DepthLadder` is an
+enum in the protocol crate (legacy `Geometric` byte-for-byte for every
+non-book preset; `Ratios` for book presets), `HitBook` carries
+`Option<DepthLadder>` with `None` the unresolved state, and one
+resolution (`InstrumentProfile::resolved_ladder`) feeds all three venue
+paths - the reading cache, the test-only whole reading, and the sweep's
+hit stamping. The crossing converts the touch to integer units by
+checked exact division against the size grid and refuses an off-grid
+touch rather than rounding it.
+
+The adopted vector is the exercised prefix of the fitted profile:
+seven ratios (2.0, 2.4, 2.5, 2.83, 3.0, 3.0, 3.33), eight levels - the
+prototype walks `ratios[: max_levels - 1]` at `max_levels` 8, so the
+nine-entry default's trailing two values entered no fit and do not
+ship; they stay recorded in the config provenance for the owed
+8-versus-10 display-bound replay, which must replay identical requested
+parents through both bounds.
+
+### River identity covered the generator configs, found in review
+
+`RiverKey::resolve` hashed neither `scalars.cascade` nor
+`scalars.book` - the cascade moves every MNQ tape byte today, so two
+configurations of one symbol could collide in the river cache and a
+checkpoint chain built under one could be replayed under the other.
+Fixed: both optional configs hash whole, by canonical serialization,
+presence-tagged; legacy `depth_levels`/`depth_growth` stay excluded
+because they are crossing-only on every preset (a book preset's ladder
+rides inside the hashed book config). Pinned by a regression test that
+mints keys directly, bypassing the symbol-keyed memo.
+
+### The preset table shape
+
+The authored `[instrument.generator.book]` is a named `base` row, named
+partial overrides under `phases`, and a `schedule` of boundary
+references, materialized into complete immutable rows at
+deserialization - a pooled stretch repeated at several boundaries is
+three references to one row, not three copies that can drift. Dangling
+references, dead overrides and an override named `base` are refused.
+The MNQ schedule (session minutes): base at 0 (`open`), asia at 60,
+london at 540, base at 840 (`ny_pre`), ny_open at 930, base at 1050
+(`ny_mid`), ny_close at 1200, closed past 1380. The unfitted stretches
+take the pooled base explicitly. On the book path a missing session
+position is an invariant failure, never an implicit minute-zero phase.
+
+### The battery correction (the recorded adjudication did not reproduce)
+
+Closing the artifact chain and rerunning `book_robustness.py` failed
+all five approved rows - and the decomposition showed the battery, not
+the rows, was wrong, in three ways: it applied the three pooled frozen
+exceptions to phase rows; it implemented the one-sided frozen bounds
+with zero allowance, so the fitted pooled center itself tripped them
+(the frozen constants are rounded prose - levels_mean measures 1.0667
+against "1.067"); and it graded the center as a max over seeds, failing
+cells for sitting at a band edge. Excluding the exception cells from
+phase grading reproduces the ninth-spar deferral ledger cell for cell,
+which is the convention the adjudication must have run under - so the
+earlier "gate-adjudicated" record held for the CLI verdict and the
+ledger, and the battery itself was never green on the approved state.
+The prototype CLI report had the mirror defect (it skipped the
+exception cells unconditionally, so its "zero unexpected" never
+verified the frozen limits either). The corrected semantics, sparred to
+consensus:
+
+- The three frozen exceptions bind the pooled row only; on phase rows
+  those cells take their ordinary phase bands.
+- The one-sided pooled bounds carry a declared sampling allowance of
+  0.005 absolute - an explicit acceptance policy covering the rounding
+  of the frozen constants and realization noise, applied once, outward,
+  to the three pooled bounds and nothing else. Effective pooled limits,
+  recorded so the allowance cannot obscure the gate: size_gt_touch
+  0.102, levels_mean 1.062, dprice-1 0.424. The engine gate reuses the
+  same declared allowance as the same policy.
+- The deferral ledger is machine-readable in `book-config.json`
+  (`deferrals`: cell, pinned-recipe value, the band it missed) and the
+  battery classifies a miss as deferred only for a finite measurement
+  with a present band - a broken measurement fails before the ledger
+  lookup, and the engine never takes the ledger bypass.
+- The center verdict runs at the pinned sampling recipe
+  (`gate_recipe`: seed 1, sim seed 2, 400k parents, the sign-model
+  constants), the deterministic reproduction of the adjudicated
+  grading; further seeds are reported diagnostics. The close's
+  impact-100 flicker at its band edge under other seeds is a reported
+  sensitivity, not a deferral; its engine band remains binding.
+- The tail and unexecuted contracts bind across the whole neighborhood
+  in the exit status, not only at the center; the neighborhood score
+  spread is a diagnostic with no declared threshold.
+- One shared grading function (`proto_book.grade`) for the CLI report,
+  the battery and the refit grid, so no two runners answer different
+  questions.
+
+Under the corrected gate the pooled row passes: 0.0967, 1.0667 and
+0.4189 against effective limits 0.102, 1.062 and 0.424, zero
+unexpected misses. The mean-log score now reads 0.116 where the record
+above says 0.083: the score denominator grew when the match cells and
+full-bucket gates joined after convergence; the band verdict, not the
+mean-log score, is the gate, and the historical numbers stand as
+written beside their historical definition.
+
+### The newly graded cells, and the refit-first ruling
+
+Grading the three exception-family cells against phase bands - which
+the ninth-spar fits never did; they were excluded from the phase
+objective entirely - fails 10 of 12 phase cells at the pinned recipe:
+levels_mean below band everywhere (asia 1.0849 against 1.1163 and
+down, 1.5 to 2.8 percent short), size_gt_touch out in london (by a
+hair), ny_open and ny_close (+12 to +16 percent relative), dprice-1
+out high in ny_open (0.429 against 0.4087) and ny_close (0.457 against
+0.4165, ten percent relative) and out LOW in london (0.4021 against
+0.4039), which the truncation story does not predict. Asia is
+otherwise clean. These magnitudes exceed the pooled exception class,
+and the close fitted p_target_1 at 0.65 with dprice-1 unguarded, so
+knob room exists that no grid ever searched.
+
+The ruling: a bounded refit experiment (`book_refit_grid.py`) before
+any new exception. Per failing phase, a grid over the tracking knobs
+with the revised grading; feasibility before ranking (every impact
+cell inside its phase band, contracts held), then lexicographic on
+unexpected misses and score; deferred cells stay classified but their
+movement from the ledger's recorded values is reported, because paying
+for a new cell by worsening a deferred witness keeps the miss count
+while abandoning the adjudicated state; the selected candidate is
+re-graded at the pinned recipe and must pass the neighborhood battery
+before landing. What a grid can conclude is bounded: it establishes
+"no acceptable candidate in the searched neighborhood", never
+immovability - a cliff is claimed only if the measured response shows
+impact collapsing as the offending cells improve. A passing refit
+proceeds through the existing gates; a residual miss supplies evidence
+for a specifically bounded phase exception (each needing its own
+adjudication - london's low-side miss cannot inherit a high-side
+exception) or a mechanism spar with the owner in the loop. The grid
+result itself does not authorize extending the exception instrument.
+
+### The grid outcome, the levels measurement defect, and the parked state
+
+The grids (729 candidates per phase, feasibility then lexicographic,
+best re-graded at the pinned recipe) found no acceptable candidate in
+any searched neighborhood. The response is flat for levels_mean in
+every phase; flat for all three cells at ny_open; impact-collapsing
+where dprice-1 is forced at the close (the fourth-spar cliff,
+reproduced: candidates attacking it went infeasible on impact, and the
+nominal best dropped impact-100 below band); and at london the pair is
+movable only by roughly doubling the deferred witness-lt miss, which
+the material-deterioration rule rejects - london keeps its center row.
+
+Adjudicating that evidence surfaced a measurement defect that changes
+the levels story outright: the prototype scored fully exhausted levels
+where the real extractor counts distinct executed prices (a partially
+consumed stopping level counts there), provably wrong by the identity
+mean observed levels >= 1 + P(size > touch), which the recorded
+numbers violated. Corrected (`levels_x` now counts execution breadth;
+the mechanism's exhausted-level counter is untouched - recession
+distance is exhaustion), levels_mean flips to the high side of every
+band: pooled 1.148 against 1.085..1.121, asia 1.178, london 1.150,
+ny_open 1.139, ny_close 1.137, each above its band top. Consequences,
+sparred to consensus:
+
+- The pooled levels_mean frozen exception is retired as a gate: it
+  froze "not below 1.067" on the defective statistic, and the
+  corrected cell sits above the band, passing the floor vacuously. The
+  historical ruling stands as history; the cell grades against its
+  ordinary band. The pooled row is therefore no longer accepted
+  either.
+- The three dprice-1 phase misses (london 0.4021 low, ny_open 0.4290,
+  ny_close 0.4570) are prototype deferrals, extending the ledger: the
+  real target is the fast bucket (gaps under 100 ms) while the
+  parent-indexed prototype measures all consecutive pairs, the same
+  identification gap that created the witness deferrals; these cells
+  are new to the graded set, so recording them extends the enumeration
+  without reopening anything adjudicated. Their original phase bands
+  bind at the engine, without any allowance - a decision to waive an
+  engine dprice band would be a separate further decision, never a
+  consequence of accepting size or levels deviations.
+- What remains unexpected on every row: levels_mean high (1 to 3
+  percent relative) and size_gt_touch high (london at its exact band
+  edge; ny_open and ny_close around twelve percent relative; asia
+  inside its own band). Recorded as observations - excess sweep
+  breadth and excess over-touch execution - with residual touch
+  dependence as the candidate explanation: the non-match arm draws its
+  size independently of the touch, while real executed size plausibly
+  correlates with displayed size, so independence overshoots
+  P(executed > touch) and every breadth cell inherits it. This is a
+  hypothesis, not an identified cause; neither the corrected levels
+  result nor the grid identifies truncation or dependence as the
+  mechanism.
+
+The diagnostic that would test the hypothesis, designed under review
+(it is not yet implemented; the extractor emits pooled size-over-touch
+quantiles, not the bucketed strictly-greater counts it needs):
+compare real P(size > touch | touch bucket) against the model's
+predicted curve (1 - p(t)) * (1 - F_cdf(t)) - the independent model
+does not predict a flat curve, so the diagnostic is the discrepancy
+from this prediction, not the slope; strictly-greater counts over all
+valid parents at the touch (never conditioning away observed equals -
+independent draws produce equality too); averaged over the real touch
+distribution within buckets, never a representative touch; computed
+per month and phase before summarizing, with spread conditioning
+available; under the same parent grouping, aggressor classification
+and pre-parent quote selection as the extractor; the pooled tail
+handled explicitly. A persistent residual would reject the adopted
+independent mixture under matched observations but would not identify
+a replacement: an arbitrary touch-conditional F makes the
+match-versus-conditional-law decomposition non-unique, so a mechanism
+cycle must declare how that decomposition is identified before it is
+an intake re-derivation.
+
+The parked state, deliberate and recorded: the Rust transcription, the
+artifact chain and the corrected gate machinery are landed and green -
+implementation health, not acceptance. All five fitted rows are
+unaccepted under the corrected gate (pooled: levels_mean; phases:
+levels_mean and size_gt_touch beyond the ledger's deferrals). The
+neighborhood impact-retention criterion (every sample, every lag, at
+three quarters of real) also stands failing for pooled and ny_close;
+the recorded ninth-spar acceptance called worst points at 0.54-0.87 of
+real graceful, so the criterion and the accepted history conflict, and
+replacing it (a 0.5 collapse floor with the sub-0.75 share reported,
+per lag) would be a declared weakening of neighborhood acceptance -
+with an absolute floor unable to distinguish smooth degradation from a
+nearby cliff, the close's measured cliff stays an unresolved
+robustness limitation either way. The owner's fork, stated separately
+per decision: bounded size/levels deviations at recorded
+pinned-recipe values (with the allowance's effective limits shown) and
+ship; or the mechanism cycle behind the conditional diagnostic first;
+and, independently, whether to adopt the weakened neighborhood
+criterion. Preset authoring, the tape bump and the engine gates wait
+on that ruling.
+
+## Owner ruling, 2026-09-17: the diagnostic first, and the collapse floor
+
+Both recommendations adopted. The ship-versus-mechanism fork waits on
+the conditional size-dependence diagnostic, whose result turns the
+decision into a measurement: a small residual means the recorded
+size/levels deviations are honest bounds and the book ships with them
+frozen per row; a large one hands the mechanism cycle its identified
+target. And the neighborhood criterion is replaced: the binding
+contract is a declared collapse floor of 0.5 of real, every sample and
+every lag, with the share of samples under the old 0.75 mark reported
+per lag as a diagnostic. The floor is a declared weakening, recorded
+as such in the config's own comment, and the close's measured cliff
+stays an unresolved robustness limitation, which an absolute floor
+cannot see.
+
+Implementation, both halves:
+
+- The extractor's stats pass emits `size_gt_by_touch` beside the full
+  pmfs: strictly-greater counts at each integer touch up to 30 with
+  the tail pooled as >30, over all valid parents at the touch
+  (observed equals stay in the denominator), pooled and per spread
+  state. Raw counts, so the diagnostic aggregates per month and phase
+  before summarizing and applies its own floors.
+- `size_touch_dependence.py` compares the real per-bucket rate with
+  the adopted mixture's prediction (1 - p(t)) * (1 - F_cdf(t)) from
+  book-config.json's adopted arrays, predicted rates averaged over
+  the month's own within-bucket touch counts, never a representative
+  touch; the >30 tail is reported real-only because F pools its tail
+  mass there; --by-spread conditions the same table on spread state.
+  The residual is the discrepancy from the predicted curve, not the
+  slope, and a persistent residual rejects the independent mixture
+  without identifying its replacement.
+- The neighborhood policy lives in book-config.json (`neighborhood`:
+  collapse_floor 0.5, report_threshold 0.75), written by
+  `update_gate_config.py` with the ruling in its comment;
+  `book_robustness.py` reads it and its verdict binds the floor and
+  the contracts, reporting the sub-threshold share per lag.
+
+The diagnostic needs one real micro-stats pass on the run host (the
+per-print cache already carries the pre-trade touch; no re-extraction)
+to regenerate `MNQ-real-targets.json` with the new counts.
+
+### The diagnostic result, 2026-09-17: the independent mixture is rejected
+
+The corpus pass ran on the run host and reproduced every existing
+statistic exactly (the regenerated targets file is byte-equal outside
+the new emission), so the diagnostic reads the same adjudicated real
+side every gate reads. Two coherence checks held: touch 1 sits at zero
+pooled residual by construction (p(1) was solved from that very cell,
+so P(size > 1) = 1 - match(1) identically), and every bucket carries
+all fourteen months at the 200-observation floor.
+
+The residual is persistent and sign-structured, with the cross-month
+p10-p90 excluding zero in the load-bearing cells of every phase:
+
+- Pooled over spread: real strictly-greater rates sit below the
+  independence prediction at touches 2 through 5 in every phase
+  (bucket 2 residual -0.030 to -0.062 against predicted rates near
+  0.14), and far above it at 11+ (+0.017 to +0.046, the real rate
+  three to four times the predicted 0.013-0.017). Touch-weighted mean
+  absolute residual per phase: 0.012 to 0.020 on rates of 0.04 to
+  0.12, comparable to or larger than the size_gt_touch deviations the
+  ship branch would have frozen.
+- Conditioned on spread, the structure deepens and the touch-1
+  by-construction zero breaks: at spread 1 every small-touch cell is
+  far below prediction (touch 1 itself -0.015 to -0.050, bucket 2
+  near -0.075); at spread 2 the residuals are small except touch 1
+  high (+0.025 to +0.046); at spread 3+ every cell sits above
+  prediction, touch 1 by +0.059 to +0.098 and 11+ by +0.065 to
+  +0.124, with ny_close spread 3+ the worst surface (weighted mean
+  absolute residual 0.042).
+
+Reading: real executed size is conditioned on both the displayed touch
+and the spread beyond what the match channel carries - a wide book
+attracts larger relative orders and a locked one smaller, which the
+spread-blind independent arm cannot express at any parameter value.
+Per the ruling, this takes the mechanism branch of the fork: the
+recorded size/levels deviations are not honest frozen bounds, because
+the mechanism behind them is now identified and measured. The
+diagnostic's own caveat stands: the residual rejects the adopted
+mixture under matched observations but does not identify its
+replacement - an arbitrary touch-conditional F makes the
+match-versus-conditional-law decomposition non-unique - so the
+mechanism cycle must declare how that decomposition is identified
+(the spread-conditioned strictly-greater emission now exists as one
+anchor; a spread-conditioned match-by-touch would be its natural
+companion and is not yet emitted) before it becomes an intake
+re-derivation. That design is a spar with the owner in the loop, not
+a unilateral prototype extension.
+
+The battery under the adopted floor, same day, for the record: the
+neighborhood half now passes every row (floor kept 1.00, zero contract
+violations), with the sub-0.75 share per lag reported as ruled -
+zero everywhere except impact-100 at 0.02 pooled and 0.12 at the
+close, which is the known cliff neighborhood, recorded and unresolved.
+Every row still fails at the center, on exactly the parked cells
+(levels_mean everywhere, size_gt_touch at london, ny_open and
+ny_close; london's at its exact band edge), the deferred cells
+reproducing the ledger to the digit. The criterion no longer conflicts
+with the accepted history, and the remaining failures are precisely
+the cells whose mechanism the diagnostic identified.

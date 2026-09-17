@@ -124,15 +124,19 @@ pub fn touches_toward(side: Side, trigger: Decimal, traded: Decimal) -> bool {
 /// An earlier draft did flatten it, defaulted the ladder to zero levels, and
 /// then had to recognise that zero as "no book" in the engine - so every
 /// producer that forgot to populate the fields shipped a legitimate-looking
-/// invalid ladder instead of a compile error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// invalid ladder instead of a compile error. The unresolved state is
+/// `depth: None` for the same reason: an earlier revision spelled it as a
+/// zero-level zero-growth sentinel, which every consumer had to recognise
+/// rather than being unable to misread.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HitBook {
     pub bid_px: Decimal,
     pub ask_px: Decimal,
     pub bid_sz: Decimal,
     pub ask_sz: Decimal,
-    pub depth_levels: u16,
-    pub depth_growth: Decimal,
+    /// The ladder the venue resolved from this instrument's preset, or
+    /// `None` on a book the walk read before anything resolved it.
+    pub depth: Option<crate::DepthLadder>,
 }
 
 /// The print that satisfied a scan, and the book it is crossed against.
@@ -141,7 +145,7 @@ pub struct HitBook {
 /// at or before it - an instant before the river's first quote, or a walk whose
 /// budget opened past one. The order is then cancelled with a named reason
 /// rather than filled at any price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub ts_ns: u64,
     pub px: Decimal,
@@ -152,10 +156,9 @@ impl HitBook {
     /// The book a tape walk read, before anything resolved the instrument's
     /// ladder onto it. The walk knows the river; it does not know the preset.
     ///
-    /// The unresolved ladder is deliberately not a usable one - zero levels
-    /// quoted, zero growth - so a consumer that reaches the crossing path
-    /// without [`HitBook::resolve_ladder`] having run refuses instead of
-    /// walking a ladder nobody configured.
+    /// The unresolved ladder is `None`, so a consumer that reaches the
+    /// crossing path without [`HitBook::resolve_ladder`] having run refuses
+    /// instead of walking a ladder nobody configured.
     #[must_use]
     pub fn unresolved(bid_px: Decimal, ask_px: Decimal, bid_sz: Decimal, ask_sz: Decimal) -> Self {
         Self {
@@ -163,17 +166,15 @@ impl HitBook {
             ask_px,
             bid_sz,
             ask_sz,
-            depth_levels: 0,
-            depth_growth: Decimal::ZERO,
+            depth: None,
         }
     }
 
     /// Stamp the ladder the venue resolved from this instrument's preset onto a
     /// book the walk read. Called once, by the venue, on the way out of the
     /// sweep.
-    pub fn resolve_ladder(&mut self, levels: u16, growth: Decimal) {
-        self.depth_levels = levels;
-        self.depth_growth = growth;
+    pub fn resolve_ladder(&mut self, ladder: crate::DepthLadder) {
+        self.depth = Some(ladder);
     }
 }
 
@@ -200,8 +201,7 @@ impl Hit {
                 ask_px: px,
                 bid_sz: depth,
                 ask_sz: depth,
-                depth_levels: 1,
-                depth_growth: Decimal::ONE,
+                depth: Some(crate::DepthLadder::flat()),
             }),
         }
     }

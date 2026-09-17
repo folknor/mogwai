@@ -75,7 +75,7 @@ fn main() {
         black_box(engine.process_with_market(
             Command::SubmitOrder(limit(format!("BASE-{index}"), 200 + index as i64)),
             1,
-            Some(reading),
+            Some(reading.clone()),
         ));
     }
 
@@ -85,7 +85,7 @@ fn main() {
         black_box(engine.process_with_market(
             Command::SubmitOrder(limit(id.clone(), 1_000 + round as i64)),
             2,
-            Some(reading),
+            Some(reading.clone()),
         ));
         black_box(engine.process_with_market(
             Command::ModifyOrder {
@@ -95,7 +95,7 @@ fn main() {
                 trigger_price: None,
             },
             3,
-            Some(reading),
+            Some(reading.clone()),
         ));
         black_box(engine.process(
             Command::CancelOrder {

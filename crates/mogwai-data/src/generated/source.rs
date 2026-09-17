@@ -31,7 +31,6 @@ use mogwai_protocol::{
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::{TickEvent, TickFault, TickSource};
@@ -1462,6 +1461,7 @@ impl GeneratedSource {
         let Some((parent, log_move)) = self.draw_cascade_parent(rate_mult) else {
             return;
         };
+        let mid_before = self.vol.mid;
         // External move only: diffusion, jump and gap. The propagator is not
         // applied here - the book's anchor impact replaces it (step 5).
         let ext = log_move.clamp(-MAX_EVENT_LOG_MOVE, MAX_EVENT_LOG_MOVE);
@@ -1469,6 +1469,35 @@ impl GeneratedSource {
             .max(self.tick_f64)
             .min(MID_CEILING);
         let plan = self.resolve_book_parent(parent.side, children_mult);
+        if self.vol_trace_enabled {
+            // The observation-only record, in the book path's terms: the
+            // diffusive part is the cascade second's, and the realized
+            // return is everything that moved the mid across the parent -
+            // the external move here plus the book's anchor impact applied
+            // inside `resolve_book_parent`. Reconstructed from the mids so
+            // the closed-12b control walk sees the move that actually
+            // landed; consumes no draws and moves no byte.
+            let sigma2 = parent.sigma * parent.sigma;
+            let realized = (self.vol.mid / mid_before.max(f64::MIN_POSITIVE)).ln();
+            self.vol_trace = Some(VolTrace {
+                innovation_raw: parent.innovation,
+                innovation_std: parent.innovation,
+                sigma2_candidate: sigma2,
+                sigma2_realized: sigma2,
+                sigma_cap_hit: false,
+                garch_scale: parent.sigma,
+                base_return_unclipped: parent.sigma * parent.innovation,
+                base_return: parent.sigma * parent.innovation,
+                feedback_clamp_hit: false,
+                session_vol_mult: 1.0,
+                regime_vol_mult: self.regime.vol_mult(self.clock_ns),
+                pre_realized_return: realized,
+                realized_return: realized,
+                realized_clamp_hit: false,
+                mid_before,
+                mid_after: self.vol.mid,
+            });
+        }
         self.book_plan = Some(plan);
     }
 
@@ -1481,37 +1510,43 @@ impl GeneratedSource {
     /// snapshot are suppressed, their instants still reserved.
     fn resolve_book_parent(&mut self, side: AggressorSide, children_mult: f64) -> BookPlan {
         let config = self.scalars.book.clone().expect("book path has a config");
-        let minute = self
+        // The phase row is the law in effect at this minute of session. A
+        // parent outside any session would silently take row zero's law, so
+        // absence is an invariant failure rather than an implicit phase:
+        // the book requires the cascade, the cascade requires a calendar
+        // with an envelope, and the envelope schedules parents only inside
+        // open windows.
+        let (_day, minute) = self
             .calendar
             .as_ref()
-            .and_then(|calendar| calendar.session_position(self.clock_ns))
-            .map_or(0, |(_day, minute)| minute as u32);
-        let knobs = config.knobs_at(minute).clone();
-        let growth = self.scalars.depth_growth.growth();
-        let depth = self.scalars.depth_levels.levels();
+            .expect("the book path requires a calendar")
+            .session_position(self.clock_ns)
+            .expect("a book parent was drawn outside any session window");
+        let knobs = config.knobs_at(minute as u32).clone();
         let struck = match side {
             AggressorSide::Buyer => Struck::Ask,
             AggressorSide::Seller => Struck::Bid,
             AggressorSide::NoAggressor => unreachable!("the cascade only draws buyer or seller"),
         };
-        // The parent size, in whole units of the size increment. Drawn from
-        // the declared size law on the main stream; the book's size-match
-        // channel may override it with the displayed touch (inside the book
-        // stream, so the override takes no main-stream draw).
-        let drawn = self.draw_size();
-        let size_dec = self.materialize_size(drawn);
-        let base_units = (size_dec / self.size_grid.min_size)
-            .round()
-            .to_u64()
-            .unwrap_or(1);
-        let drawn_units = ((base_units as f64 * children_mult).round() as u64).max(1);
+        // The parent size is entirely the book's: the touch bucket's
+        // deconvolved match probability takes the displayed quantity,
+        // else the deconvolved independent law, both on the book stream.
+        // The main-stream size law and the regime children multiplier do
+        // not reach this path - a scaled size would break the measured
+        // match cells the channel is fitted to. `children_mult` is
+        // accepted for signature parity with the placed path and unused.
+        let _ = children_mult;
 
         let anchor_ext = self.vol.mid / self.tick_f64;
         let book = self.book.as_mut().expect("book path has a book");
         book.project(anchor_ext, &knobs);
+        // The replacement-queue renewal, at the ruled placement: after
+        // the parent's projection, before its pre-trade book is
+        // recorded.
+        book.renew(&knobs);
         let pre = book.snapshot();
-        let size_units = book.effective_size(struck, drawn_units, &knobs);
-        let walk = book.execute(struck, size_units, growth, depth);
+        let size_units = book.effective_size(struck, &knobs);
+        let walk = book.execute(struck, size_units, &config.depth_ratios);
         book.settle(struck, &walk, &knobs);
         let reports = book.split_reports(&walk, &knobs);
         let impact_ticks = book.anchor_impact_ticks(struck, &knobs);
@@ -1524,7 +1559,7 @@ impl GeneratedSource {
             .min(MID_CEILING);
         let anchor_moved = self.vol.mid / self.tick_f64;
         let book = self.book.as_mut().expect("book path has a book");
-        book.relax(anchor_moved, growth, &knobs);
+        book.relax(anchor_moved, &config.depth_ratios, &knobs);
         book.project(anchor_moved, &knobs);
         let post = book.snapshot();
 

@@ -1966,12 +1966,14 @@ const CASCADE_KEYS: [&str; 30] = [
     "jump_local_exponent",
 ];
 
-/// The book table's own keys. Only `phases`, an array of rows; the per-row
-/// knob keys are caught by `BookPhaseKnobs`'s `deny_unknown_fields`, because
-/// the overlay merge replaces an array wholesale rather than merging into
-/// its elements, so a mistyped row key survives to deserialize rather than
+/// The book table's own keys: the fitted depth-ratio ladder, the named
+/// `base` row, the named partial overrides under `phases`, and the
+/// `schedule` of boundary references. The per-row knob keys are caught by
+/// the authored row types' `deny_unknown_fields`, because the overlay
+/// merge replaces a table wholesale rather than merging into its
+/// elements, so a mistyped row key survives to deserialize rather than
 /// being silently dropped.
-const BOOK_KEYS: [&str; 1] = ["phases"];
+const BOOK_KEYS: [&str; 4] = ["depth_ratios", "base", "phases", "schedule"];
 
 fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result<()> {
     for (name, known) in [
@@ -2836,10 +2838,16 @@ mod tests {
         let fp = mogwai_data::Fingerprint::repo();
         let mut scalars = mogwai_data::GeneratorScalars::from_fingerprint_medians("MNQ", fp);
         assert!(scalars.book.is_none(), "baseline carries no book");
+        let mut size_law = vec![0.0; mogwai_data::SIZE_LAW_ENTRIES];
+        size_law[1] = 1.0;
         let phase = mogwai_data::BookPhaseKnobs {
             start_minute: 0,
-            replenish_mean: 2.2,
-            touch_by_spread: 2.0,
+            replenish_one: 2.2,
+            replenish_two: 3.2,
+            replenish_three: 3.0,
+            p_join: 0.15,
+            join_mean: 2.0,
+            join_cap_factor: 1.5,
             target_one: 0.5,
             target_two: 0.4,
             p_widen: 0.28,
@@ -2848,7 +2856,8 @@ mod tests {
             p_dep_lt: 0.19,
             p_dep_eq: 0.45,
             p_dep_gt: 0.6,
-            p_size_match: 0.42,
+            p_match: [0.77, 0.37, 0.25, 0.18, 0.14, 0.09, 0.07],
+            size_law,
             p_split: 0.05,
             impact_permanent_ticks: 0.34,
             impact_transient_ticks: 0.32,
@@ -2857,6 +2866,7 @@ mod tests {
         };
         let overlay = PartialGeneratorScalars {
             book: Some(mogwai_data::BookDynamicsConfig {
+                depth_ratios: vec![2.0, 2.4, 2.5],
                 phases: vec![phase],
             }),
             ..PartialGeneratorScalars::default()

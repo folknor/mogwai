@@ -389,42 +389,16 @@ struct FeeSurchargeWindow {
     sim_span_ns: u64,
 }
 
-/// The shape of the parametric depth ladder the engine crosses, resolved from
-/// the instrument's preset by the venue. Level `k` sits `k` price increments
-/// beyond the touch with size `touch * growth^k`, for `levels` levels.
-///
-/// `Decimal` growth for the same reason the touch sizes are: a level size must
-/// land on the instrument's size grid, so growth is applied by repeated
-/// multiply-and-floor rather than by a float power.
-///
-/// No `Default`. A ladder is either resolved from a preset or absent, and an
-/// implicit one is how a zero-level ladder (which crosses nothing) or a
-/// zero-growth one (which is not a ladder) reaches the crossing path looking
-/// legitimate.
-#[derive(Debug, Clone, Copy)]
-pub struct DepthLadder {
-    pub levels: u16,
-    pub growth: Decimal,
-}
-
-impl DepthLadder {
-    /// The degenerate one-level ladder: the touch and nothing behind it. What
-    /// an instrument with no calibrated depth quotes, and what the unit suites
-    /// drive so their fills are the touch by arithmetic rather than by a
-    /// special case in the crossing path.
-    #[must_use]
-    pub fn flat() -> Self {
-        Self {
-            levels: 1,
-            growth: Decimal::ONE,
-        }
-    }
-}
+/// The depth ladder the engine crosses, resolved from the instrument's
+/// preset by the venue. The definition lives in `mogwai-protocol` because
+/// the generator's book walks the same ladder - one shared arithmetic, per
+/// the frozen-ladder rule in `notes/book-dynamics-spec.md`.
+pub use mogwai_protocol::DepthLadder;
 
 /// What the venue read off its own clean tape at the instant a command arrived:
 /// the book the taking path crosses, plus the trailing volatility band the
 /// resting-limit queue offset is drawn from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MarketReading {
     pub bid_px: Decimal,
     pub ask_px: Decimal,
@@ -1167,7 +1141,8 @@ impl Engine {
         for (symbol, _, reading) in marks {
             match reading {
                 Some(reading) => {
-                    self.last_readings.insert(Symbol::clone(symbol), *reading);
+                    self.last_readings
+                        .insert(Symbol::clone(symbol), reading.clone());
                 }
                 None => {
                     self.last_readings.remove(symbol);
@@ -1192,7 +1167,7 @@ impl Engine {
     /// retirement: retirement closes at a mark on a river nobody reads, where
     /// the pair was invalidated or never recorded. See `close_at_mark`.
     fn close_reading(&self, symbol: &Symbol, mark: Decimal, ts: u64) -> MarketReading {
-        self.last_readings.get(symbol).copied().unwrap_or_else(|| {
+        self.last_readings.get(symbol).cloned().unwrap_or_else(|| {
             MarketReading::forced_close(
                 mark,
                 ts,
@@ -2299,14 +2274,23 @@ impl Engine {
         }
         let events = match msg {
             Command::SubmitOrder(order) => self.on_submit(order, ts, reading),
-            Command::SubmitOrderGroup { orders } => self.on_submit_group(&orders, ts, reading),
+            Command::SubmitOrderGroup { orders } => {
+                self.on_submit_group(&orders, ts, reading.as_ref())
+            }
             Command::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts, true),
             Command::ModifyOrder {
                 client_order_id,
                 price,
                 quantity,
                 trigger_price,
-            } => self.on_modify(client_order_id, price, quantity, trigger_price, ts, reading),
+            } => self.on_modify(
+                client_order_id,
+                price,
+                quantity,
+                trigger_price,
+                ts,
+                reading.as_ref(),
+            ),
             Command::QueryOrders {
                 request_id,
                 client_order_id,
@@ -5107,7 +5091,7 @@ mod tests {
         MarketReading {
             bid_sz: Decimal::from(touch),
             ask_sz: Decimal::from(touch),
-            depth: DepthLadder {
+            depth: DepthLadder::Geometric {
                 levels,
                 growth: Decimal::ONE,
             },
@@ -5188,8 +5172,11 @@ mod tests {
         // Short of the touch, the same limit rests and draws its queue trigger
         // from that same band.
         let away = MarketReading::flat(Decimal::from(101), 0, 10_000);
-        let out =
-            e.process_with_market(Command::SubmitOrder(limit_order("short", 1)), 9, Some(away));
+        let out = e.process_with_market(
+            Command::SubmitOrder(limit_order("short", 1)),
+            9,
+            Some(away.clone()),
+        );
         assert!(
             !out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
@@ -5239,10 +5226,11 @@ mod tests {
 
         let away = MarketReading::flat(Decimal::from(101), 0, 200);
         assert_eq!(
-            engine.marketable_on_arrival(&order, Some(away)),
+            engine.marketable_on_arrival(&order, Some(away.clone())),
             Some(false)
         );
-        let events = engine.process_with_market(Command::SubmitOrder(order.clone()), 1, Some(away));
+        let events =
+            engine.process_with_market(Command::SubmitOrder(order.clone()), 1, Some(away.clone()));
         assert!(
             !events
                 .iter()
@@ -5253,11 +5241,14 @@ mod tests {
         let through = reading(200);
         let mut crossing = limit_order("arrival-query-cross", 1);
         assert_eq!(
-            engine.marketable_on_arrival(&crossing, Some(through)),
+            engine.marketable_on_arrival(&crossing, Some(through.clone())),
             Some(true)
         );
-        let events =
-            engine.process_with_market(Command::SubmitOrder(crossing.clone()), 2, Some(through));
+        let events = engine.process_with_market(
+            Command::SubmitOrder(crossing.clone()),
+            2,
+            Some(through.clone()),
+        );
         assert!(
             events
                 .iter()
@@ -6750,7 +6741,7 @@ mod tests {
                 Some(px),
             )),
             1,
-            Some(deep),
+            Some(deep.clone()),
         );
         assert!(matches!(first[0], VenueMessage::OrderAccepted { .. }));
 
@@ -12023,12 +12014,12 @@ mod tests {
         a.process_with_market(
             Command::SubmitOrder(limit_order("same", 1)),
             1,
-            Some(reading),
+            Some(reading.clone()),
         );
         b.process_with_market(
             Command::SubmitOrder(limit_order("unrelated", 1)),
             1,
-            Some(reading),
+            Some(reading.clone()),
         );
         b.process_with_market(
             Command::SubmitOrder(limit_order("same", 1)),
@@ -12163,7 +12154,7 @@ mod tests {
                 Some(Decimal::from(100)),
             )),
             1,
-            Some(reading),
+            Some(reading.clone()),
         );
         let sell = e.process_with_market(
             Command::SubmitOrder(order_with(
@@ -12174,7 +12165,7 @@ mod tests {
                 Some(Decimal::from(100)),
             )),
             2,
-            Some(reading),
+            Some(reading.clone()),
         );
         let price = |events: &[VenueMessage]| {
             events

@@ -141,7 +141,7 @@ impl MarketReadingCache {
             && cached.mult_bits == mult_bits
             && cached.max_ticks == max_ticks
         {
-            return cached.exact_reading;
+            return cached.exact_reading.clone();
         }
         let cached_band = if let Some(cached) = entry.as_ref()
             && cached.bucket_ns == bucket_ns
@@ -197,10 +197,7 @@ impl MarketReadingCache {
             ts_ns: book.ts_ns,
             band_ticks: cached_band,
             last_px,
-            depth: mogwai_engine::DepthLadder {
-                levels: profile.scalars.depth_levels.levels(),
-                growth: profile.scalars.depth_growth.growth(),
-            },
+            depth: profile.resolved_ladder(),
         };
         let mut entry = self
             .entry
@@ -217,7 +214,7 @@ impl MarketReadingCache {
             && cached.max_ticks == max_ticks
         {
             cached.exact_ts = Some(ts);
-            cached.exact_reading = Some(composed);
+            cached.exact_reading = Some(composed.clone());
         }
         Some(composed)
     }
@@ -393,10 +390,7 @@ fn scan_triggers_with_budget(
     let profile = rivers.resolve_profile(river.symbol()).ok()?;
     for hit in walk.hits.iter_mut().flatten() {
         if let Some(book) = hit.book.as_mut() {
-            book.resolve_ladder(
-                profile.scalars.depth_levels.levels(),
-                profile.scalars.depth_growth.growth(),
-            );
+            book.resolve_ladder(profile.resolved_ladder());
         }
     }
     if walk.drained > SWEEP_DRAIN_WARN_TICKS {
@@ -473,10 +467,7 @@ pub(crate) fn read_market(
         ts_ns: book.ts_ns,
         band_ticks,
         last_px,
-        depth: mogwai_engine::DepthLadder {
-            levels: profile.scalars.depth_levels.levels(),
-            growth: profile.scalars.depth_growth.growth(),
-        },
+        depth: profile.resolved_ladder(),
     })
 }
 

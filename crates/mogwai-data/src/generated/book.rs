@@ -9,15 +9,16 @@
 //! walk logic is testable on its own.
 //!
 //! Prices are integer ticks, quantities are integer units of the size
-//! increment. The deeper book is the declared ladder both this walk and
-//! the venue's `cross_book` derive from the published touch with the same
-//! multiply-and-floor arithmetic - the frozen-ladder rule: constructed
-//! once per parent from the pre-trade snapshot, walked once, never rebuilt
-//! mid-parent. Only the two touch quantities are stochastic state; the
-//! post-trade touch is the surviving level's exact residual, and the next
-//! deeper ladder derives from the final published touch (the old deeper
-//! quantities are discarded - retaining them would need published state
-//! the wire does not carry).
+//! increment. The deeper book is the fitted per-level ratio ladder both
+//! this walk and the venue's `cross_book` derive from the published touch
+//! through the one shared definition (`mogwai_protocol::ladder_level_units`),
+//! per the frozen-ladder rule: constructed once per parent from the
+//! pre-trade snapshot, walked once, never rebuilt mid-parent, with the
+//! vector's length defining the display bound. Only the two touch
+//! quantities are stochastic state; the post-trade touch is the surviving
+//! level's exact residual, and the next deeper ladder derives from the
+//! final published touch (the old deeper quantities are discarded -
+//! retaining them would need published state the wire does not carry).
 //!
 //! Per parent, the causal order the spec fixes:
 //!
@@ -45,11 +46,10 @@
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 
 use super::fingerprint::ScalarError;
+pub use mogwai_protocol::ladder_level_units;
 use mogwai_protocol::seeds::splitmix64;
 
 /// Stream tag for the book mechanics rng: `xor`ed into the realization
@@ -67,23 +67,60 @@ const MAX_SPREAD_TICKS: i64 = 8;
 /// chosen symmetrically rather than toward the anchor.
 const NARROW_DEAD_ZONE_TICKS: f64 = 0.25;
 
+/// The independent size law's support: masses at 1..=30 units plus the
+/// pooled tail, matching the real extraction's integer pmfs and the
+/// deconvolution contract.
+pub const SIZE_LAW_ENTRIES: usize = 31;
+/// The declared representative the pooled tail draws at (its mass is
+/// under a thousandth).
+const SIZE_LAW_TAIL_UNITS: u64 = 40;
+
+/// The match bucket of a touch quantity: 1..=5 individually, 6-10, and
+/// 11 and up - the seven cells of the deconvolved table.
+#[must_use]
+fn match_bucket(touch_units: u64) -> usize {
+    match touch_units {
+        0..=5 => (touch_units.max(1) - 1) as usize,
+        6..=10 => 5,
+        _ => 6,
+    }
+}
+
 /// One phase row of the book knobs. The boundaries are preset data beside
 /// the envelope, not a calendar frame: a boundary is a law change only,
 /// and the persistent book state crosses it untouched.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// `Serialize` exists for the river-identity digest, which hashes the
+/// canonical serialization: every knob here moves tape bytes.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BookPhaseKnobs {
     /// Minute of session this row takes effect, inclusive. Rows are
     /// sorted and the first must start at zero.
     pub start_minute: u32,
-    /// Mean of the replenishment law: the geometric a fresh touch
-    /// quantity is drawn from. Fitted so the simulated pre-trade touch
+    /// The replenishment table: the geometric mean a fresh touch
+    /// quantity is drawn from, per spread state (one tick, two ticks,
+    /// three and wider). Fitted so the simulated pre-trade touch
     /// distribution matches the observed one - the observed distribution
-    /// itself is size-biased by survival and must not be drawn from.
-    pub replenish_mean: f64,
-    /// How the replenishment mean thickens with the spread the quote
-    /// joins: mean = replenish_mean * touch_by_spread^(spread - 1).
-    pub touch_by_spread: f64,
+    /// itself is size-biased by survival and must not be drawn from. A
+    /// per-state table, never a monotone law: the real conditional touch
+    /// is non-monotone in spread (p50 2, 5, 3), which falsifies any
+    /// exponent and removes the width-to-quantity amplification that sank
+    /// the first transcription.
+    pub replenish_one: f64,
+    pub replenish_two: f64,
+    pub replenish_three: f64,
+    /// The replacement-queue renewal: between transactions a standing
+    /// queue below `join_cap_factor` times the current state's replenish
+    /// mean attracts a join with probability `p_join`, adding a geometric
+    /// draw of mean `join_mean`. The bound exists because real queues are
+    /// stationary - arrivals balance cancellations - and the model has no
+    /// cancel channel, so an unbounded join compounds into an artificial
+    /// touch tail. Fitted per phase; every phase but the close fits
+    /// `p_join` zero.
+    pub p_join: f64,
+    pub join_mean: f64,
+    pub join_cap_factor: f64,
     /// The stationary spread target shares: one tick, two ticks, with the
     /// remainder at three. The relaxation aims at a fresh draw from this
     /// law each parent.
@@ -104,8 +141,20 @@ pub struct BookPhaseKnobs {
     pub p_dep_lt: f64,
     pub p_dep_eq: f64,
     pub p_dep_gt: f64,
-    /// Probability the parent's size is exactly the displayed touch.
-    pub p_size_match: f64,
+    /// The touch-conditional match table: the probability the parent's
+    /// size is exactly the displayed touch, per touch bucket (1, 2, 3,
+    /// 4, 5, 6-10, 11 and up). Deconvolved offline from the real
+    /// exact-match share by touch net of coincidence - the behavioral
+    /// probability is 0.77 at a one-lot touch falling toward 0.07 at a
+    /// large one - and carried as preset data with provenance; the
+    /// derivation contract is `analysis/tape-v2/deconvolution-fixture.json`.
+    pub p_match: [f64; 7],
+    /// The independent size law the non-match arm draws from: the
+    /// deconvolved F as masses at 1..=30 units with the pooled tail as a
+    /// 31st entry (drawn at the declared tail representative). Never the
+    /// observed marginal, which contains the matched orders and
+    /// double-counts them.
+    pub size_law: Vec<f64>,
     /// Probability a single-level execution of at least two units is
     /// reported as two records (the reporting split; supplies the
     /// single-level multi-print mass, conditional share 0.907).
@@ -126,11 +175,20 @@ fn probability(value: f64) -> bool {
 
 impl BookPhaseKnobs {
     fn validate(&self) -> Result<(), ScalarError> {
-        if !self.replenish_mean.is_finite() || self.replenish_mean < 1.0 {
-            return Err(ScalarError::detailed("book", "replenish_mean"));
+        for (name, value) in [
+            ("replenish_one", self.replenish_one),
+            ("replenish_two", self.replenish_two),
+            ("replenish_three", self.replenish_three),
+        ] {
+            if !value.is_finite() || value < 1.0 {
+                return Err(ScalarError::detailed("book", name));
+            }
         }
-        if !self.touch_by_spread.is_finite() || !(0.1..=10.0).contains(&self.touch_by_spread) {
-            return Err(ScalarError::detailed("book", "touch_by_spread"));
+        if !self.join_mean.is_finite() || self.join_mean < 1.0 {
+            return Err(ScalarError::detailed("book", "join_mean"));
+        }
+        if !self.join_cap_factor.is_finite() || !(0.0..=10.0).contains(&self.join_cap_factor) {
+            return Err(ScalarError::detailed("book", "join_cap_factor"));
         }
         if !probability(self.target_one)
             || !probability(self.target_two)
@@ -145,12 +203,33 @@ impl BookPhaseKnobs {
             ("p_dep_lt", self.p_dep_lt),
             ("p_dep_eq", self.p_dep_eq),
             ("p_dep_gt", self.p_dep_gt),
-            ("p_size_match", self.p_size_match),
+            ("p_join", self.p_join),
             ("p_split", self.p_split),
         ] {
             if !probability(value) {
                 return Err(ScalarError::detailed("book", name));
             }
+        }
+        for value in self.p_match {
+            if !probability(value) {
+                return Err(ScalarError::detailed("book", "p_match"));
+            }
+        }
+        if self.size_law.len() != SIZE_LAW_ENTRIES {
+            return Err(ScalarError::detailed(
+                "book",
+                "size_law carries masses at 1..=30 units plus the pooled tail",
+            ));
+        }
+        let mut total = 0.0;
+        for &mass in &self.size_law {
+            if !mass.is_finite() || mass < 0.0 {
+                return Err(ScalarError::detailed("book", "size_law"));
+            }
+            total += mass;
+        }
+        if (total - 1.0).abs() > 1e-6 {
+            return Err(ScalarError::detailed("book", "size_law must sum to one"));
         }
         // The narrowing loop is geometric in p_narrow; a certain step
         // would spin forever on a wide book.
@@ -173,10 +252,155 @@ impl BookPhaseKnobs {
     }
 }
 
-/// The `[instrument.generator.book]` table: the per-phase knob rows.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// The field set of one authored book row, single-sourced: the macro
+/// generates the full `base` row, the all-optional named override, and the
+/// merge that materializes a schedule entry into a [`BookPhaseKnobs`].
+macro_rules! book_row_fields {
+    ($($field:ident: $ty:ty),* $(,)?) => {
+        /// The `base` row of the authored table: every knob, no
+        /// `start_minute` - the schedule supplies the boundaries.
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct BookRowValues {
+            $($field: $ty,)*
+        }
+
+        /// A named phase override: only what its fit moved. Everything
+        /// absent takes the base row's value at materialization.
+        #[derive(Debug, Clone, Default, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct BookRowOverride {
+            $(#[serde(default)] $field: Option<$ty>,)*
+        }
+
+        impl BookRowValues {
+            fn materialize(
+                &self,
+                start_minute: u32,
+                over: Option<&BookRowOverride>,
+            ) -> BookPhaseKnobs {
+                BookPhaseKnobs {
+                    start_minute,
+                    $($field: over
+                        .and_then(|o| o.$field.clone())
+                        .unwrap_or_else(|| self.$field.clone()),)*
+                }
+            }
+        }
+    };
+}
+
+book_row_fields! {
+    replenish_one: f64,
+    replenish_two: f64,
+    replenish_three: f64,
+    p_join: f64,
+    join_mean: f64,
+    join_cap_factor: f64,
+    target_one: f64,
+    target_two: f64,
+    p_widen: f64,
+    p_narrow: f64,
+    p_follow: f64,
+    p_dep_lt: f64,
+    p_dep_eq: f64,
+    p_dep_gt: f64,
+    p_match: [f64; 7],
+    size_law: Vec<f64>,
+    p_split: f64,
+    impact_permanent_ticks: f64,
+    impact_transient_ticks: f64,
+    impact_transient_decay: f64,
+    slack_ticks: f64,
+}
+
+/// One schedule entry: the minute a law change takes effect and the named
+/// row that governs from there.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BookScheduleEntry {
+    start_minute: u32,
+    row: String,
+}
+
+/// The authored `[instrument.generator.book]` shape: one named `base` row,
+/// named partial overrides under `phases`, and a `schedule` of boundary
+/// references. Deserialization materializes it into complete immutable
+/// rows, so a pooled stretch repeated at several boundaries is three
+/// references to one row rather than three copies that can drift.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BookTable {
+    depth_ratios: Vec<f64>,
+    base: BookRowValues,
+    #[serde(default)]
+    phases: mogwai_protocol::StrictBTreeMap<String, BookRowOverride>,
+    schedule: Vec<BookScheduleEntry>,
+}
+
+impl BookTable {
+    fn materialize(self) -> Result<BookDynamicsConfig, String> {
+        if self.phases.contains_key("base") {
+            return Err("book: a phase override may not be named base".into());
+        }
+        let mut unreferenced: std::collections::BTreeSet<&str> =
+            self.phases.keys().map(String::as_str).collect();
+        let mut rows = Vec::with_capacity(self.schedule.len());
+        for entry in &self.schedule {
+            let over = if entry.row == "base" {
+                None
+            } else {
+                let Some(over) = self.phases.get(&entry.row) else {
+                    return Err(format!(
+                        "book: schedule row {} names no phase override",
+                        entry.row
+                    ));
+                };
+                unreferenced.remove(entry.row.as_str());
+                Some(over)
+            };
+            rows.push(self.base.materialize(entry.start_minute, over));
+        }
+        if let Some(name) = unreferenced.into_iter().next() {
+            return Err(format!(
+                "book: phase override {name} is referenced by no schedule entry"
+            ));
+        }
+        Ok(BookDynamicsConfig {
+            depth_ratios: self.depth_ratios,
+            phases: rows,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for BookDynamicsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        BookTable::deserialize(deserializer)?
+            .materialize()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// The `[instrument.generator.book]` table, materialized: the per-phase
+/// knob rows and the fitted depth-ratio ladder they share. Deserialization
+/// accepts the authored base-plus-overrides shape above and materializes
+/// it here; `Serialize` emits the materialized rows and exists for the
+/// river-identity digest, which must cover the resolved configuration
+/// rather than reference names.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BookDynamicsConfig {
+    /// The fitted per-level depth profile: level `i` behind the touch
+    /// carries `max(1, round_ties_even(touch * depth_ratios[i - 1]))`
+    /// units - `mogwai_protocol::ladder_level_units`, the one definition
+    /// the generator's walk and the venue's crossing both derive from the
+    /// published touch. The vector's length defines the display bound
+    /// (`len + 1` levels counting the touch). Phase-invariant by
+    /// measurement (the mbp-10 profile), so it lives beside the phase
+    /// rows, not inside them.
+    pub depth_ratios: Vec<f64>,
     pub phases: Vec<BookPhaseKnobs>,
 }
 
@@ -184,6 +408,17 @@ impl BookDynamicsConfig {
     pub fn validate(&self) -> Result<(), ScalarError> {
         if self.phases.is_empty() {
             return Err(ScalarError::detailed("book", "at least one phase row"));
+        }
+        // The vector defines the display bound (its length plus one
+        // levels), so an empty or absurd vector is a malformed preset
+        // rather than thin liquidity.
+        if self.depth_ratios.is_empty() || self.depth_ratios.len() > 64 {
+            return Err(ScalarError::detailed("book", "depth_ratios"));
+        }
+        for &ratio in &self.depth_ratios {
+            if !ratio.is_finite() || !(0.5..=20.0).contains(&ratio) {
+                return Err(ScalarError::detailed("book", "depth_ratios"));
+            }
         }
         if self.phases[0].start_minute != 0 {
             return Err(ScalarError::detailed(
@@ -305,19 +540,6 @@ impl Struck {
     }
 }
 
-/// The venue ladder arithmetic, one definition: the quantity behind a
-/// level of `units`, `floor(units * growth)` with a floor of one unit -
-/// exactly `cross_book`'s `floor_to_increment(size * growth,
-/// increment).max(increment)` expressed in units of the increment.
-#[must_use]
-pub fn ladder_next_units(units: u64, growth: Decimal) -> u64 {
-    (Decimal::from(units) * growth)
-        .floor()
-        .to_u64()
-        .unwrap_or(u64::MAX)
-        .max(1)
-}
-
 impl DiscreteBook {
     /// A book opened around the anchor at a two-tick spread with
     /// replenishment-law touch quantities, its streams derived from the
@@ -392,38 +614,68 @@ impl DiscreteBook {
         self.ask_ticks = self.bid_ticks + spread;
     }
 
-    /// Step 2: the parent's effective size. With the size-match
-    /// probability it is exactly the displayed touch; otherwise the
-    /// independent draw the caller supplies from the declared size law.
-    pub fn effective_size(
-        &mut self,
-        struck: Struck,
-        drawn_units: u64,
-        knobs: &BookPhaseKnobs,
-    ) -> u64 {
-        let touch = self.touch_units(struck);
-        if touch > 0 && self.rng.random_bool(knobs.p_size_match) {
-            touch
-        } else {
-            drawn_units.max(1)
+    /// The replacement-queue renewal, before the pre-trade book is
+    /// recorded: limit orders arriving at a standing price level between
+    /// transactions join the queue. Both standing sides in fixed order
+    /// (bid then ask - a contractual order, never map iteration), keyed
+    /// by the spread at the observation boundary; only a queue below the
+    /// state ceiling attracts a join. Exact surviving residuals at the
+    /// fill instant are untouched - this runs at the next parent's
+    /// boundary, after its projection.
+    pub fn renew(&mut self, knobs: &BookPhaseKnobs) {
+        if knobs.p_join <= 0.0 {
+            return;
         }
+        let ceiling = knobs.join_cap_factor * replenish_mean(knobs, self.spread());
+        for struck in [Struck::Bid, Struck::Ask] {
+            let units = self.touch_units(struck);
+            if (units as f64) < ceiling && self.rng.random_bool(knobs.p_join) {
+                let joined = units + geometric(&mut self.rng, knobs.join_mean);
+                self.set_touch_units(struck, joined);
+            }
+        }
+    }
+
+    /// Step 2: the parent's effective size. With the touch bucket's
+    /// deconvolved match probability it is exactly the displayed touch (a
+    /// taker sizes the order to what it can see, plus marketable-limit
+    /// truncation, both folded into the effective table); otherwise an
+    /// independent draw from the deconvolved size law on the book stream.
+    pub fn effective_size(&mut self, struck: Struck, knobs: &BookPhaseKnobs) -> u64 {
+        let touch = self.touch_units(struck);
+        if touch > 0 && self.rng.random_bool(knobs.p_match[match_bucket(touch)]) {
+            return touch;
+        }
+        // Inverse-transform draw over the integer support: masses at
+        // 1..=30 with the pooled tail at the declared representative.
+        let u: f64 = self.rng.random();
+        let mut acc = 0.0;
+        for (index, &mass) in knobs.size_law.iter().enumerate() {
+            acc += mass;
+            if u < acc {
+                return if index + 1 < SIZE_LAW_ENTRIES {
+                    (index + 1) as u64
+                } else {
+                    SIZE_LAW_TAIL_UNITS
+                };
+            }
+        }
+        SIZE_LAW_TAIL_UNITS
     }
 
     /// Step 3: the frozen-ladder walk. The ladder is constructed here,
     /// once, from the pre-trade snapshot - level zero the displayed
-    /// touch, each deeper level `ladder_next_units` of the one before -
-    /// and consumed exactly once. Consumption never mutates the book;
+    /// touch, each deeper level the shared `ladder_level_units` of the
+    /// touch - and consumed exactly once. The display bound is the ratio
+    /// vector's length plus one; there is no separate depth knob to
+    /// disagree with the vector. Consumption never mutates the book;
     /// `settle` forms the post-trade book from the outcome, which is what
     /// keeps a mid-parent checkpoint coherent and the venue's view of the
     /// same ladder identical.
     #[must_use]
-    pub fn execute(
-        &self,
-        struck: Struck,
-        requested_units: u64,
-        growth: Decimal,
-        depth_levels: u16,
-    ) -> WalkOutcome {
+    pub fn execute(&self, struck: Struck, requested_units: u64, ratios: &[f64]) -> WalkOutcome {
+        let depth_levels =
+            u16::try_from(ratios.len() + 1).expect("validation bounds the ratio vector");
         let touch_units = self.touch_units(struck);
         let touch_price = match struck {
             Struck::Ask => self.ask_ticks,
@@ -436,10 +688,16 @@ impl DiscreteBook {
         };
         let mut fills = Vec::new();
         let mut remaining = requested_units;
-        let mut level_units = touch_units;
         let mut exhausted: u16 = 0;
         let mut residual = 0_u64;
         for level in 0..depth_levels {
+            let level_units = if level == 0 {
+                touch_units
+            } else if residual > 0 {
+                residual
+            } else {
+                break;
+            };
             let price = touch_price + i64::from(level) * struck.direction();
             let take = remaining.min(level_units);
             if take > 0 {
@@ -452,14 +710,15 @@ impl DiscreteBook {
             if take == level_units {
                 exhausted += 1;
                 // Exhausting a level exposes the level behind it with its
-                // declared quantity - including a walk that stopped
-                // exactly on the boundary, whose surviving touch is that
-                // exposed level. A fully exhausted ladder leaves zero,
-                // and the post-trade replenishment creates the next
-                // touch; the walk never appends an execution level to
-                // finish the parent.
+                // declared quantity - the fitted ratio of the pre-trade
+                // touch, since every ladder level anchors at the touch -
+                // including a walk that stopped exactly on the boundary,
+                // whose surviving touch is that exposed level. A fully
+                // exhausted ladder leaves zero, and the post-trade
+                // replenishment creates the next touch; the walk never
+                // appends an execution level to finish the parent.
                 residual = if level + 1 < depth_levels {
-                    ladder_next_units(level_units, growth)
+                    ladder_level_units(touch_units, level + 1, ratios)
                 } else {
                     0
                 };
@@ -469,7 +728,6 @@ impl DiscreteBook {
             if remaining == 0 {
                 break;
             }
-            level_units = residual;
         }
         let executed = requested_units - remaining;
         if remaining > 0 {
@@ -495,22 +753,33 @@ impl DiscreteBook {
             Trichotomy::Exact => knobs.p_dep_eq,
             Trichotomy::Over => knobs.p_dep_gt,
         };
-        let witnessed = self.rng.random_bool(p);
+        let coin = self.rng.random_bool(p);
+        // The saturated recession transition (the fourth spar's rule): the
+        // visible recede is capped by the room below the spread ceiling,
+        // the follow-in moves by the recede actually applied, the exact
+        // residual survives only when the visible touch lands on the level
+        // it belongs to, and only a positive applied recession suppresses
+        // the same-parent relaxation. The cap is a safety boundary - it
+        // binds about one parent in a thousand at the fitted rows - and
+        // the spread fit is carried by the gates, never by the ceiling.
+        let room = (MAX_SPREAD_TICKS - self.spread()).max(0);
+        let visible = i64::from(walk.levels_exhausted.max(1)).min(room);
+        let witnessed = coin && visible > 0;
         self.witnessed = witnessed;
         if witnessed {
-            let recede = i64::from(walk.levels_exhausted.max(1));
             match struck {
-                Struck::Ask => self.ask_ticks += recede,
-                Struck::Bid => self.bid_ticks -= recede,
+                Struck::Ask => self.ask_ticks += visible,
+                Struck::Bid => self.bid_ticks -= visible,
             }
             self.bid_ticks = self.bid_ticks.max(1);
             self.ask_ticks = self.ask_ticks.max(self.bid_ticks + 1);
             // The exposed touch is the surviving level's exact residual
-            // where the walk reached it; a receded touch the walk never
-            // consumed into, or an exhausted ladder, takes a
-            // replenishment draw. A zero residual is never a published
+            // only when the visible recede reached exactly that level; a
+            // capped recession publishes a different level and takes a
+            // replenishment draw at the post-recession state, as does an
+            // exhausted ladder. A zero residual is never a published
             // occupied touch.
-            let units = if walk.levels_exhausted > 0 && walk.residual > 0 {
+            let units = if visible == i64::from(walk.levels_exhausted) && walk.residual > 0 {
                 walk.residual
             } else {
                 let spread = self.spread();
@@ -520,10 +789,10 @@ impl DiscreteBook {
             if self.rng.random_bool(knobs.p_follow) {
                 match struck {
                     Struck::Ask => {
-                        self.bid_ticks = (self.bid_ticks + recede).min(self.ask_ticks - 1);
+                        self.bid_ticks = (self.bid_ticks + visible).min(self.ask_ticks - 1);
                     }
                     Struck::Bid => {
-                        self.ask_ticks = (self.ask_ticks - recede).max(self.bid_ticks + 1);
+                        self.ask_ticks = (self.ask_ticks - visible).max(self.bid_ticks + 1);
                     }
                 }
                 let spread = self.spread();
@@ -566,7 +835,7 @@ impl DiscreteBook {
     /// brings the mid toward the anchor when the displacement is
     /// meaningful, symmetrically otherwise; widening is a quote pull at
     /// any spread below the drawn target.
-    pub fn relax(&mut self, anchor_ticks: f64, growth: Decimal, knobs: &BookPhaseKnobs) {
+    pub fn relax(&mut self, anchor_ticks: f64, ratios: &[f64], knobs: &BookPhaseKnobs) {
         let u: f64 = self.rng.random();
         let target = if u < knobs.target_one {
             1
@@ -600,13 +869,14 @@ impl DiscreteBook {
             && self.rng.random_bool(knobs.p_widen)
         {
             // The pulled touch exposes the declared ladder level behind
-            // it, per the shared arithmetic.
+            // it, per the shared arithmetic: the first ratio of the
+            // pulled touch, no replenishment draw.
             if self.rng.random_bool(0.5) {
                 self.ask_ticks += 1;
-                self.ask_units = ladder_next_units(self.ask_units, growth);
+                self.ask_units = ladder_level_units(self.ask_units, 1, ratios);
             } else {
                 self.bid_ticks = (self.bid_ticks - 1).max(1);
-                self.bid_units = ladder_next_units(self.bid_units, growth);
+                self.bid_units = ladder_level_units(self.bid_units, 1, ratios);
             }
         }
         self.witnessed = false;
@@ -640,17 +910,20 @@ impl DiscreteBook {
     }
 }
 
-/// A replenishment draw: geometric on one and up, mean thickened by the
-/// spread the quote joins. This is the law behind a fresh queue, fitted so
-/// the simulated pre-trade touch distribution matches the observed one -
-/// which is size-biased by survival and must not be drawn from directly.
-fn replenish(rng: &mut ChaCha12Rng, knobs: &BookPhaseKnobs, spread: i64) -> u64 {
-    let exponent = (spread.max(1) - 1) as f64;
-    let mean = (knobs.replenish_mean * knobs.touch_by_spread.powf(exponent)).max(1.0);
-    let p = 1.0 / mean;
+/// The replenishment mean for a spread state, from the per-state table.
+fn replenish_mean(knobs: &BookPhaseKnobs, spread: i64) -> f64 {
+    match spread {
+        i64::MIN..=1 => knobs.replenish_one,
+        2 => knobs.replenish_two,
+        _ => knobs.replenish_three,
+    }
+}
+
+/// A geometric draw on one and up with the given mean, by inverse
+/// transform: the smallest k with 1 - (1 - p)^k >= u.
+fn geometric(rng: &mut ChaCha12Rng, mean: f64) -> u64 {
+    let p = 1.0 / mean.max(1.0);
     let u: f64 = rng.random();
-    // Inverse transform of the geometric on {1, 2, ...}: the smallest k
-    // with 1 - (1 - p)^k >= u.
     let k = ((1.0 - u).ln() / (1.0 - p).ln()).ceil();
     if k.is_finite() && k >= 1.0 {
         (k as u64).min(1_000_000)
@@ -659,15 +932,36 @@ fn replenish(rng: &mut ChaCha12Rng, knobs: &BookPhaseKnobs, spread: i64) -> u64 
     }
 }
 
+/// A replenishment draw: geometric on one and up at the state's mean.
+/// This is the law behind a fresh queue, fitted so the simulated
+/// pre-trade touch distribution matches the observed one - which is
+/// size-biased by survival and must not be drawn from directly.
+fn replenish(rng: &mut ChaCha12Rng, knobs: &BookPhaseKnobs, spread: i64) -> u64 {
+    geometric(rng, replenish_mean(knobs, spread))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A uniform test ladder: every level behind the touch carries twice
+    /// the touch, keeping the walk arithmetic legible.
+    pub(crate) const TEST_RATIOS: [f64; 8] = [2.0; 8];
+
     pub(crate) fn knobs() -> BookPhaseKnobs {
+        // The size law concentrates all mass at two units, so the
+        // non-match arm is deterministic in value while still consuming
+        // its draw.
+        let mut size_law = vec![0.0; SIZE_LAW_ENTRIES];
+        size_law[1] = 1.0;
         BookPhaseKnobs {
             start_minute: 0,
-            replenish_mean: 2.2,
-            touch_by_spread: 2.0,
+            replenish_one: 2.2,
+            replenish_two: 3.2,
+            replenish_three: 3.0,
+            p_join: 0.0,
+            join_mean: 2.0,
+            join_cap_factor: 1.5,
             target_one: 0.5,
             target_two: 0.4,
             p_widen: 0.28,
@@ -676,7 +970,8 @@ mod tests {
             p_dep_lt: 0.19,
             p_dep_eq: 0.45,
             p_dep_gt: 0.6,
-            p_size_match: 0.42,
+            p_match: [0.0; 7],
+            size_law,
             p_split: 0.05,
             impact_permanent_ticks: 0.34,
             impact_transient_ticks: 0.32,
@@ -688,8 +983,9 @@ mod tests {
     fn config() -> BookDynamicsConfig {
         let mut evening = knobs();
         evening.start_minute = 900;
-        evening.replenish_mean = 1.05;
+        evening.replenish_one = 1.05;
         BookDynamicsConfig {
+            depth_ratios: TEST_RATIOS.to_vec(),
             phases: vec![knobs(), evening],
         }
     }
@@ -714,8 +1010,108 @@ mod tests {
         bad.phases[0].p_narrow = 1.0;
         assert!(bad.validate().is_err(), "certain narrowing spins");
         let mut bad = config();
-        bad.phases[0].replenish_mean = 0.5;
+        bad.phases[0].replenish_two = 0.5;
         assert!(bad.validate().is_err(), "sub-unit replenishment mean");
+        let mut bad = config();
+        bad.depth_ratios.clear();
+        assert!(bad.validate().is_err(), "empty depth ratios");
+        let mut bad = config();
+        bad.phases[0].size_law = vec![0.5; 2];
+        assert!(bad.validate().is_err(), "short size law");
+        let mut bad = config();
+        bad.phases[0].size_law[1] = 0.5;
+        assert!(bad.validate().is_err(), "size law off one");
+        let mut bad = config();
+        bad.phases[0].p_match[3] = 1.5;
+        assert!(bad.validate().is_err(), "match entry past one");
+    }
+
+    fn authored_table(
+        schedule: &serde_json::Value,
+        phases: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut size_law = vec![0.0; SIZE_LAW_ENTRIES];
+        size_law[1] = 1.0;
+        serde_json::json!({
+            "depth_ratios": [2.0, 2.4],
+            "base": {
+                "replenish_one": 1.3,
+                "replenish_two": 5.5,
+                "replenish_three": 3.0,
+                "p_join": 0.0,
+                "join_mean": 3.0,
+                "join_cap_factor": 1.5,
+                "target_one": 0.35,
+                "target_two": 0.4,
+                "p_widen": 0.14,
+                "p_narrow": 0.84,
+                "p_follow": 0.7,
+                "p_dep_lt": 0.0,
+                "p_dep_eq": 0.75,
+                "p_dep_gt": 0.6,
+                "p_match": [0.77, 0.37, 0.25, 0.18, 0.14, 0.09, 0.07],
+                "size_law": size_law,
+                "p_split": 0.05,
+                "impact_permanent_ticks": 0.33,
+                "impact_transient_ticks": 0.32,
+                "impact_transient_decay": 0.9,
+                "slack_ticks": 2.0,
+            },
+            "phases": phases,
+            "schedule": schedule,
+        })
+    }
+
+    #[test]
+    fn the_authored_table_materializes_references_into_full_rows() {
+        let table = authored_table(
+            &serde_json::json!([
+                {"start_minute": 0, "row": "base"},
+                {"start_minute": 60, "row": "asia"},
+                {"start_minute": 540, "row": "base"},
+            ]),
+            &serde_json::json!({"asia": {"p_narrow": 0.95, "p_widen": 0.44}}),
+        );
+        let config: BookDynamicsConfig = serde_json::from_value(table).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.phases.len(), 3);
+        // The override moved only what it names; everything else is the
+        // base row, and the two base references resolve identically.
+        assert_eq!(config.phases[1].start_minute, 60);
+        assert_eq!(config.phases[1].p_narrow, 0.95);
+        assert_eq!(config.phases[1].p_widen, 0.44);
+        assert_eq!(config.phases[1].p_follow, config.phases[0].p_follow);
+        let mut third = config.phases[2].clone();
+        third.start_minute = 0;
+        assert_eq!(third, config.phases[0]);
+    }
+
+    #[test]
+    fn the_authored_table_refuses_dangling_and_dead_references() {
+        let dangling = authored_table(
+            &serde_json::json!([{"start_minute": 0, "row": "london"}]),
+            &serde_json::json!({}),
+        );
+        let err = serde_json::from_value::<BookDynamicsConfig>(dangling)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no phase override"), "{err}");
+        let dead = authored_table(
+            &serde_json::json!([{"start_minute": 0, "row": "base"}]),
+            &serde_json::json!({"asia": {"p_narrow": 0.95}}),
+        );
+        let err = serde_json::from_value::<BookDynamicsConfig>(dead)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("referenced by no schedule entry"), "{err}");
+        let shadowed = authored_table(
+            &serde_json::json!([{"start_minute": 0, "row": "base"}]),
+            &serde_json::json!({"base": {"p_narrow": 0.95}}),
+        );
+        let err = serde_json::from_value::<BookDynamicsConfig>(shadowed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("may not be named base"), "{err}");
     }
 
     #[test]
@@ -747,13 +1143,66 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_arithmetic_is_the_venue_rule() {
-        // floor(units * growth) with a floor of one unit, the exact
-        // `cross_book` recurrence in units of the size increment.
-        assert_eq!(ladder_next_units(2, Decimal::TWO), 4);
-        assert_eq!(ladder_next_units(3, Decimal::new(15, 1)), 4, "floor of 4.5");
-        assert_eq!(ladder_next_units(1, Decimal::ONE), 1);
-        assert_eq!(ladder_next_units(0, Decimal::TWO), 1, "the one-unit floor");
+    fn the_recession_saturates_at_the_spread_ceiling() {
+        // The visible recede is capped by the room below the ceiling: a
+        // book already at the ceiling shows no movement, is not counted
+        // witnessed, and therefore does not suppress its own relaxation.
+        let knobs = {
+            let mut k = knobs();
+            k.p_dep_eq = 1.0;
+            k.p_dep_gt = 1.0;
+            k.p_follow = 0.0;
+            k
+        };
+        let mut book = DiscreteBook::new(37, 1000.0, &knobs);
+        book.bid_ticks = 100;
+        book.ask_ticks = 100 + MAX_SPREAD_TICKS;
+        book.ask_units = 2;
+        let walk = book.execute(Struck::Ask, 2, &TEST_RATIOS);
+        let witnessed = book.settle(Struck::Ask, &walk, &knobs);
+        assert!(!witnessed, "a ceiling-blocked recession is not witnessed");
+        assert_eq!(book.snapshot().ask_ticks, 100 + MAX_SPREAD_TICKS);
+        // One tick below the ceiling: a two-level exhaustion recedes by
+        // the one remaining tick of room, and the capped touch takes a
+        // replenishment draw rather than a residual from the wrong level.
+        let mut book = DiscreteBook::new(41, 1000.0, &knobs);
+        book.bid_ticks = 100;
+        book.ask_ticks = 100 + MAX_SPREAD_TICKS - 1;
+        book.ask_units = 1;
+        let walk = book.execute(Struck::Ask, 3, &TEST_RATIOS);
+        assert_eq!(walk.levels_exhausted, 2);
+        let witnessed = book.settle(Struck::Ask, &walk, &knobs);
+        assert!(witnessed);
+        assert_eq!(book.snapshot().ask_ticks, 100 + MAX_SPREAD_TICKS);
+        assert!(book.snapshot().ask_units > 0);
+    }
+
+    #[test]
+    fn the_renewal_joins_only_below_the_ceiling_in_fixed_order() {
+        let knobs = {
+            let mut k = knobs();
+            k.p_join = 1.0;
+            k.join_mean = 1.0;
+            k.join_cap_factor = 1.0;
+            k
+        };
+        // Ceiling at the state-two replenish mean 3.2: a one-unit queue
+        // joins, a ten-unit queue does not.
+        let mut book = DiscreteBook::new(43, 1000.0, &knobs);
+        book.bid_units = 1;
+        book.ask_units = 10;
+        book.renew(&knobs);
+        assert!(book.snapshot().bid_units > 1, "below the ceiling joins");
+        assert_eq!(book.snapshot().ask_units, 10, "at depth attracts nothing");
+        // Determinism across clones: the draw schedule is fixed (bid
+        // then ask), so identical books renew identically.
+        let mut a = DiscreteBook::new(47, 1000.0, &knobs);
+        a.bid_units = 1;
+        a.ask_units = 1;
+        let mut b = a.clone();
+        a.renew(&knobs);
+        b.renew(&knobs);
+        assert_eq!(a.snapshot(), b.snapshot());
     }
 
     #[test]
@@ -761,7 +1210,7 @@ mod tests {
         let knobs = knobs();
         let mut book = DiscreteBook::new(11, 1000.0, &knobs);
         book.ask_units = 2;
-        let walk = book.execute(Struck::Ask, 5, Decimal::TWO, 8);
+        let walk = book.execute(Struck::Ask, 5, &TEST_RATIOS);
         // Ladder 2, 4, 8...: 2 at the touch, 3 at the next level.
         assert_eq!(walk.executed, 5);
         assert_eq!(walk.unexecuted, 0);
@@ -782,7 +1231,7 @@ mod tests {
         let mut book = DiscreteBook::new(13, 1000.0, &knobs);
         book.ask_units = 1;
         // Two declared levels, quantities 1 and 2: a request of 9 fills 3.
-        let walk = book.execute(Struck::Ask, 9, Decimal::TWO, 2);
+        let walk = book.execute(Struck::Ask, 9, &TEST_RATIOS[..1]);
         assert_eq!(walk.executed, 3);
         assert_eq!(walk.unexecuted, 6);
         assert_eq!(walk.levels_exhausted, 2);
@@ -796,7 +1245,7 @@ mod tests {
         for seed in 0..64_u64 {
             let mut book = DiscreteBook::new(seed, 1000.0, &knobs);
             book.ask_units = 2;
-            let walk = book.execute(Struck::Ask, 2, Decimal::TWO, 8);
+            let walk = book.execute(Struck::Ask, 2, &TEST_RATIOS);
             book.settle(Struck::Ask, &walk, &knobs);
             let snap = book.snapshot();
             assert!(snap.ask_units > 0, "seed {seed}: zero published touch");
@@ -814,7 +1263,7 @@ mod tests {
         };
         let mut book = DiscreteBook::new(17, 1000.0, &knobs);
         book.ask_units = 5;
-        let walk = book.execute(Struck::Ask, 2, Decimal::TWO, 8);
+        let walk = book.execute(Struck::Ask, 2, &TEST_RATIOS);
         assert_eq!(walk.trichotomy, Trichotomy::Under);
         let witnessed = book.settle(Struck::Ask, &walk, &knobs);
         assert!(!witnessed);
@@ -827,7 +1276,7 @@ mod tests {
         knobs.p_split = 1.0;
         let mut book = DiscreteBook::new(19, 1000.0, &knobs);
         book.ask_units = 4;
-        let walk = book.execute(Struck::Ask, 3, Decimal::TWO, 8);
+        let walk = book.execute(Struck::Ask, 3, &TEST_RATIOS);
         assert_eq!(walk.fills.len(), 1);
         let reports = book.split_reports(&walk, &knobs);
         assert_eq!(reports.len(), 2);
@@ -836,7 +1285,7 @@ mod tests {
         assert!(reports[0].units >= 1 && reports[1].units >= 1);
         // A one-unit fill cannot split.
         book.ask_units = 1;
-        let walk = book.execute(Struck::Ask, 1, Decimal::TWO, 8);
+        let walk = book.execute(Struck::Ask, 1, &TEST_RATIOS);
         let reports = book.split_reports(&walk, &knobs);
         assert_eq!(reports.len(), 1);
     }
@@ -852,22 +1301,22 @@ mod tests {
         };
         let mut a = DiscreteBook::new(23, 1000.0, &knobs);
         let mut b = a.clone();
-        let walk = b.execute(Struck::Ask, 3, Decimal::TWO, 8);
+        let walk = b.execute(Struck::Ask, 3, &TEST_RATIOS);
         let reports = b.split_reports(&walk, &knobs);
         assert_eq!(reports.len(), 2, "the reporting draw was actually taken");
         for struck in [Struck::Ask, Struck::Bid, Struck::Ask] {
-            let size_a = a.effective_size(struck, 2, &knobs);
-            let size_b = b.effective_size(struck, 2, &knobs);
+            let size_a = a.effective_size(struck, &knobs);
+            let size_b = b.effective_size(struck, &knobs);
             assert_eq!(size_a, size_b);
-            let walk_a = a.execute(struck, size_a, Decimal::TWO, 8);
-            let walk_b = b.execute(struck, size_b, Decimal::TWO, 8);
+            let walk_a = a.execute(struck, size_a, &TEST_RATIOS);
+            let walk_b = b.execute(struck, size_b, &TEST_RATIOS);
             assert_eq!(walk_a, walk_b);
             assert_eq!(
                 a.settle(struck, &walk_a, &knobs),
                 b.settle(struck, &walk_b, &knobs)
             );
-            a.relax(a.mid(), Decimal::TWO, &knobs);
-            b.relax(b.mid(), Decimal::TWO, &knobs);
+            a.relax(a.mid(), &TEST_RATIOS, &knobs);
+            b.relax(b.mid(), &TEST_RATIOS, &knobs);
             assert_eq!(a.snapshot(), b.snapshot());
         }
     }
@@ -905,26 +1354,32 @@ mod tests {
             let mut book = DiscreteBook::new(seed, 1000.0, &knobs);
             book.witnessed = true;
             let spread_before = book.spread();
-            book.relax(book.mid(), Decimal::TWO, &knobs);
+            book.relax(book.mid(), &TEST_RATIOS, &knobs);
             assert_eq!(
                 book.spread(),
                 spread_before,
                 "seed {seed}: a witnessed parent narrowed its own widening"
             );
             // The skip is one parent only.
-            book.relax(book.mid(), Decimal::TWO, &knobs);
+            book.relax(book.mid(), &TEST_RATIOS, &knobs);
             assert_eq!(book.spread(), 1, "seed {seed}: the next parent relaxes");
         }
     }
 
     #[test]
-    fn the_size_match_takes_the_displayed_touch() {
+    fn the_size_match_takes_the_displayed_touch_by_bucket() {
         let mut knobs = knobs();
-        knobs.p_size_match = 1.0;
+        knobs.p_match = [1.0; 7];
         let mut book = DiscreteBook::new(31, 1000.0, &knobs);
         book.ask_units = 7;
-        assert_eq!(book.effective_size(Struck::Ask, 2, &knobs), 7);
-        knobs.p_size_match = 0.0;
-        assert_eq!(book.effective_size(Struck::Ask, 2, &knobs), 2);
+        assert_eq!(book.effective_size(Struck::Ask, &knobs), 7);
+        // Bucket-conditional: matching only in the 6-10 bucket still
+        // takes the seven-unit touch, and a two-unit touch falls through
+        // to the size law, whose whole mass sits at two units.
+        knobs.p_match = [0.0; 7];
+        knobs.p_match[5] = 1.0;
+        assert_eq!(book.effective_size(Struck::Ask, &knobs), 7);
+        book.ask_units = 2;
+        assert_eq!(book.effective_size(Struck::Ask, &knobs), 2, "the law draw");
     }
 }

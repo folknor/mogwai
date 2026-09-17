@@ -56,8 +56,8 @@ pub use arrival::{
     WallMmppParams,
 };
 pub use book::{
-    BookDynamicsConfig, BookPhaseKnobs, BookSnapshot, DiscreteBook, LevelFill, Struck, Trichotomy,
-    WalkOutcome, ladder_next_units,
+    BookDynamicsConfig, BookPhaseKnobs, BookSnapshot, DiscreteBook, LevelFill, SIZE_LAW_ENTRIES,
+    Struck, Trichotomy, WalkOutcome, ladder_level_units,
 };
 pub use calendar::{CalendarError, SessionCalendar, SessionEnvelope, WeeklyWindow};
 pub use cascade::{CascadeConfig, MAX_CASCADE_COMPONENTS};

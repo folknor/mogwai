@@ -1603,8 +1603,12 @@ fn project_walk(
     // The screen ranks arrival families on the fingerprint-fitted walk. A
     // preset that has moved to the activity cascade (MNQ, tape protocol 32)
     // would refuse the pairing, so the cascade is set aside here: the walk
-    // under screen is the one the kernel drives, never the cascade.
+    // under screen is the one the kernel drives, never the cascade. The
+    // discrete book rides only on the cascade - its validation requires
+    // one - so it is set aside with it, or the swapped scalars would
+    // refuse to build at all.
     scalars.cascade = None;
+    scalars.book = None;
     let offset = i32::from(
         profile
             .calendar

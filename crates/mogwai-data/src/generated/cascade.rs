@@ -119,7 +119,12 @@ const MAX_SIGN_SLOTS: u32 = 64;
 
 /// The `[instrument.generator.cascade]` table. Every field is a knob with
 /// its own provenance entry in the preset.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// `Serialize` exists for one consumer: the river-identity digest hashes
+/// the canonical serialization, because every field here moves tape bytes
+/// and a key that omitted them would let two different cascades collide in
+/// the river cache.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CascadeConfig {
     /// Texture timescales, minutes. Real MNQ residual autocorrelation is

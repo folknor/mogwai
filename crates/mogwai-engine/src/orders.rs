@@ -185,7 +185,7 @@ impl Engine {
         &mut self,
         orders: &[SubmitOrder],
         ts: u64,
-        reading: Option<MarketReading>,
+        reading: Option<&MarketReading>,
     ) -> Vec<VenueMessage> {
         let ids: Vec<ClientOrderId> = orders
             .iter()
@@ -249,7 +249,7 @@ impl Engine {
             let events = self.on_submit_from(
                 order.clone(),
                 ts,
-                reading,
+                reading.cloned(),
                 true,
                 orders,
                 Some(&mut member_filled),
@@ -497,7 +497,7 @@ impl Engine {
         // ladder below, with no draw in it anywhere.
         let increment = self.instruments[&order.symbol].price_increment;
         let size_increment = self.instruments[&order.symbol].size_increment;
-        let band_ticks = reading.map_or(0, |value| value.band_ticks);
+        let band_ticks = reading.as_ref().map_or(0, |value| value.band_ticks);
 
         // An order-list child whose parent has not executed rests held: accepted
         // and answerable, scanned by nothing, holding nothing. It is routed here,
@@ -562,7 +562,7 @@ impl Engine {
             let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
-            let touched = reading.is_some_and(|value| {
+            let touched = reading.as_ref().is_some_and(|value| {
                 mogwai_protocol::touches_toward(order.side, activation_px, value.last_px)
             });
             let leaves_qty = order.quantity;
@@ -585,7 +585,7 @@ impl Engine {
                 revision: 0,
                 skip_next_ratchet: false,
             });
-            if let (true, Some(value)) = (touched, reading) {
+            if let (true, Some(value)) = (touched, reading.as_ref()) {
                 let pos = self.open.len() - 1;
                 let hit = Hit {
                     ts_ns: value.ts_ns,
@@ -595,15 +595,14 @@ impl Engine {
                         ask_px: value.ask_px,
                         bid_sz: value.bid_sz,
                         ask_sz: value.ask_sz,
-                        depth_levels: value.depth.levels,
-                        depth_growth: value.depth.growth,
+                        depth: Some(value.depth.clone()),
                     }),
                 };
                 // The arrival path's frontier is the acceptance instant, not
                 // the reading's own timestamp: the synthesized hit can carry
                 // an older last print, and resuming from that print would
                 // offer this order pre-acceptance history.
-                out.extend(self.on_activate(pos, hit, ts, ts));
+                out.extend(self.on_activate(pos, &hit, ts, ts));
             }
             self.push_account_snapshot(&mut out, ts, apply_divergences);
             return out;
@@ -639,12 +638,12 @@ impl Engine {
         // it, because fill-or-kill is judged against what the consumer asked
         // for and the book's capacity within its price bound - a targeted
         // partial must not be able to turn a kill into a fill.
-        let requested_cross = reading.map(|value| {
+        let requested_cross = reading.as_ref().map(|value| {
             cross_book(
                 order.side,
                 order.quantity,
                 price_bound,
-                &value,
+                value,
                 increment,
                 size_increment,
             )
@@ -663,9 +662,9 @@ impl Engine {
         // first sweep after acceptance may then fill it at once at its own
         // stated price, which is never better than the price it asked for.
         let marketable = order.order_type == OrderType::Market
-            || reading.is_some_and(|value| match order.side {
-                Side::Buy => stated_px >= taking_touch(order.side, &value),
-                Side::Sell => stated_px <= taking_touch(order.side, &value),
+            || reading.as_ref().is_some_and(|value| match order.side {
+                Side::Buy => stated_px >= taking_touch(order.side, value),
+                Side::Sell => stated_px <= taking_touch(order.side, value),
             });
 
         if order.order_type.is_conditional() {
@@ -679,7 +678,7 @@ impl Engine {
             // price runs away from what it protects, a touched order when
             // price comes toward the level it is waiting at.
             let toward = order.order_type.triggers_toward();
-            let touched = reading.is_some_and(|value| {
+            let touched = reading.as_ref().is_some_and(|value| {
                 if toward {
                     mogwai_protocol::touches_toward(order.side, stop_px, value.last_px)
                 } else {
@@ -707,7 +706,7 @@ impl Engine {
                 ts_event: ts,
             }];
             self.rest_open(record);
-            if let (true, Some(value)) = (touched, reading) {
+            if let (true, Some(value)) = (touched, reading.as_ref()) {
                 // The synthesized hit of section 1.4: the reading's own last
                 // print, which is a real print off the canonical tape. The
                 // frontier is the application instant, because a stop accepted
@@ -725,11 +724,10 @@ impl Engine {
                         ask_px: value.ask_px,
                         bid_sz: value.bid_sz,
                         ask_sz: value.ask_sz,
-                        depth_levels: value.depth.levels,
-                        depth_growth: value.depth.growth,
+                        depth: Some(value.depth.clone()),
                     }),
                 };
-                out.extend(self.on_trigger(pos, hit, ts, ts));
+                out.extend(self.on_trigger(pos, &hit, ts, ts));
             }
             // A trigger that booked a fill or freed a hold owes its
             // snapshot under the same `DropNextAccountUpdate` rule as any other
@@ -1351,7 +1349,7 @@ impl Engine {
                 continue;
             };
             let resting = self.open[pos].resting;
-            if let (Resting::Conditional { .. }, Some(hit)) = (resting, result.hit) {
+            if let (Resting::Conditional { .. }, Some(hit)) = (resting, result.hit.as_ref()) {
                 // The frontier the trigger's product inherits is where the walk
                 // reached, never the pass instant: a drain budget that cut the
                 // span short must not hand a freshly live limit a span nothing
@@ -1360,7 +1358,7 @@ impl Engine {
                 emitted += 1;
                 continue;
             }
-            if let (Resting::Unactivated { .. }, Some(hit)) = (resting, result.hit) {
+            if let (Resting::Unactivated { .. }, Some(hit)) = (resting, result.hit.as_ref()) {
                 // The activation touch. The armed survivor resumes from the
                 // hit's own instant, not the walk's reached instant: the
                 // seeded trigger was derived from this print, and the span
@@ -1938,7 +1936,7 @@ impl Engine {
     /// instant on the sweep path, the acceptance instant on the arrival path
     /// (the synthesized arrival hit can carry an older print, and resuming
     /// from it would offer pre-acceptance history).
-    fn on_activate(&mut self, pos: usize, hit: Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
+    fn on_activate(&mut self, pos: usize, hit: &Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
         let order = self.open[pos].clone();
         let Some(offset) = order.submit.trail_offset else {
             // Unreachable through any validator (a trailing order owes its
@@ -2053,7 +2051,7 @@ impl Engine {
     /// it, so one sweep pass takes one snapshot (which is what
     /// `sizing::swept_fill_max_bytes` bounds) and `DropNextAccountUpdate` is
     /// consumed exactly once per batch.
-    fn on_trigger(&mut self, pos: usize, hit: Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
+    fn on_trigger(&mut self, pos: usize, hit: &Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
         let mut order = self.open[pos].clone();
         order.ts_triggered = Some(ts);
         order.ts_last = ts;
@@ -2095,7 +2093,7 @@ impl Engine {
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
                 let diverged = cap.map_or(planned, |cap| planned.min(cap));
                 let size_increment = self.instruments[&order.submit.symbol].size_increment;
-                let Some(reading) = hit_reading(&hit, order.band_ticks) else {
+                let Some(reading) = hit_reading(hit, order.band_ticks) else {
                     out.extend(self.cancel_triggered(pos, &order, "no market data available", ts));
                     return out;
                 };
@@ -2224,7 +2222,7 @@ impl Engine {
                     order.band_ticks,
                     order.band_draw,
                 );
-                let Some(reading) = hit_reading(&hit, order.band_ticks) else {
+                let Some(reading) = hit_reading(hit, order.band_ticks) else {
                     out.extend(self.cancel_triggered(pos, &order, "no market data available", ts));
                     return out;
                 };
@@ -3301,7 +3299,7 @@ impl Engine {
         quantity: Option<Decimal>,
         trigger_price: Option<Decimal>,
         ts: u64,
-        reading: Option<MarketReading>,
+        reading: Option<&MarketReading>,
     ) -> Vec<VenueMessage> {
         let Some(pos) = self.open.position(&client_order_id) else {
             let (reason, venue_order_id) =
@@ -3495,7 +3493,9 @@ impl Engine {
             && matches!(order.resting, Resting::Limit { .. })
         {
             let band_draw = order.band_draw.saturating_add(1);
-            let band_ticks = reading.map_or(order.band_ticks, |value| value.band_ticks);
+            let band_ticks = reading
+                .as_ref()
+                .map_or(order.band_ticks, |value| value.band_ticks);
             let trigger = draw_trigger(
                 self.fill_seed,
                 &order.submit,
@@ -3505,6 +3505,7 @@ impl Engine {
                 band_draw,
             );
             if reading
+                .as_ref()
                 .is_some_and(|value| trades_through(order.submit.side, trigger, value.last_px))
             {
                 return vec![VenueMessage::OrderModifyRejected {
@@ -3758,7 +3759,9 @@ impl Engine {
                 // the re-draw used so a later tranche inherits the current
                 // regime rather than the acceptance one.
                 order.band_draw = order.band_draw.saturating_add(1);
-                order.band_ticks = reading.map_or(order.band_ticks, |value| value.band_ticks);
+                order.band_ticks = reading
+                    .as_ref()
+                    .map_or(order.band_ticks, |value| value.band_ticks);
                 // A price amend on an untriggered stop-limit changes the limit
                 // the order will take once it fires, not the price the tape has
                 // to touch. It re-reads the band (which the trigger will draw
@@ -3930,6 +3933,23 @@ struct CrossOutcome {
     exhausted: bool,
 }
 
+/// The touch size in whole units of the size increment, exactly. `None` on a
+/// touch off the integral grid, which a ratio-ladder book can never publish:
+/// the generator's walk consumes whole units by construction, so an off-grid
+/// touch here is a malformed reading, not a quantization question, and
+/// rounding it would cross quantities that were never published.
+fn exact_touch_units(touch_size: Decimal, size_increment: Decimal) -> Option<u64> {
+    use rust_decimal::prelude::ToPrimitive;
+    if size_increment <= Decimal::ZERO {
+        return None;
+    }
+    let units = touch_size.checked_div(size_increment)?;
+    if units < Decimal::ZERO || units.fract() != Decimal::ZERO {
+        return None;
+    }
+    units.to_u64()
+}
+
 fn cross_book(
     side: Side,
     qty: Decimal,
@@ -3941,12 +3961,58 @@ fn cross_book(
     let mut remaining = qty;
     let mut filled = Decimal::ZERO;
     let mut notional = Decimal::ZERO;
-    let mut level_size = match side {
+    let touch_size = match side {
         Side::Buy => reading.ask_sz,
         Side::Sell => reading.bid_sz,
     };
+    // The ratio ladder anchors every level at the touch in whole units of
+    // the size grid - the shared arithmetic of `ladder_level_units`. An
+    // off-grid touch under it is refused outright (asserted in dev builds),
+    // never coerced onto the grid.
+    let touch_units = match &reading.depth {
+        crate::DepthLadder::Geometric { .. } => None,
+        crate::DepthLadder::Ratios(_) => {
+            let Some(units) = exact_touch_units(touch_size, size_increment) else {
+                debug_assert!(
+                    false,
+                    "a ratio-ladder book published a touch off its integral size grid"
+                );
+                return CrossOutcome {
+                    filled_qty: Decimal::ZERO,
+                    vwap_px: None,
+                    exhausted: remaining > Decimal::ZERO,
+                };
+            };
+            Some(units)
+        }
+    };
+    let mut level_size = touch_size;
     let touch = taking_touch(side, reading);
-    for level in 0..reading.depth.levels {
+    for level in 0..reading.depth.levels() {
+        if level > 0 {
+            // This level's size, from the shape's own arithmetic. Computed
+            // at the top of the iteration so the ratio vector is only ever
+            // indexed for a level the walk actually reaches.
+            level_size = match &reading.depth {
+                crate::DepthLadder::Geometric { growth, .. } => {
+                    let Some(grown) = level_size.checked_mul(*growth) else {
+                        break;
+                    };
+                    floor_to_increment(grown, size_increment).max(size_increment)
+                }
+                crate::DepthLadder::Ratios(ratios) => {
+                    let units = mogwai_protocol::ladder_level_units(
+                        touch_units.expect("resolved above for every ratio ladder"),
+                        level,
+                        ratios,
+                    );
+                    let Some(sized) = Decimal::from(units).checked_mul(size_increment) else {
+                        break;
+                    };
+                    sized
+                }
+            };
+        }
         let offset = increment
             .checked_mul(Decimal::from(level))
             .unwrap_or(Decimal::MAX);
@@ -3976,10 +4042,6 @@ fn cross_book(
         if remaining <= Decimal::ZERO {
             break;
         }
-        let Some(grown) = level_size.checked_mul(reading.depth.growth) else {
-            break;
-        };
-        level_size = floor_to_increment(grown, size_increment).max(size_increment);
     }
     let vwap_px = if filled > Decimal::ZERO {
         let raw = notional / filled;
@@ -4011,13 +4073,20 @@ fn cross_book(
 /// so it trips an assertion in test and dev builds and is refused the same way
 /// in release rather than crossing a ladder with no levels in it.
 fn hit_reading(hit: &Hit, band_ticks: u32) -> Option<MarketReading> {
-    let book = hit.book?;
+    let book = hit.book.as_ref()?;
     debug_assert!(
-        book.depth_levels >= 1 && book.depth_growth >= Decimal::ONE,
+        book.depth.is_some(),
         "the sweep delivered a hit whose ladder was never resolved from a preset"
     );
-    if book.depth_levels == 0 || book.depth_growth < Decimal::ONE {
-        return None;
+    let depth = book.depth.clone()?;
+    if let crate::DepthLadder::Geometric { levels, growth } = &depth {
+        debug_assert!(
+            *levels >= 1 && *growth >= Decimal::ONE,
+            "the sweep delivered a hit whose ladder was never resolved from a preset"
+        );
+        if *levels == 0 || *growth < Decimal::ONE {
+            return None;
+        }
     }
     Some(MarketReading {
         bid_px: book.bid_px,
@@ -4027,10 +4096,7 @@ fn hit_reading(hit: &Hit, band_ticks: u32) -> Option<MarketReading> {
         ts_ns: hit.ts_ns,
         band_ticks,
         last_px: hit.px,
-        depth: crate::DepthLadder {
-            levels: book.depth_levels,
-            growth: book.depth_growth,
-        },
+        depth,
     })
 }
 
@@ -4226,7 +4292,7 @@ mod book_cross_tests {
             last_px: Decimal::from(100),
             ts_ns: 1,
             band_ticks: 0,
-            depth: DepthLadder {
+            depth: DepthLadder::Geometric {
                 levels: 3,
                 growth: Decimal::ONE,
             },
@@ -4282,5 +4348,84 @@ mod book_cross_tests {
         );
         assert_eq!(outcome.filled_qty, Decimal::ONE);
         assert!(outcome.exhausted);
+    }
+
+    fn ratio_reading(touch_sz: Decimal, ratios: &[f64]) -> MarketReading {
+        MarketReading {
+            bid_sz: touch_sz,
+            ask_sz: touch_sz,
+            depth: DepthLadder::Ratios(ratios.into()),
+            ..reading()
+        }
+    }
+
+    #[test]
+    fn the_ratio_ladder_crosses_the_generator_quantities() {
+        // Touch 2 units, ratios 2.0 and 3.0: the ladder is 2, 4, 6 - the
+        // exact quantities `ladder_level_units` hands the generator's walk.
+        let book = ratio_reading(Decimal::from(2), &[2.0, 3.0]);
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(7),
+            None,
+            &book,
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(outcome.filled_qty, Decimal::from(7));
+        assert!(!outcome.exhausted);
+        // 2 at 101, 4 at 102, 1 at 103: vwap 101.857, adversely rounded up.
+        assert_eq!(outcome.vwap_px, Some(Decimal::from(102)));
+        // The whole declared ladder is 12; a request beyond it partially
+        // fills and never appends a level, exactly as the generator's walk.
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(13),
+            None,
+            &book,
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(outcome.filled_qty, Decimal::from(12));
+        assert!(outcome.exhausted);
+    }
+
+    #[test]
+    fn the_ratio_ladder_rounds_ties_to_even_like_the_prototype() {
+        // Touch 1 at ratio 2.5: two units behind the touch, not three -
+        // the fitted constants were derived under Python's ties-to-even
+        // round, and a ties-away crossing would quietly quote deeper
+        // liquidity than the generator consumed.
+        let book = ratio_reading(Decimal::ONE, &[2.5]);
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(4),
+            None,
+            &book,
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(outcome.filled_qty, Decimal::from(3));
+        assert!(outcome.exhausted);
+    }
+
+    #[test]
+    fn the_ratio_ladder_converts_a_fractional_size_grid_exactly() {
+        // Size increment 0.5, touch 1.5 (three units): level one is six
+        // units, 3.0 on the wire. The conversion is exact division, never
+        // a rounding of the touch onto the grid.
+        let book = ratio_reading(Decimal::new(15, 1), &[2.0]);
+        let outcome = cross_book(
+            Side::Buy,
+            Decimal::from(4),
+            None,
+            &book,
+            Decimal::ONE,
+            Decimal::new(5, 1),
+        );
+        assert_eq!(outcome.filled_qty, Decimal::from(4));
+        assert!(!outcome.exhausted);
+        // 1.5 at 101 and 2.5 at 102: vwap 101.625, adversely rounded to 102.
+        assert_eq!(outcome.vwap_px, Some(Decimal::from(102)));
     }
 }

@@ -28,6 +28,9 @@ mod clock;
 pub mod decimal;
 mod havoc;
 mod instruments;
+/// The depth ladder behind a published touch - the one definition the
+/// generator's book walk and the venue's crossing share.
+pub mod ladder;
 mod messages;
 mod ready;
 pub mod seeds;
@@ -57,6 +60,7 @@ pub use instruments::{
     DEFAULT_SYMBOL, FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass,
     default_instrument, default_instruments,
 };
+pub use ladder::{DepthLadder, ladder_level_units};
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
     AdmissionSubject, AggressorSide, Balance, Command, CommandClass, Contingency, FillSnapshot,

@@ -56,6 +56,23 @@ impl InstrumentProfile {
             calendar,
         }
     }
+
+    /// The depth ladder the crossing walks for this instrument: the fitted
+    /// per-level ratio vector when the preset carries a discrete book (the
+    /// frozen-ladder definition the generator's walk shares verbatim), the
+    /// legacy geometric knobs otherwise. The one resolution every venue
+    /// path uses - the reading cache, the test-only whole reading, and the
+    /// sweep's hit stamping - so no path can retain the legacy shape for a
+    /// book instrument.
+    pub fn resolved_ladder(&self) -> mogwai_protocol::DepthLadder {
+        match &self.scalars.book {
+            Some(book) => mogwai_protocol::DepthLadder::Ratios(book.depth_ratios.as_slice().into()),
+            None => mogwai_protocol::DepthLadder::Geometric {
+                levels: self.scalars.depth_levels.levels(),
+                growth: self.scalars.depth_growth.growth(),
+            },
+        }
+    }
 }
 #[derive(Debug)]
 pub struct InstrumentProfiles {
@@ -381,10 +398,34 @@ impl RiverKey {
         scalars.top_sizes.bid.hash(&mut digest);
         scalars.top_sizes.ask.hash(&mut digest);
         // `depth_levels` and `depth_growth` are deliberately absent. This
-        // digest identifies a river - the bytes a tape produces - and the
-        // ladder is derived at read time from the published top of book, so
-        // moving either knob moves no tape byte. Hashing them would split the
-        // river cache on a parameter the river does not depend on.
+        // digest identifies a river - the bytes a tape produces - and on
+        // every preset those two legacy knobs shape only the crossing's
+        // geometric ladder, never a tape byte. A book preset's fitted
+        // ratio ladder does move tape bytes, and it rides inside the book
+        // config hashed below.
+        //
+        // The cascade and book configs are hashed whole, by canonical
+        // serialization: every field of both moves tape bytes, and a
+        // digest that omitted them let two configurations of the same
+        // symbol collide in the river cache (found 2026-09-16, in review).
+        match &scalars.cascade {
+            None => 0_u8.hash(&mut digest),
+            Some(cascade) => {
+                1_u8.hash(&mut digest);
+                serde_json::to_string(cascade)
+                    .expect("CascadeConfig serializes")
+                    .hash(&mut digest);
+            }
+        }
+        match &scalars.book {
+            None => 0_u8.hash(&mut digest),
+            Some(book) => {
+                1_u8.hash(&mut digest);
+                serde_json::to_string(book)
+                    .expect("BookDynamicsConfig serializes")
+                    .hash(&mut digest);
+            }
+        }
         match scalars.arrival {
             None => 0_u8.hash(&mut digest),
             Some(mogwai_data::ArrivalConfig::EventMarkov {
@@ -1094,6 +1135,78 @@ mod river_tests {
             TAPE_ORIGIN_NS,
             profiles,
         )
+    }
+
+    /// The digest covers the whole generator configuration that moves tape
+    /// bytes. It omitted `cascade` and `book` entirely (found 2026-09-16, in
+    /// review): two configurations of the same symbol differing only there
+    /// hashed identically, so a checkpoint chain built under one could be
+    /// replayed under the other.
+    #[test]
+    fn the_river_digest_covers_the_cascade_and_book_configs() {
+        // `RiverKey::resolve` directly, never `resolve_key`: the memo is
+        // keyed by symbol and arm, so it would answer the mutated profile
+        // with the original's key and this test would be testing the memo.
+        let identity = TapeIdentity {
+            seeds: RunSeeds::from_run_seed(7),
+            regime: None,
+        };
+        let rivers = total_rivers();
+        let base = rivers.resolve_profile("MNQ").unwrap();
+        let base_key = RiverKey::resolve(&base, identity, None);
+        assert!(base.scalars.cascade.is_some(), "MNQ carries the cascade");
+
+        let mut moved = (*base).clone();
+        let cascade = moved.scalars.cascade.as_mut().unwrap();
+        cascade.impact_permanent_ticks += 0.01;
+        assert_ne!(
+            RiverKey::resolve(&moved, identity, None),
+            base_key,
+            "a moved cascade knob must move the river identity"
+        );
+
+        let mut size_law = vec![0.0; mogwai_data::SIZE_LAW_ENTRIES];
+        size_law[1] = 1.0;
+        let mut booked = (*base).clone();
+        booked.scalars.book = Some(mogwai_data::BookDynamicsConfig {
+            depth_ratios: vec![2.0, 2.4, 2.5],
+            phases: vec![mogwai_data::BookPhaseKnobs {
+                start_minute: 0,
+                replenish_one: 2.2,
+                replenish_two: 3.2,
+                replenish_three: 3.0,
+                p_join: 0.0,
+                join_mean: 2.0,
+                join_cap_factor: 1.5,
+                target_one: 0.5,
+                target_two: 0.4,
+                p_widen: 0.28,
+                p_narrow: 0.7,
+                p_follow: 0.6,
+                p_dep_lt: 0.19,
+                p_dep_eq: 0.45,
+                p_dep_gt: 0.6,
+                p_match: [0.77, 0.37, 0.25, 0.18, 0.14, 0.09, 0.07],
+                size_law,
+                p_split: 0.05,
+                impact_permanent_ticks: 0.34,
+                impact_transient_ticks: 0.32,
+                impact_transient_decay: 0.9,
+                slack_ticks: 0.5,
+            }],
+        });
+        let booked_key = RiverKey::resolve(&booked, identity, None);
+        assert_ne!(
+            booked_key, base_key,
+            "a book table must move the river identity"
+        );
+        let mut ratio_moved = booked.clone();
+        ratio_moved.scalars.book.as_mut().unwrap().depth_ratios[0] = 2.5;
+        assert_ne!(
+            RiverKey::resolve(&ratio_moved, identity, None),
+            booked_key,
+            "a moved depth ratio must move the river identity"
+        );
     }
 
     /// The widened `RiverKey`. A symbol nobody configured keys a river of its

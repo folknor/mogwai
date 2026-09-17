@@ -56,10 +56,10 @@ pub use generated::{
     GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets, LevelFill, LogOuParams,
     MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax,
     ParentDraw, ParentSummary, PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers,
-    ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar, SessionEnvelope,
-    SessionProfile, SessionProfileError, ShotNoiseParams, SizeGrid, Struck, SweepShape,
-    TickTraversal, TopOfBookSizes, TradeDisplacement, Trichotomy, VolTrace, WalkOutcome,
-    WallMmppParams, WeeklyWindow, book_mid_ticks, ladder_next_units, place_book,
+    SIZE_LAW_ENTRIES, ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar,
+    SessionEnvelope, SessionProfile, SessionProfileError, ShotNoiseParams, SizeGrid, Struck,
+    SweepShape, TickTraversal, TopOfBookSizes, TradeDisplacement, Trichotomy, VolTrace,
+    WalkOutcome, WallMmppParams, WeeklyWindow, book_mid_ticks, ladder_level_units, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{

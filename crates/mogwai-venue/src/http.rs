@@ -799,7 +799,7 @@ pub(crate) async fn process_order_cmd(
                     .ok()
                     .and_then(|profile| profile.calendar.clone())
             },
-            |order| engine.marketable_on_arrival(order, market_px),
+            |order| engine.marketable_on_arrival(order, market_px.clone()),
         )
         .map(|order| order.client_order_id.clone())
     };
@@ -1743,7 +1743,7 @@ async fn market_reading(
                 interval_ms,
                 Some(&boat.vol_window),
             );
-            let last_px = reading.map(|value| value.last_px);
+            let last_px = reading.as_ref().map(|value| value.last_px);
             (reading, last_px)
         })
         .await
@@ -1758,7 +1758,7 @@ async fn market_reading(
         // have met two markets in one atomic admission, which is the property
         // the group frame exists to guarantee against.
         let stamp = |order: &mut mogwai_protocol::SubmitOrder| {
-            let touch = reading.map(|value| match order.side {
+            let touch = reading.as_ref().map(|value| match order.side {
                 mogwai_protocol::Side::Buy => value.ask_px,
                 mogwai_protocol::Side::Sell => value.bid_px,
             });
