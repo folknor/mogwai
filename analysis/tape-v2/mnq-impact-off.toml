@@ -1,0 +1,17 @@
+# The MNQ preset with the cascade propagator zeroed: `gen --type quotes`
+# on this config emits the placed book over the cascade's EXTERNAL
+# diffusion alone, which is the uncontaminated quantity the book
+# prototype pins its diffusion knobs to. The protocol-34 tape's mid
+# carries diffusion plus propagator; matching that aggregate while
+# assuming the propagator constants estimates a decomposition, not a
+# measurement - this config removes the impact term at the source
+# instead.
+
+[instrument]
+preset = "MNQ"
+
+[instrument.override]
+"generator.cascade.impact_permanent_ticks" = 0.0
+"generator.cascade.impact_transient_ticks" = 0.0
+
+[balances]

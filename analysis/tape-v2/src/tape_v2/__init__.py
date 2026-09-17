@@ -111,6 +111,21 @@ def main(argv: list[str] | None = None) -> None:
     micro_bars.add_argument("--last", required=True)
     micro_bars.add_argument("--interval", type=int, default=15, help="seconds")
 
+    depth_extract = sub.add_parser(
+        "depth-extract",
+        help="cache a parent's front-month mbp-10 pre-trade books per day",
+    )
+    depth_extract.add_argument("--parent", required=True)
+    depth_extract.add_argument("--first", required=True)
+    depth_extract.add_argument("--last", required=True)
+    depth_extract.add_argument("--workers", type=int, default=4)
+
+    depth_profile = sub.add_parser(
+        "depth-profile",
+        help="non-parametric depth profile from extracted mbp-10 books",
+    )
+    depth_profile.add_argument("--parent", required=True)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "index":
@@ -165,6 +180,14 @@ def main(argv: list[str] | None = None) -> None:
         from .micro_bars import write_bars
 
         write_bars(args.parent, args.first, args.last, args.interval)
+    elif args.cmd == "depth-extract":
+        from .depth import extract_mbp10
+
+        extract_mbp10(args.parent, args.first, args.last, args.workers)
+    elif args.cmd == "depth-profile":
+        from .depth import depth_stats
+
+        depth_stats(args.parent)
     elif args.cmd == "micro-stats":
         from .micro_stats import run_stats
 

@@ -183,6 +183,16 @@ def pmf(series: pl.Series, keys: list[str]) -> dict[str, float]:
     return {k: lookup.get(k, 0) / total for k in keys}
 
 
+def integer_pmf(series: pl.Series, cap: int) -> dict[str, float]:
+    """Masses at each integer value up to `cap`, the tail pooled as
+    `>cap`."""
+    values = series.to_numpy()
+    total = values.size
+    out = {str(v): float((values == v).sum() / total) for v in range(1, cap + 1)}
+    out[f">{cap}"] = float((values > cap).sum() / total)
+    return out
+
+
 def segment_lag_mask(same: np.ndarray, lag: int, size: int) -> np.ndarray:
     """Rows whose partner `lag` ahead lies in the same segment."""
     cum = np.concatenate([[0], np.cumsum(same.astype(np.int64))])
@@ -301,6 +311,11 @@ def sweep_stats(parents: pl.DataFrame) -> dict:
         "parent_size_pmf": pmf(
             parents.select(size_bucket(pl.col("size")).alias("s"))["s"], SIZE_LABELS
         ),
+        # The integer-support pmf (masses at 1..30, the tail pooled),
+        # for the size-law deconvolution: bucket representatives cannot
+        # express within-bucket coincidence, so the mixture is solved on
+        # integers.
+        "parent_size_pmf_full": integer_pmf(parents["size"], 30),
     }
     if parents["ask_sz"].null_count() < parents.height:
         touch = pl.when(pl.col("sign") > 0).then(pl.col("ask_sz")).otherwise(pl.col("bid_sz"))
@@ -311,6 +326,32 @@ def sweep_stats(parents: pl.DataFrame) -> dict:
             .then(pl.col("price_first") == pl.col("ask_ticks"))
             .otherwise(pl.col("price_first") == pl.col("bid_ticks"))
         ).height
+        # The exact-match share conditioned on the touch value identifies
+        # the size-match channel's strength separately from coincidence:
+        # a 1-lot order matching a 1-lot touch says nothing, but the
+        # match rate at large touches converges on the behavioral
+        # matching probability, since an independent draw landing exactly
+        # on a large touch is rare. The touch pmf in the same buckets is
+        # the mixture component the independent size law is deconvolved
+        # against.
+        match_by_touch = {}
+        for label, lo, hi in (
+            ("1", 1, 2),
+            ("2", 2, 3),
+            ("3", 3, 4),
+            ("4", 4, 5),
+            ("5", 5, 6),
+            ("6-10", 6, 11),
+            ("11+", 11, None),
+        ):
+            cond = pl.col("touch") >= lo
+            if hi is not None:
+                cond = cond & (pl.col("touch") < hi)
+            sub = with_touch.filter(cond)
+            if sub.height >= 200:
+                match_by_touch[label] = float(
+                    (sub["size"] == sub["touch"]).mean()
+                )
         out["touch"] = {
             "n": with_touch.height,
             "first_print_at_touch": at_touch / with_touch.height,
@@ -323,7 +364,53 @@ def sweep_stats(parents: pl.DataFrame) -> dict:
             "multi_level_given_size_ge_touch": float(
                 (with_touch.filter(ratio >= 1.0)["levels"] > 1).mean()
             ),
+            "match_by_touch": match_by_touch,
+            "touch_pmf": pmf(
+                with_touch.select(size_bucket(pl.col("touch")).alias("t"))["t"],
+                SIZE_LABELS,
+            ),
+            "touch_pmf_full": integer_pmf(with_touch["touch"], 30),
+            "size_gt_by_touch": size_gt_by_touch(with_touch),
         }
+    return out
+
+
+def size_gt_by_touch(with_touch: pl.DataFrame) -> dict:
+    """Strictly-greater counts by touch value, for the size-dependence
+    diagnostic: raw counts of parents whose size exceeds the struck
+    touch, at each integer touch up to 30 with the tail pooled as >30
+    (the full-pmf convention), over all valid parents at the touch -
+    observed equals stay in the denominator, since an independent draw
+    produces equality too. The same counts are emitted per spread state
+    so the diagnostic can condition; a parent without a valid two-sided
+    book enters only the pooled group."""
+
+    def counts(sub: pl.DataFrame) -> dict:
+        grouped = (
+            sub.with_columns(
+                pl.when(pl.col("touch") <= 30)
+                .then(pl.col("touch").cast(pl.Utf8))
+                .otherwise(pl.lit(">30"))
+                .alias("t"),
+                (pl.col("size") > pl.col("touch")).alias("gt"),
+            )
+            .group_by("t")
+            .agg(pl.len().alias("n"), pl.col("gt").sum().alias("gt"))
+        )
+        return {
+            row["t"]: {"n": int(row["n"]), "gt": int(row["gt"])}
+            for row in grouped.iter_rows(named=True)
+        }
+
+    out = {"all": counts(with_touch)}
+    booked = with_touch.filter(
+        (pl.col("bid_ticks") > 0) & (pl.col("ask_ticks") > pl.col("bid_ticks"))
+    ).with_columns((pl.col("ask_ticks") - pl.col("bid_ticks")).alias("spread"))
+    for label, lo, hi in (("1", 1, 2), ("2", 2, 3), ("3+", 3, None)):
+        cond = pl.col("spread") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("spread") < hi)
+        out[label] = counts(booked.filter(cond))
     return out
 
 

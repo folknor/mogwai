@@ -1,0 +1,493 @@
+{
+ "comment": "The fitted book rows, the single source of truth the prototype CLI defaults, the robustness battery and the ablation runner all read. The base carries the pooled row; a phase entry overrides only what its fit moved. Provenance: the 2026-09-16 refit against data/micro/MNQ-real-targets.json, notes/book-dynamics-spec.md section 'The floor artifact and the final prototype state'.",
+ "base": {
+  "sigma_e": 0.9,
+  "sig_ln": 0.4,
+  "df": 6.0,
+  "rho_sig": 0.995,
+  "x0": 100000.0,
+  "g": 0.33,
+  "a_t": 0.32,
+  "rho": 0.9,
+  "slack": 2.0,
+  "p_dep_lt": 0.0,
+  "p_dep_eq": 0.75,
+  "p_dep_gt": 0.6,
+  "p_narrow": 0.84,
+  "p_target_1": 0.35,
+  "p_target_2": 0.4,
+  "p_widen": 0.14,
+  "p_follow": 0.7,
+  "replenish_1": 1.3,
+  "replenish_2": 5.5,
+  "replenish_3": 3.0,
+  "p_join": 0.0,
+  "join_mean": 3.0,
+  "join_cap_factor": 1.5,
+  "max_spread": 8,
+  "max_levels": 8,
+  "depth_ratios": [
+   2.0,
+   2.4,
+   2.5,
+   2.83,
+   3.0,
+   3.0,
+   3.33
+  ],
+  "p_match": [
+   0.7567117721788423,
+   0.3725303851606164,
+   0.25459731975187483,
+   0.17975940253094627,
+   0.14244398779311615,
+   0.08726610264399244,
+   0.07125065809380146
+  ],
+  "size_law": [
+   0.6118469687677108,
+   0.165106108653783,
+   0.07101500785734174,
+   0.04036364650454543,
+   0.039039188067640423,
+   0.017145135522497832,
+   0.008756405224307694,
+   0.0076859804580856565,
+   0.004275410256083837,
+   0.010570287051927018,
+   0.002653736484698372,
+   0.002665723794359736,
+   0.0017094301159698154,
+   0.0016099475551781578,
+   0.002275730412973357,
+   0.0012374005309803244,
+   0.0009070854447681207,
+   0.0008826469345925822,
+   0.0006786157566892764,
+   0.0020155896537352204,
+   0.0006037696449683891,
+   0.0005038105735928437,
+   0.0004225027280415336,
+   0.00043306912320873614,
+   0.0005955677604933162,
+   0.00032047361506375963,
+   0.0002666584676142376,
+   0.0002490944382307573,
+   0.00022059907810192242,
+   0.0004948590943469971,
+   0.003449550428469153
+  ]
+ },
+ "phases": {
+  "asia": {
+   "p_narrow": 0.95,
+   "p_target_1": 0.3,
+   "p_widen": 0.44,
+   "replenish_2": 2.0,
+   "replenish_3": 4.5,
+   "p_dep_eq": 0.75,
+   "g": 0.4,
+   "a_t": 0.52,
+   "p_match": [
+    0.7011642037015541,
+    0.34271627277642763,
+    0.2266196247575746,
+    0.16299569925159693,
+    0.13938339660944812,
+    0.13646259993111795,
+    0.11742215219931706
+   ],
+   "size_law": [
+    0.6143252074177301,
+    0.15985422970561888,
+    0.06755122544524797,
+    0.03991411597342907,
+    0.0403175042966012,
+    0.01573884769201995,
+    0.0096156264262987,
+    0.009356850678052038,
+    0.005852656616253046,
+    0.01114474393390942,
+    0.003532547520506491,
+    0.003257314092626129,
+    0.002097546964416182,
+    0.0018589021966792182,
+    0.002457163797532274,
+    0.0014151236674749554,
+    0.0009892605186999231,
+    0.000930072553547105,
+    0.0007005635496801289,
+    0.0018905464698072063,
+    0.0006398054986312497,
+    0.000501094851059171,
+    0.00041663019769598954,
+    0.000398285984538618,
+    0.0005402078872653834,
+    0.00031844398670403793,
+    0.00025796854295502227,
+    0.00023714194057874983,
+    0.00019731379553929754,
+    0.0004658624271635873,
+    0.0032271953717389803
+   ]
+  },
+  "london": {
+   "p_narrow": 0.9,
+   "p_target_1": 0.3,
+   "p_widen": 0.64,
+   "replenish_2": 2.0,
+   "replenish_3": 4.5,
+   "p_dep_eq": 0.75,
+   "p_dep_gt": 0.75,
+   "slack": 1.5,
+   "g": 0.47,
+   "a_t": 0.42,
+   "p_match": [
+    0.7586833721883249,
+    0.4166829308245451,
+    0.2767986412191415,
+    0.19520500706377703,
+    0.16750116240902957,
+    0.15553357434406356,
+    0.12183058333726506
+   ],
+   "size_law": [
+    0.5968874237312114,
+    0.16729055614074748,
+    0.0741307468229409,
+    0.043571742541651796,
+    0.03836790226587423,
+    0.01693149582313029,
+    0.010595642223375995,
+    0.009414628108872902,
+    0.006291763725901077,
+    0.010664076149733663,
+    0.003746706039451441,
+    0.003310193612336616,
+    0.002222257099556462,
+    0.0019157560590260746,
+    0.0023073323740493263,
+    0.0013902344557009817,
+    0.0009984662027720395,
+    0.0009387041915341087,
+    0.0006867263693010572,
+    0.0016193118577499043,
+    0.0006169311108454491,
+    0.0005027806421459709,
+    0.0003987417306719072,
+    0.0003988827814476632,
+    0.0005398947352617513,
+    0.0003184412474825943,
+    0.0002653628062942074,
+    0.0002408885780507771,
+    0.00020744658274707197,
+    0.0004288456226890729,
+    0.0028001183674457703
+   ]
+  },
+  "ny_open": {
+   "p_narrow": 0.84,
+   "p_target_1": 0.45,
+   "p_widen": 0.34,
+   "replenish_2": 7.5,
+   "p_dep_eq": 0.65,
+   "p_dep_gt": 0.45,
+   "slack": 1.5,
+   "a_t": 0.4,
+   "p_match": [
+    0.7533902090278013,
+    0.3589847256939914,
+    0.2364795291851906,
+    0.16237621550076084,
+    0.12128489518351807,
+    0.07764127658561762,
+    0.07720377092704493
+   ],
+   "size_law": [
+    0.6177554211066191,
+    0.16747254160739042,
+    0.0705697032689348,
+    0.038799554162346914,
+    0.03918500492069664,
+    0.01537858654909182,
+    0.007452333749182687,
+    0.006948378344138103,
+    0.0037838835223977458,
+    0.010195754435141185,
+    0.0022401490628744963,
+    0.00238940467436333,
+    0.0015134206041808442,
+    0.0014867993067713148,
+    0.002195033527037926,
+    0.0011394555716921582,
+    0.0008362927281910783,
+    0.0008183874773943338,
+    0.0006367777515005425,
+    0.0019007034812359045,
+    0.0005434928400765948,
+    0.0004724392800339549,
+    0.0003941216835597279,
+    0.00041387821118611716,
+    0.0005540236373825628,
+    0.000290463990305061,
+    0.0002483500821380253,
+    0.0002391427204414247,
+    0.000211749750262515,
+    0.0004836256114129591,
+    0.003451126342019696
+   ]
+  },
+  "ny_close": {
+   "p_narrow": 0.84,
+   "p_target_1": 0.65,
+   "p_widen": 0.4,
+   "replenish_2": 7.5,
+   "p_dep_eq": 0.75,
+   "g": 0.27,
+   "p_join": 0.15,
+   "join_mean": 2.0,
+   "join_cap_factor": 2.0,
+   "p_match": [
+    0.7926790840236643,
+    0.3905554777547416,
+    0.2807657396740309,
+    0.21069193288614116,
+    0.16109588349532808,
+    0.09815050215490018,
+    0.06118073004097292
+   ],
+   "size_law": [
+    0.5971032175626876,
+    0.16723100495036564,
+    0.07331338038761186,
+    0.04227809230845417,
+    0.04154931444525539,
+    0.019342137865152754,
+    0.009546872327945368,
+    0.008217874350371773,
+    0.0038972134000909743,
+    0.011000593399818483,
+    0.0030219186133921125,
+    0.0029842152246613257,
+    0.0017566643430237947,
+    0.0016694564115790126,
+    0.002360015065149107,
+    0.0012812100815838298,
+    0.0009645239802270576,
+    0.0009872257925537045,
+    0.0007375333028127665,
+    0.002281240970783684,
+    0.0006681845971313901,
+    0.0005732431794613169,
+    0.0004372258016838902,
+    0.0005065433997199514,
+    0.0006870048692003283,
+    0.00034827765951891965,
+    0.0003069840220357415,
+    0.0002833131340676611,
+    0.0002310620524048576,
+    0.0005729081162874381,
+    0.0038615483849680395
+   ]
+  }
+ },
+ "exceptions": {
+  "comment": "The three frozen tier-1 exceptions of the POOLED row only: each sits one to two percent relative beyond every real month, the omitted mechanism is identified (marketable-limit truncation, absorbed by the deconvolved match table), and the pooled gates - prototype and engine alike - bind them one-sided at the frozen value plus the declared sampling allowance, an explicit acceptance policy covering the rounding of the frozen constants and realization noise, applied once, outward, to these three bounds and nothing else. On phase rows these cells take their ordinary phase bands. Effective pooled limits are recorded so the allowance cannot obscure the actual gate.",
+  "size_gt_touch": {
+   "frozen": 0.097,
+   "bound": "not above",
+   "allowance": 0.005,
+   "effective": 0.102
+  },
+  "levels_mean": {
+   "frozen": 1.067,
+   "bound": "not below",
+   "allowance": 0.005,
+   "effective": 1.062,
+   "retired": "2026-09-17, tenth spar: frozen on the defective exhausted-levels statistic; the corrected observation sits above the band, not below it. The cell takes its ordinary band."
+  },
+  "dprice_pmf_1": {
+   "frozen": 0.419,
+   "bound": "not above",
+   "allowance": 0.005,
+   "effective": 0.424
+  }
+ },
+ "deconvolution": {
+  "comment": "The touch-conditional match table and independent size law, deconvolved per phase by deconvolve_phases.py from the per-month integer pmfs and match-by-touch in the real targets; the derivation contract and expected outputs are deconvolution-fixture.json. Thin buckets (median monthly observations under thin_floor) would take the pooled p inside the joint solve; none fired at the recorded floor.",
+  "thin_floor": 2000,
+  "pooled_fallback_buckets": {
+   "asia": [],
+   "london": [],
+   "ny_open": [],
+   "ny_close": []
+  },
+  "depth_ratio_tail_unexercised": [
+   3.33,
+   3.33
+  ]
+ },
+ "deferrals": {
+  "comment": "The deferral ledger, machine-readable: the ninth-spar adjudication plus the tenth spar's three dprice-1 cells (basis: the real target is the fast bucket, gaps under 100 ms, while the parent-indexed prototype measures all consecutive pairs and cannot condition on elapsed time - the same identification gap that created the witness deferrals). Each cell is remeasured at the engine gate against its original phase band - a cell outside there fails acceptance and blocks the tape bless; no deferred value is an alternative bound, and the engine never takes this bypass. The recorded value is the pinned-recipe prototype measurement (seed 1, sim seed 2, 400k parents), historical evidence only. The battery classifies a cell here as deferred only when its measurement is finite and its band present.",
+  "asia": [
+   {
+    "key": "witness",
+    "sub": "lt",
+    "value": 0.2249,
+    "band_lo": 0.106,
+    "band_hi": 0.1987
+   },
+   {
+    "key": "witness",
+    "sub": "eq",
+    "value": 0.7856,
+    "band_lo": 0.7935,
+    "band_hi": 0.8391
+   },
+   {
+    "key": "size_pmf_11_20",
+    "value": 0.0153,
+    "band_lo": 0.0125,
+    "band_hi": 0.0142
+   }
+  ],
+  "london": [
+   {
+    "key": "dprice_pmf",
+    "sub": "0",
+    "value": 0.2349,
+    "band_lo": 0.2349,
+    "band_hi": 0.3807
+   },
+   {
+    "key": "dprice_pmf",
+    "sub": "1",
+    "value": 0.4021,
+    "band_lo": 0.4039,
+    "band_hi": 0.4338
+   },
+   {
+    "key": "witness",
+    "sub": "lt",
+    "value": 0.2581,
+    "band_lo": 0.103,
+    "band_hi": 0.2073
+   },
+   {
+    "key": "witness",
+    "sub": "eq",
+    "value": 0.791,
+    "band_lo": 0.8172,
+    "band_hi": 0.8351
+   },
+   {
+    "key": "witness",
+    "sub": "gt",
+    "value": 0.7871,
+    "band_lo": 0.6757,
+    "band_hi": 0.7594
+   },
+   {
+    "key": "size_pmf_1",
+    "value": 0.568,
+    "band_lo": 0.5901,
+    "band_hi": 0.6056
+   },
+   {
+    "key": "size_pmf_11_20",
+    "value": 0.0156,
+    "band_lo": 0.0114,
+    "band_hi": 0.0133
+   }
+  ],
+  "ny_open": [
+   {
+    "key": "dprice_pmf",
+    "sub": "1",
+    "value": 0.429,
+    "band_lo": 0.3835,
+    "band_hi": 0.4087
+   },
+   {
+    "key": "witness",
+    "sub": "eq",
+    "value": 0.6921,
+    "band_lo": 0.7048,
+    "band_hi": 0.7379
+   },
+   {
+    "key": "touch_p90_1",
+    "value": 7.0,
+    "band_lo": 4.0,
+    "band_hi": 5.7
+   },
+   {
+    "key": "touch_p90_2",
+    "value": 12.0,
+    "band_lo": 6.3,
+    "band_hi": 10.7
+   },
+   {
+    "key": "size_p99",
+    "value": 17.0,
+    "band_lo": 13.3,
+    "band_hi": 15.0
+   },
+   {
+    "key": "size_pmf_11_20",
+    "value": 0.0147,
+    "band_lo": 0.0103,
+    "band_hi": 0.0125
+   }
+  ],
+  "ny_close": [
+   {
+    "key": "dprice_pmf",
+    "sub": "1",
+    "value": 0.457,
+    "band_lo": 0.3966,
+    "band_hi": 0.4165
+   },
+   {
+    "key": "witness",
+    "sub": "eq",
+    "value": 0.735,
+    "band_lo": 0.7057,
+    "band_hi": 0.7346
+   },
+   {
+    "key": "witness",
+    "sub": "gt",
+    "value": 0.6201,
+    "band_lo": 0.5327,
+    "band_hi": 0.6098
+   },
+   {
+    "key": "touch_p50_3",
+    "value": 4.0,
+    "band_lo": 2.0,
+    "band_hi": 3.0
+   },
+   {
+    "key": "size_pmf_1",
+    "value": 0.5757,
+    "band_lo": 0.5886,
+    "band_hi": 0.621
+   }
+  ]
+ },
+ "gate_recipe": {
+  "comment": "The pinned sampling recipe of the adjudicated center verdict: deterministic reproduction of the ninth-spar grading. Other seeds' band misses are diagnostics, not verdicts.",
+  "seed": 1,
+  "sim_seed": 2,
+  "parents": 400000,
+  "sign_slots": 5,
+  "sign_alpha": 2.2,
+  "sign_mix": 0.08
+ },
+ "neighborhood": {
+  "comment": "The neighborhood impact contract: every jittered sample keeps every impact lag at collapse_floor of real or better; the share of samples under report_threshold is a reported per-lag diagnostic, not a verdict. Declared weakening of the original 0.75-everywhere criterion, owner ruling 2026-09-17; the close's measured cliff remains an unresolved robustness limitation either way.",
+  "collapse_floor": 0.5,
+  "report_threshold": 0.75
+ }
+}
