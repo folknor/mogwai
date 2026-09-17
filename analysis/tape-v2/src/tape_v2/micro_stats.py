@@ -334,24 +334,6 @@ def sweep_stats(parents: pl.DataFrame) -> dict:
         # on a large touch is rare. The touch pmf in the same buckets is
         # the mixture component the independent size law is deconvolved
         # against.
-        match_by_touch = {}
-        for label, lo, hi in (
-            ("1", 1, 2),
-            ("2", 2, 3),
-            ("3", 3, 4),
-            ("4", 4, 5),
-            ("5", 5, 6),
-            ("6-10", 6, 11),
-            ("11+", 11, None),
-        ):
-            cond = pl.col("touch") >= lo
-            if hi is not None:
-                cond = cond & (pl.col("touch") < hi)
-            sub = with_touch.filter(cond)
-            if sub.height >= 200:
-                match_by_touch[label] = float(
-                    (sub["size"] == sub["touch"]).mean()
-                )
         out["touch"] = {
             "n": with_touch.height,
             "first_print_at_touch": at_touch / with_touch.height,
@@ -364,13 +346,97 @@ def sweep_stats(parents: pl.DataFrame) -> dict:
             "multi_level_given_size_ge_touch": float(
                 (with_touch.filter(ratio >= 1.0)["levels"] > 1).mean()
             ),
-            "match_by_touch": match_by_touch,
+            "match_by_touch": match_by_touch(with_touch),
             "touch_pmf": pmf(
                 with_touch.select(size_bucket(pl.col("touch")).alias("t"))["t"],
                 SIZE_LABELS,
             ),
             "touch_pmf_full": integer_pmf(with_touch["touch"], 30),
             "size_gt_by_touch": size_gt_by_touch(with_touch),
+            "by_spread": touch_by_spread(with_touch),
+            "size_pmf_by_touch": size_pmf_by_touch(with_touch),
+        }
+    return out
+
+
+def size_pmf_by_touch(with_touch: pl.DataFrame) -> dict:
+    """The executed-size pmf conditioned on the touch bucket, for the
+    touch-conditional decomposition: within a bucket the mixture is an
+    exact-touch atom plus a bucket-conditional law, solvable per bucket
+    by the same fixed point as the pooled deconvolution. Buckets 1
+    through 5 hold one touch value each, so the decomposition there is
+    exact; the multi-touch buckets carry a declared bucket-constant
+    assumption tested by the within-bucket strictly-greater curve."""
+    out = {}
+    for label, lo, hi in MATCH_EDGES:
+        cond = pl.col("touch") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("touch") < hi)
+        sub = with_touch.filter(cond)
+        if sub.height >= 200:
+            out[label] = {
+                "n": sub.height,
+                "size_pmf_full": integer_pmf(sub["size"], 30),
+            }
+    return out
+
+
+# The size-channel touch buckets, shared with the deconvolution.
+MATCH_EDGES = [
+    ("1", 1, 2),
+    ("2", 2, 3),
+    ("3", 3, 4),
+    ("4", 4, 5),
+    ("5", 5, 6),
+    ("6-10", 6, 11),
+    ("11+", 11, None),
+]
+
+
+def match_by_touch(sub: pl.DataFrame) -> dict:
+    """The exact-match share conditioned on the touch value. It
+    identifies the size-match channel's strength separately from
+    coincidence: a 1-lot order matching a 1-lot touch says nothing, but
+    the match rate at large touches converges on the behavioral
+    matching probability, since an independent draw landing exactly on
+    a large touch is rare. The touch pmf in the same buckets is the
+    mixture component the independent size law is deconvolved
+    against."""
+    out = {}
+    for label, lo, hi in MATCH_EDGES:
+        cond = pl.col("touch") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("touch") < hi)
+        bucket = sub.filter(cond)
+        if bucket.height >= 200:
+            out[label] = float((bucket["size"] == bucket["touch"]).mean())
+    return out
+
+
+def touch_by_spread(with_touch: pl.DataFrame) -> dict:
+    """The size-channel inputs per spread state, for the conditional
+    mixture: within each state, the exact-match share by touch bucket
+    and the integer-support size and touch pmfs - the same three
+    inputs the pooled deconvolution consumes, over the same population
+    convention, so a per-state solve is the ratified identification
+    scheme run within the state. Only parents with a valid two-sided
+    book carry a spread state."""
+    booked = with_touch.filter(
+        (pl.col("bid_ticks") > 0) & (pl.col("ask_ticks") > pl.col("bid_ticks"))
+    ).with_columns((pl.col("ask_ticks") - pl.col("bid_ticks")).alias("spread"))
+    out = {}
+    for label, lo, hi in (("1", 1, 2), ("2", 2, 3), ("3+", 3, None)):
+        cond = pl.col("spread") >= lo
+        if hi is not None:
+            cond = cond & (pl.col("spread") < hi)
+        sub = booked.filter(cond)
+        if sub.height == 0:
+            continue
+        out[label] = {
+            "n": sub.height,
+            "match_by_touch": match_by_touch(sub),
+            "touch_pmf_full": integer_pmf(sub["touch"], 30),
+            "size_pmf_full": integer_pmf(sub["size"], 30),
         }
     return out
 

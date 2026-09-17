@@ -1458,3 +1458,58 @@ ny_close; london's at its exact band edge), the deferred cells
 reproducing the ledger to the digit. The criterion no longer conflicts
 with the accepted history, and the remaining failures are precisely
 the cells whose mechanism the diagnostic identified.
+
+## The mechanism cycle, 2026-09-17: the size law is touch-conditional
+
+The owner authorized the cycle the same day, and the identification
+question resolved in two measured steps, both on the extended real
+emission (`by_spread` and `size_pmf_by_touch` beside the existing
+counts; each corpus pass verified byte-equal outside its new fields).
+
+Step one, the spread-conditional mixture, is insufficient. Per spread
+state the ratified solve runs clean (no negative mass anywhere,
+plausible monotone match tables, p at touch 1 falling 0.83 to 0.65 to
+0.54 across the three states) and pins its own touch-1 cell by
+construction - and the touch-shaped residual survives essentially
+unchanged inside every state and phase: real strictly-greater rates
+below prediction at touches 2 through 5, above at 6-10, far above at
+11+ (up to +0.11 at the close's wide books). The mediator is the
+touch itself. Spread is not the channel, though the state-level match
+tables are real structure a later refinement may want.
+
+Step two exposed the identification boundary exactly where the tenth
+spar predicted, then crossed it honestly. A naive per-touch-bucket
+mixture solve diverges structurally in the singleton buckets: at a
+single touch value t, the within-bucket size mass at t is identically
+the match rate, so the atom and the law's own mass at t are one
+observable and the split is free - the pooled solve was only ever
+identified by sharing F across touch values. The resolution is not a
+cleverer solve: for touches 1 through 5 the simulator needs only the
+conditional size law given the touch, the atom is part of it, and the
+empirical conditional pmf is the law, assumption-free. The mixture
+form survives only inside the multi-touch buckets (6-10, 11+), where
+the atom's location moves with the touch and within-bucket sharing
+identifies p and F (solved: p 0.081 and 0.067 pooled, converging in
+every phase).
+
+Under that bucket-conditional law the discrepancy closes: touch-
+weighted mean absolute residual 0.0022 to 0.0034 per phase, against
+0.012 to 0.020 for the adopted independent mixture - rows 1 through 5
+by construction, the mixture buckets by fit. The remaining structure
+is a small within-bucket lean, measured and bounded: touch 6 sits
+over-predicted (about -0.01 to -0.025), touches 9-10 and the 21-30
+slice under-predicted (up to +0.028), because the dependence is
+smooth in the touch rather than constant per bucket. Finer mixture
+buckets are the available refinement if an engine gate ever demands
+it; at the graded cells' weights the lean is second-order.
+
+The candidate parametrization, awaiting the owner's ratification
+before anything moves: the preset's size channel becomes conditional
+size pmfs at touches 1 through 5 plus per-bucket mixture rows for
+6-10 and 11+, replacing the unconditional p_match and size_law
+arrays. Adoption implies the full chain: `deconvolve_phases.py`
+writes the conditional tables, the fixture gains the conditional
+contract, the simulator's size draw conditions on the observed touch,
+the rows refit, and the battery and engine gates rerun as they stand.
+Spread-conditional refinement of the same tables stays available and
+unadopted.
