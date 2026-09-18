@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 
 use nautilus_model::identifiers::Venue;
 
+pub mod bars;
 mod client;
 mod clock;
 mod config;

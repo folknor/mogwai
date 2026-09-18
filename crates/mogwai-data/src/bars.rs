@@ -51,7 +51,7 @@ pub fn window_close_ns(ts: u64, interval: NonZeroU64) -> u64 {
 /// Fold one trade into the running window `state`. Returns the just-closed
 /// window's accumulator when the trade rotates into a new window; `None` when it
 /// extends the current window or opens the first one. This reproduces the
-/// adapter's `update_bar_state` rotate semantics exactly: open on the first
+/// adapter's `BarAggregator` rotate semantics exactly: open on the first
 /// trade (all prices = trade price, volume = size, count = 1), fold with
 /// `high.max` / `low.min` / `close =` / `volume +=` / `count += 1`, and rotate
 /// on `ts >= active.close_ts` returning the old window unchanged.

@@ -1,0 +1,6 @@
+disallowed-types = [
+    { path = "nautilus_network::websocket::WebSocketClient", reason = "its reconnect loop does not know the venue's terminal closes; the MOGWAI sockets run through crate::lifecycle, which honours them on every redial path" },
+    { path = "nautilus_network::websocket::WebSocketClientInner", reason = "its reconnect loop does not know the venue's terminal closes; the MOGWAI sockets run through crate::lifecycle, which honours them on every redial path" },
+    { path = "nautilus_network::websocket::WebSocketConfig", reason = "its reconnect loop does not know the venue's terminal closes; the MOGWAI sockets run through crate::lifecycle, which honours them on every redial path" },
+    { path = "nautilus_network::socket::SocketClient", reason = "its reconnect loop does not know the venue's terminal closes; the MOGWAI sockets run through crate::lifecycle, which honours them on every redial path" },
+]

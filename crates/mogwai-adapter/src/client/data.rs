@@ -13,7 +13,6 @@
 
 use std::{
     collections::HashMap,
-    num::NonZeroU64,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -22,7 +21,6 @@ use std::{
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
-use mogwai_data::{BarAcc, fold_trade};
 use mogwai_protocol::{InstrumentDef, SimClock, Symbol, TradeTick, VenueMessage};
 use nautilus_common::{
     clients::DataClient,
@@ -41,8 +39,7 @@ use nautilus_common::{
 };
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{Bar, BarType, Data, bar::get_bar_interval_ns},
-    enums::BarAggregation,
+    data::{Bar, BarType, Data},
     identifiers::{ClientId, InstrumentId, Venue},
 };
 use nautilus_network::http::HttpClient;
@@ -51,6 +48,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     MOGWAI_VENUE, MogwaiDataClientConfig,
+    bars::{BarAggregator, aggregate_bars},
     client::shared::{
         HavocDelivery, HavocFilter, abort_tasks, cache_instruments, conn_havoc, date_to_unix_nanos,
         emit_seeded_instruments, enqueue_havoc, ensure_instrument, ensure_on_river,
@@ -336,30 +334,24 @@ impl MogwaiDataClient {
         let Ok(sink) = self.sink() else {
             return;
         };
-        let now = now_unix_nanos(self.sim).as_u64();
+        let now = now_unix_nanos(self.sim);
         let Ok(mut bars) = self.bars.lock() else {
             return;
         };
         for (bar_type, state) in bars.iter_mut() {
-            let Some(active) = &state.active else {
-                continue;
-            };
-            if active.close_ts > now {
-                continue;
-            }
             let symbol = symbol_from_instrument(bar_type.instrument_id());
             let Some(def) = instrument_def(&self.instruments, &symbol) else {
                 continue;
             };
-            match acc_to_bar(*bar_type, active, &def, now_unix_nanos(self.sim)) {
-                Ok(bar) => drop(sink.send(DataEvent::Data(Data::Bar(bar)))),
-                Err(err) => tracing::warn!(
+            match state.window.take_closed(&def, now) {
+                None => {}
+                Some(Ok(bar)) => drop(sink.send(DataEvent::Data(Data::Bar(bar)))),
+                Some(Err(err)) => tracing::warn!(
                     %bar_type,
                     error = %err,
                     "dropping unrepresentable bar on teardown flush"
                 ),
             }
-            state.active = None;
         }
     }
 }
@@ -746,16 +738,7 @@ impl DataClient for MogwaiDataClient {
     }
 
     fn subscribe_bars(&mut self, cmd: SubscribeBars) -> anyhow::Result<()> {
-        ensure!(
-            cmd.bar_type.spec().is_time_aggregated(),
-            "mogwai only supports time based external bars"
-        );
-        ensure!(
-            !is_calendar_anchored(cmd.bar_type.spec().aggregation),
-            "mogwai does not support Week/Month/Year bars: they need calendar \
-             anchoring this adapter's epoch-anchored aggregation cannot produce; \
-             use Day or finer"
-        );
+        let window = BarAggregator::new(cmd.bar_type)?;
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
         {
             // `lock_recover`, matching the rollback below and every other bar
@@ -764,7 +747,9 @@ impl DataClient for MogwaiDataClient {
             // increment on a poisoned guard while the rollback recovers it
             // would make the poisoned path take a branch no test covers.
             let mut bars = lock_recover(&self.bars, "bar");
-            bars.entry(cmd.bar_type).or_default().refs += 1;
+            bars.entry(cmd.bar_type)
+                .or_insert(BarSubState { refs: 0, window })
+                .refs += 1;
         }
         // Roll the ref back when the symbol subscription refuses. The
         // per-`BarType` ref and the per-symbol `SubState.bars` count are the
@@ -834,10 +819,7 @@ impl DataClient for MogwaiDataClient {
                 // On the last release, take the removed bar type's active window
                 // out with it so a completed-but-withheld bar can be flushed
                 // below rather than silently discarded.
-                Some(0) => (
-                    true,
-                    bars.remove(&cmd.bar_type).and_then(|state| state.active),
-                ),
+                Some(0) => (true, bars.remove(&cmd.bar_type).map(|state| state.window)),
                 Some(_) => (true, None),
                 None => (false, None),
             }
@@ -853,23 +835,21 @@ impl DataClient for MogwaiDataClient {
             // (called from `stop`). Closing a live in-progress window on time on
             // a clock timer is a separate feature, deliberately not built - see
             // `flush_completed_bars` and the withheld-bar note in havoc.md.
-            if let Some(active) = to_flush {
-                let now = now_unix_nanos(self.sim).as_u64();
-                if active.close_ts <= now
-                    && let Some(def) = instrument_def(&self.instruments, &symbol)
-                {
-                    match acc_to_bar(cmd.bar_type, &active, &def, now_unix_nanos(self.sim)) {
-                        Ok(bar) => {
-                            if let Ok(sink) = self.sink() {
-                                drop(sink.send(DataEvent::Data(Data::Bar(bar))));
-                            }
+            if let Some(mut window) = to_flush
+                && let Some(def) = instrument_def(&self.instruments, &symbol)
+                && let Some(flushed) = window.take_closed(&def, now_unix_nanos(self.sim))
+            {
+                match flushed {
+                    Ok(bar) => {
+                        if let Ok(sink) = self.sink() {
+                            drop(sink.send(DataEvent::Data(Data::Bar(bar))));
                         }
-                        Err(err) => tracing::warn!(
-                            bar_type = %cmd.bar_type,
-                            error = %err,
-                            "dropping unrepresentable bar on unsubscribe flush"
-                        ),
                     }
+                    Err(err) => tracing::warn!(
+                        bar_type = %cmd.bar_type,
+                        error = %err,
+                        "dropping unrepresentable bar on unsubscribe flush"
+                    ),
                 }
             }
             self.unsubscribe_symbol(symbol, SubKind::Bars)?;
@@ -1084,16 +1064,7 @@ impl DataClient for MogwaiDataClient {
     }
 
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
-        ensure!(
-            request.bar_type.spec().is_time_aggregated(),
-            "mogwai only supports time based external bars"
-        );
-        ensure!(
-            !is_calendar_anchored(request.bar_type.spec().aggregation),
-            "mogwai does not support Week/Month/Year bars: they need calendar \
-             anchoring this adapter's epoch-anchored aggregation cannot produce; \
-             use Day or finer"
-        );
+        let interval = crate::bars::admit(&request.bar_type)?.get();
         let sink = self.sink()?;
         let session = self.history_session()?;
         let http = self.http.clone();
@@ -1137,7 +1108,6 @@ impl DataClient for MogwaiDataClient {
             // covering only the oldest edge, under-delivering or timing out
             // the history request.
             let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
-            let interval = get_bar_interval_ns(&request.bar_type).as_u64();
             // Every exit from this block yields bars, so the response below is
             // always sent. A failure arm used to `return` straight out of the
             // task, which left the nautilus request unresolved forever: from the
@@ -1188,7 +1158,13 @@ impl DataClient for MogwaiDataClient {
                         "request_bars: history window truncated before its end at the caller's own bar limit; the requested history may not splice contiguously into live"
                     );
                 }
-                let mut bars = aggregate_bars(&request.bar_type, &trades, &def, end);
+                let mut bars = match aggregate_bars(&request.bar_type, &trades, &def, end) {
+                    Ok(bars) => bars,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_bars: bar type refused; answering with an empty bar response so the request resolves");
+                        break 'bars Vec::new();
+                    }
+                };
                 if let Some(m) = bar_limit {
                     // Paging spans at least `bar_limit` intervals, so it may produce
                     // a few extra bars; trim to the requested count (oldest edge,
@@ -1390,10 +1366,10 @@ impl SubState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct BarSubState {
     refs: usize,
-    active: Option<BarAcc>,
+    window: BarAggregator,
 }
 
 /// Everything one paged history session needs, gathered off `&self` so the
@@ -1909,77 +1885,13 @@ fn emit_live_bars(
             if bar_type.instrument_id() != id || state.refs == 0 {
                 continue;
             }
-            if let Some(bar) =
-                update_bar_state(*bar_type, state, trade, def, Some(now_unix_nanos(sim)))
-            {
+            if let Some(bar) = state.window.push(trade, def, now_unix_nanos(sim)) {
                 ready.push(bar);
             }
         }
     }
     for bar in ready {
         drop(sink.send(DataEvent::Data(Data::Bar(bar))));
-    }
-}
-
-/// True for the time-aggregated bar aggregations mogwai refuses. Week,
-/// Month, and Year are calendar-anchored in nautilus (`get_time_bar_start`
-/// anchors weeks to Monday and months/years to the calendar), but
-/// `get_bar_interval_ns` returns a fixed 7-day/30-day/365-day proxy - nautilus's
-/// own comment calls it a proxy "for comparing bar lengths", not a calendar
-/// interval. The adapter's `((ts / interval) + 1) * interval` aggregation would
-/// therefore produce epoch-anchored 30-day blocks instead of calendar months,
-/// and epoch-anchored (Thursday) weeks instead of Monday-anchored ones. Day and
-/// finer are correctly UTC-aligned, so only these three are refused - like the
-/// tick/volume aggregations `is_time_aggregated` already refuses. Refusing is the
-/// chosen resolution over building calendar anchoring (heavy, and unlikely bar
-/// specs for this venue).
-fn is_calendar_anchored(aggregation: BarAggregation) -> bool {
-    matches!(
-        aggregation,
-        BarAggregation::Week | BarAggregation::Month | BarAggregation::Year
-    )
-}
-
-// The `expect` below is on a genuine invariant (every admitted bar aggregation
-// has a positive interval; tick, volume and calendar-anchored aggregations are
-// refused upstream, which is what `mogwai_data::bars` takes a `NonZeroU64`
-// interval to encode), not a fallible path this function's
-// `Option<Bar>` return is meant to surface, so `clippy::unwrap_in_result`'s
-// default suggestion (propagate it as the returned `None`) does not apply
-// here.
-#[allow(clippy::unwrap_in_result)]
-fn update_bar_state(
-    bar_type: BarType,
-    state: &mut BarSubState,
-    trade: &mogwai_protocol::TradeTick,
-    def: &InstrumentDef,
-    ts_init: Option<UnixNanos>,
-) -> Option<Bar> {
-    let interval_ns = get_bar_interval_ns(&bar_type).as_u64();
-    let interval =
-        NonZeroU64::new(interval_ns).expect("admitted bar aggregations have a positive interval");
-    // The window has already rotated inside `fold_trade` by the time this
-    // returns, so the "one bad bar doesn't wedge aggregation" property is
-    // structural: the rotation no longer depends on the conversion below
-    // succeeding. A hostile open/high/low/close/volume that overflows
-    // nautilus Price/Quantity just drops this one bar with a warning.
-    let closed = fold_trade(
-        &mut state.active,
-        trade.price,
-        trade.size,
-        trade.ts_event,
-        interval,
-    )?;
-    // `Some` is the live path's receipt stamp; `None` is the history fold,
-    // where the closed window's own close is the bar's `ts_init` - see
-    // `acc_to_bar` for why history must not stamp the conversion clock.
-    let ts_init = ts_init.unwrap_or_else(|| UnixNanos::from(closed.close_ts));
-    match acc_to_bar(bar_type, &closed, def, ts_init) {
-        Ok(bar) => Some(bar),
-        Err(err) => {
-            tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
-            None
-        }
     }
 }
 
@@ -2032,64 +1944,6 @@ fn historical_quotes(
                 .ok()
         })
         .collect()
-}
-
-fn aggregate_bars(
-    bar_type: &BarType,
-    trades: &[mogwai_protocol::TradeTick],
-    def: &InstrumentDef,
-    end: Option<UnixNanos>,
-) -> Vec<Bar> {
-    let mut state = BarSubState::default();
-    let mut out = Vec::new();
-    for trade in trades {
-        if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def, None) {
-            out.push(bar);
-        }
-    }
-    // Flush the trailing window only when the request's `end` proves it fully
-    // elapsed. A window's bar is otherwise emitted lazily, when a later trade
-    // crosses its `close_ts` - but a historical request over a window that has
-    // already passed gets no such trade, so the newest complete window would be
-    // silently dropped (the always-stale or missing last bar of every history
-    // request). If
-    // `end >= acc.close_ts` the window closed within the requested range and
-    // must be emitted; a genuinely-partial trailing window (`end` inside it, or
-    // an unknown `end`) is still dropped, matching the live path.
-    if let (Some(acc), Some(end)) = (&state.active, end)
-        && end.as_u64() >= acc.close_ts
-    {
-        match acc_to_bar(*bar_type, acc, def, UnixNanos::from(acc.close_ts)) {
-            Ok(bar) => out.push(bar),
-            Err(err) => {
-                tracing::warn!(%bar_type, error = %err, "dropping unrepresentable trailing bar");
-            }
-        }
-    }
-    out
-}
-
-/// `ts_init` is the caller's decision because the two producers mean different
-/// things by it: the live subscription path stamps receipt time (the clock at
-/// conversion), while a history response stamps the bar's own close - a
-/// conversion-time stamp there lands past the response's pinned `end` and
-/// nautilus's trim-on-`ts_init` empties the response.
-fn acc_to_bar(
-    bar_type: BarType,
-    acc: &BarAcc,
-    def: &InstrumentDef,
-    ts_init: UnixNanos,
-) -> anyhow::Result<Bar> {
-    Ok(Bar::new(
-        bar_type,
-        convert::price(acc.open, def.price_precision)?,
-        convert::price(acc.high, def.price_precision)?,
-        convert::price(acc.low, def.price_precision)?,
-        convert::price(acc.close, def.price_precision)?,
-        convert::quantity(acc.volume, def.size_precision)?,
-        UnixNanos::from(acc.close_ts),
-        ts_init,
-    ))
 }
 
 fn sub_state(
@@ -2204,7 +2058,8 @@ mod quote_cache_tests {
         let bar_type =
             BarType::from(format!("{}.MOGWAI-1-MINUTE-LAST-EXTERNAL", def.symbol).as_str());
         let end = UnixNanos::from(3 * minute);
-        let bars = aggregate_bars(&bar_type, &trades, &def, Some(end));
+        let bars =
+            aggregate_bars(&bar_type, &trades, &def, Some(end)).expect("a minute bar is admitted");
         assert_eq!(bars.len(), 3, "three closed minute windows");
         let response = BarsResponse::new(
             nautilus_core::UUID4::new(),

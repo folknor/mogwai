@@ -1798,48 +1798,68 @@ mod tests {
         venue.abort();
     }
 
-    /// The reason string is what makes a 1000 terminal, and the venue writes
-    /// exactly `mogwai_protocol::close::RUN_COMPLETE`. This is the other half
-    /// of the test above: the same close code, one recognized reason, and the
-    /// loop stops without redialling.
+    /// The reason string is what makes a 1000 terminal. This is the other half
+    /// of the test above: the same close code, each reason the venue writes for
+    /// a terminal, and the loop stops without redialling.
+    ///
+    /// No text frame precedes any of these closes, so the close reason is the
+    /// only signal. For eviction that is the production shape, not a fallback:
+    /// the venue announces an eviction with the close alone, and a redial there
+    /// would evict the claimant in turn.
+    ///
+    /// This is also the in-repo half of the websocket boundary, the other half
+    /// being `clippy.toml`'s ban on nautilus's reconnecting transports: that
+    /// transport's own loop would redial through every one of these closes.
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-    async fn a_normal_close_reasoned_run_complete_stops_the_loop() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind stub listener");
-        let port = listener.local_addr().expect("stub addr").port();
-        let dials = Arc::new(AtomicUsize::new(0));
-        let venue_dials = Arc::clone(&dials);
-        let venue = tokio::spawn(async move {
-            loop {
-                let mut ws = accept_ws(&listener).await;
-                venue_dials.fetch_add(1, Ordering::Relaxed);
-                drop(
-                    ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
-                        reason: mogwai_protocol::close::RUN_COMPLETE.into(),
-                    }))
-                    .await,
-                );
-            }
-        });
-        let conn = ConnHavoc {
-            reconnect_delay_initial_ms: 10,
-            reconnect_delay_max_ms: 20,
-            reconnect_backoff_factor: 1.0,
-            reconnect_max_attempts: Some(3),
-            ..Default::default()
-        };
-        tokio::time::timeout(Duration::from_secs(5), run_lifecycle(port, conn))
-            .await
-            .expect("a reasoned completion close ends the loop");
-        assert_eq!(
-            dials.load(Ordering::Relaxed),
-            1,
-            "the reasoned completion close is terminal: no redial follows it"
-        );
-        venue.abort();
+    async fn every_reasoned_terminal_close_stops_the_loop() {
+        let evicted = format!("{}ACC-001", mogwai_protocol::close::EVICTED_PREFIX);
+        for reason in [
+            mogwai_protocol::close::RUN_COMPLETE,
+            mogwai_protocol::close::DURATION_COMPLETE,
+            evicted.as_str(),
+        ] {
+            assert!(
+                mogwai_protocol::close::classify(mogwai_protocol::close::NORMAL, reason).is_some(),
+                "{reason:?} must be a terminal the protocol defines, or this proves nothing"
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind stub listener");
+            let port = listener.local_addr().expect("stub addr").port();
+            let dials = Arc::new(AtomicUsize::new(0));
+            let venue_dials = Arc::clone(&dials);
+            let close_reason = reason.to_owned();
+            let venue = tokio::spawn(async move {
+                loop {
+                    let mut ws = accept_ws(&listener).await;
+                    venue_dials.fetch_add(1, Ordering::Relaxed);
+                    drop(
+                        ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                            reason: close_reason.clone().into(),
+                        }))
+                        .await,
+                    );
+                }
+            });
+            let conn = ConnHavoc {
+                reconnect_delay_initial_ms: 10,
+                reconnect_delay_max_ms: 20,
+                reconnect_backoff_factor: 1.0,
+                reconnect_max_attempts: Some(3),
+                ..Default::default()
+            };
+            tokio::time::timeout(Duration::from_secs(5), run_lifecycle(port, conn))
+                .await
+                .expect("a reasoned terminal close ends the loop");
+            assert_eq!(
+                dials.load(Ordering::Relaxed),
+                1,
+                "the close reasoned {reason:?} is terminal: no redial follows it"
+            );
+            venue.abort();
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

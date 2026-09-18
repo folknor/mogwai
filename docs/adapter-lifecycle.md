@@ -122,6 +122,13 @@ proxy retiring an idle socket sends it, and so does a venue restarting. The
 adapter classifies on the close reason (`mogwai_protocol::close::classify`), not
 on the code, and a reason it does not recognize is never read as completion.
 
+Both sockets run through the adapter's own connection loop, never through
+nautilus's `nautilus_network` websocket or socket clients: those carry a
+reconnect loop of their own that knows none of the terminals above, and would
+redial an evicted account. The adapter's `clippy.toml` refuses those types, and
+a loopback test drives each of the three terminal closes and requires exactly
+one dial.
+
 **The log line distinguishes all of them.** The venue announces a finished run
 and an elapsed passenger duration as different frames, so the adapter classifies
 each correctly from the frame and the close behind it agrees rather than
@@ -246,6 +253,13 @@ instrument metadata also preserves the interval, interest, index symbol and
 clamp under `mogwai_` keys. These frames are market prices, not cash receipts:
 the ledger charges a multi-instant sweep at one pass-end rate, so a balance
 cannot be reconciled from the published per-instant rates.
+
+Bars are folded locally from trades, and a bar's `ts_event` is the end of its
+interval on both feeds; the live feed's `ts_init` is receipt time and a history
+response's is the bar's own close. Only time bars of Day or finer are admitted.
+The fold is public as `mogwai_adapter::bars` - `BarAggregator::push` is the
+live path and `aggregate_bars` the history path - so a consumer can witness the
+stamp by driving the code the client drives.
 
 `MogwaiDataClient`'s sink is resolved the same way, from the same kind of
 thread-local, and it is unguarded today - a data client connected without
