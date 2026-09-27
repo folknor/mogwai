@@ -638,12 +638,11 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
             for summary in per_seed.unwrap_or(&[]) {
                 let hist: BTreeMap<i64, i64> = summary["minute_range_ticks_hist"]
                     .as_object()
-                    .map(|m| {
+                    .map_or_default(|m| {
                         m.iter()
                             .map(|(k, v)| (k.parse::<i64>().unwrap_or(0), v.as_i64().unwrap_or(0)))
                             .collect()
-                    })
-                    .unwrap_or_default();
+                    });
                 let mut rec = BTreeMap::new();
                 rec.insert(
                     "p99",
@@ -989,10 +988,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
         } else {
             json!({"count": 0, "sum_abs": 0.0, "max_abs": 0.0})
         };
-        let mut labels: Vec<&String> = cells_map
-            .as_object()
-            .map(|m| m.keys().collect())
-            .unwrap_or_default();
+        let mut labels: Vec<&String> = cells_map.as_object().map_or_default(|m| m.keys().collect());
         labels.sort();
         Value::Array(
             labels

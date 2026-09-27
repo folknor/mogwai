@@ -507,12 +507,7 @@ pub(crate) fn run_measure12a_observed(
         .map_err(|e| anyhow!("pooling the monthly blocks: {e}"))?;
     let perms: Vec<&[Value]> = per_session
         .iter()
-        .map(|r| {
-            r["permutations"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-        })
+        .map(|r| r["permutations"].as_array().map_or_default(Vec::as_slice))
         .collect();
     let permutations_monthly = mogwai_lab::aggregate::monthly::aggregate_permutations(&perms);
 

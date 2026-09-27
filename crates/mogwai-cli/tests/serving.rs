@@ -3854,8 +3854,7 @@ fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
         .expect("a status line");
     let body = text
         .split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_owned())
-        .unwrap_or_default();
+        .map_or_default(|(_, body)| body.to_owned());
     (status, body)
 }
 

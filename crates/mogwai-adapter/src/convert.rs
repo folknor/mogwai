@@ -113,8 +113,7 @@ pub(crate) fn wire_order_link(
     let linked: Vec<String> = init
         .linked_order_ids
         .as_ref()
-        .map(|ids| ids.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|ids| ids.iter().map(ToString::to_string).collect());
     let contingency = match init.contingency_type {
         None => mogwai_protocol::Contingency::NoContingency,
         Some(ContingencyType::Oco) => mogwai_protocol::Contingency::Oco,

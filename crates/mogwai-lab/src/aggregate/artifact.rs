@@ -1046,8 +1046,7 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
             if let Some(want) = rung_subchecks(name) {
                 let got: BTreeSet<&str> = r["subchecks"]
                     .as_object()
-                    .map(|m| m.keys().map(String::as_str).collect())
-                    .unwrap_or_default();
+                    .map_or_default(|m| m.keys().map(String::as_str).collect());
                 let want_set: BTreeSet<&str> = want.iter().copied().collect();
                 if got != want_set {
                     v.errs.push(format!(
@@ -1195,8 +1194,7 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
         {
             let rev_keys: BTreeSet<&str> = rev
                 .as_object()
-                .map(|m| m.keys().map(String::as_str).collect())
-                .unwrap_or_default();
+                .map_or_default(|m| m.keys().map(String::as_str).collect());
             let want_rung_keys: BTreeSet<&str> = RUNG_KEYS.iter().copied().collect();
             if rev_keys == want_rung_keys {
                 let w23_refs: Vec<&Value> = refused_cells

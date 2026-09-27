@@ -351,20 +351,17 @@ fn all_none() -> HashMap<String, Option<f64>> {
 /// `refused_cells` collection.
 #[must_use]
 pub fn support_refusals_of(record: &Value) -> Vec<RefusalRec> {
-    record["support_refusals"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|r| {
-                    RefusalRec::new(
-                        super::js(r, "scope"),
-                        super::js(r, "cell"),
-                        super::js(r, "reason"),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    record["support_refusals"].as_array().map_or_default(|a| {
+        a.iter()
+            .map(|r| {
+                RefusalRec::new(
+                    super::js(r, "scope"),
+                    super::js(r, "cell"),
+                    super::js(r, "reason"),
+                )
+            })
+            .collect()
+    })
 }
 
 /// `CountSubEval`: one seed's generated support, precomputed so that a

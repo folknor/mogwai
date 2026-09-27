@@ -302,8 +302,7 @@ fn a_symlink_cycle_is_not_descended_into() {
     let deepest = found
         .iter()
         .max_by_key(|p| p.components().count())
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+        .map_or_default(|p| p.display().to_string());
     assert_eq!(
         found.len(),
         2,

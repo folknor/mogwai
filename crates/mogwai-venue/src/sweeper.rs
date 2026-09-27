@@ -519,15 +519,13 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // moved: a settlement instant belongs to the calendar, so every
                 // ledger holding that symbol crosses it.
                 let symbol_key = mogwai_protocol::Symbol::from(symbol.as_str());
-                let extremes: Vec<_> = span
-                    .map(|span| {
-                        vec![(
-                            mogwai_protocol::Symbol::clone(&symbol_key),
-                            span.high_px,
-                            span.low_px,
-                        )]
-                    })
-                    .unwrap_or_default();
+                let extremes: Vec<_> = span.map_or_default(|span| {
+                    vec![(
+                        mogwai_protocol::Symbol::clone(&symbol_key),
+                        span.high_px,
+                        span.low_px,
+                    )]
+                });
                 for (index, account_state) in attached_accounts.iter().enumerate() {
                     if !account_state.is_seated_on(&boat_key) {
                         continue;
@@ -1147,7 +1145,7 @@ fn enforce_policy(
     // unit of policy evidence: consuming one extreme and silently skipping the
     // other would publish a judgement over a path the venue could not value.
     let mut readings = Vec::new();
-    for (px, ts) in span.map(|span| span.in_time_order()).unwrap_or_default() {
+    for (px, ts) in span.map_or_default(|span| span.in_time_order()) {
         let Some(extreme_equity) =
             engine.valuation_at(&currency, &[(mogwai_protocol::Symbol::clone(symbol), px)])
         else {

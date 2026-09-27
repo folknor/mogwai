@@ -1667,9 +1667,7 @@ fn validate_instrument_preset_keys(cfg: &Config) -> anyhow::Result<()> {
 /// when the field name is the whole story. Kept out of the config-path position
 /// so an operator reading `generator.<field>` sees only what they must edit.
 fn detail_suffix(err: &mogwai_data::ScalarError) -> String {
-    err.detail
-        .map(|detail| format!(": {detail}"))
-        .unwrap_or_default()
+    err.detail.map_or_default(|detail| format!(": {detail}"))
 }
 
 /// One validated [`source::InstrumentProfile`] from a deserialized

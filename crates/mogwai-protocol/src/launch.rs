@@ -751,8 +751,7 @@ fn record_stderr_line(ring: &mut VecDeque<String>, line: String) {
 
 fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
     ring.lock()
-        .map(|lines| lines.iter().cloned().collect())
-        .unwrap_or_default()
+        .map_or_default(|lines| lines.iter().cloned().collect())
 }
 
 /// Body of the dedicated owning thread: spawn, drain, read one line, report,

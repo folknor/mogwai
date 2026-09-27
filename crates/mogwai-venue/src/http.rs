@@ -169,8 +169,7 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
             order_list_id: orders
                 .first()
                 .and_then(|order| order.link.as_ref())
-                .map(|link| link.order_list_id.clone())
-                .unwrap_or_default(),
+                .map_or_default(|link| link.order_list_id.clone()),
         },
         Command::CancelOrder { client_order_id } => AdmissionSubject::Cancel {
             client_order_id: client_order_id.clone(),

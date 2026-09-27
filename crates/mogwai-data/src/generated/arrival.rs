@@ -401,9 +401,7 @@ impl ArrivalEnv {
             thin,
             origin_ns,
             step_ns,
-            weekly_calendar_transitions_ns: calendar
-                .map(calendar_transition_offsets)
-                .unwrap_or_default(),
+            weekly_calendar_transitions_ns: calendar.map_or_default(calendar_transition_offsets),
         }
     }
 

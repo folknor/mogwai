@@ -742,8 +742,9 @@ pub fn aggregate_permutations(per_session: &[&[Value]]) -> Value {
             for h in [60i64, 300] {
                 let rep_medians: Vec<Option<f64>> = by_key
                     .get(&((*variant).to_string(), hour, h))
-                    .map(|reps| reps.values().map(|vals| median_or_none(vals)).collect())
-                    .unwrap_or_default();
+                    .map_or_default(|reps| {
+                        reps.values().map(|vals| median_or_none(vals)).collect()
+                    });
                 entry.insert(
                     format!("robust_scale_{h}"),
                     jnum(median_or_none(&rep_medians)),

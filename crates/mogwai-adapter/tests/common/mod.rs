@@ -989,8 +989,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     let key = head
         .lines()
         .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
-        .map(str::trim)
-        .unwrap_or_default();
+        .map_or_default(str::trim);
     let accept = derive_accept_key(key.as_bytes());
     let upgrade = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"

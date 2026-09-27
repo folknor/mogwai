@@ -826,8 +826,7 @@ fn split_response(raw: &[u8]) -> (u16, String) {
         .expect("a status line");
     let body = text
         .split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default();
+        .map_or_default(|(_, body)| body.to_string());
     (status, body)
 }
 
