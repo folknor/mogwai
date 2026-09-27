@@ -178,10 +178,7 @@ in any session:
   percentile convention does not match
   `mogwai_lab::kernel::nearest_rank_list`, so a number out of it must never
   land in a durable document labelled "p95" beside a Rust-computed one.
-- `reference/INVENTORY.md` does not exist in this repository. The generic
-  orchestration workflow names it as a mandatory read; it is an
-  unsubstituted variable from another repo. Do not put it in a brief. The
-  real contracts are `AGENTS.md` and `CLAUDE.md`, then
+- The contracts are `AGENTS.md` and `CLAUDE.md`, then
   `reference/north-star.md`, `architecture.md`, `clock.md`, `glossary.md`,
   `performance.md`, `test-doctrine.md` and
   `technical-implementation-spec.md`.
@@ -266,16 +263,15 @@ two are kept in sync, so what you read in `research/` is what compiles.
 
 ## Commands
 
-Use `brokkr` (not `cargo`) for check/test. By default output is filtered to changed files and capped at 20 diagnostics per phase.
+Use `brokkr` (not `cargo`) for check/test. Output is never capped or scoped: every diagnostic prints every time, and errors in files with unstaged changes are listed first.
 
-- `brokkr check` - gremlins + clippy + all tests (changed-files scope). Does not
+- `brokkr check` - gremlins + clippy + all tests. Does not
   run the four socket-backed adapter test binaries (`adapter_smoke`,
   `data_client_transport`, `havoc`, `reconciliation`): they are `#[ignore]`d
   because they bind real loopback listeners, so an environment without sockets
   would fail them for reasons unrelated to the code. Fast and sandbox-safe, and
   blind to roughly 30 tests.
-- `brokkr check --all` - show every diagnostic, no cap, no scope filter
-- `brokkr check -p <crate>` - scope to one package (e.g. `-p mogwai-engine`). You generally do not want to run this; a single `brokkr check` is faster than 2-3 `-p` runs, and brokkr intelligently filters which warnings and errors to show you
+- `brokkr check -p <crate>` - scope to one package (e.g. `-p mogwai-engine`). You generally do not want to run this; a single `brokkr check` is faster than 2-3 `-p` runs
 - `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)
 - `brokkr test -p <crate> <NAME>` - focused single-test runner. Always passes `--include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Builds dev by default (`[test] debug = true`); pass `--release` where optimization is what is measured. Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time. Defaults to `--all-features`.
   - `-p, --package <PKG>` - cargo package. Required in this workspace - no default package.
