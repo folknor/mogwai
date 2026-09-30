@@ -9,7 +9,7 @@
 
 Agent coordination rules:
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
-- Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
+- Agents must read their target file first. Do not replace existing code with placeholders or stub it out.
 - Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
 
 Audit protocol:
