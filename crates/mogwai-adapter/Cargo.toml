@@ -3,6 +3,9 @@ name = "mogwai-adapter"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 # This is the sole mogwai crate that imports nautilus. The broker core crates
 # stay protocol-native; this adapter is the host-facing client pair and

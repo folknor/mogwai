@@ -37,6 +37,14 @@ mod generated;
 pub mod segment;
 mod trigger;
 
+// This library carries no `hotpath` annotation: the dependency exists for the
+// `arrival_walk_bench` example alone, which is why it is optional and only the
+// `hotpath` feature pulls it in. Cargo's unused-dependency lint reads the lib
+// target, not the example, so the feature-gated anchor below is what tells it
+// the dependency is wanted when the feature is on.
+#[cfg(feature = "hotpath")]
+use hotpath as _;
+
 use std::{
     fs::File,
     io::{self, BufRead, BufReader},
