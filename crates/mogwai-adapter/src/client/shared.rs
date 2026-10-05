@@ -22,7 +22,7 @@ use mogwai_protocol::{
     ConnHavoc, HavocLatency, HavocSpec, InboundHavoc, InstrumentDef, SimClock, Symbol, VenueClock,
     VenueMessage,
 };
-use nautilus_common::messages::DataEvent;
+use nautilus_common::{live::sender::EventSender, messages::DataEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::InstrumentId;
 use nautilus_network::http::HttpClient;
@@ -220,7 +220,7 @@ pub(crate) async fn seed_instruments(
 /// seeded defs here populates the cache the instant the data client connects,
 /// independent of whatever the strategy later subscribes to.
 pub(crate) fn emit_seeded_instruments(
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     sim: SimClock,
 ) {

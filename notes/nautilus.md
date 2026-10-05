@@ -8,9 +8,11 @@ Read the source from `research/nautilus_trader`; build against the pinned
 crates.io release. Each of these names what the other side would have to ship,
 which is what makes it a writable patch rather than a grievance.
 
-Every entry was re-verified 2026-09-15 against the 0.64 pin: the cash-account
-guard and the `try_send_account_state` request closed, and the rest stand
-unchanged. Before that, every entry was re-verified 2026-09-02 against the 0.63
+Every entry was re-verified 2026-10-05 against the 0.65 pin: nothing closed,
+and only expiry moved, partly - see that entry. Before that, every entry was
+re-verified 2026-09-15 against the 0.64 pin: the cash-account guard and the
+`try_send_account_state` request closed, and the rest stood unchanged. Before
+that, every entry was re-verified 2026-09-02 against the 0.63
 pin rather than against memory. That is worth doing for a reason this file
 should keep in view: the checkout used to sit on `develop`, which is neither
 what we link nor what this file claims to describe, and a maintainer may
@@ -33,7 +35,9 @@ problem, not a solution, and it closes when the problem goes away by any route.
   This entry originally named two acceptable PRs - a shared cell for the
   emitter's sender, or resolving it from a process-wide rather than thread-local
   slot. #4874 shipped the first: `live/src/execution/emitter.rs` now holds
-  `sender: Arc<ArcSwapOption<UnboundedSender<ExecutionEvent>>>`, documented as
+  `sender: Arc<ArcSwapOption<UnboundedSender<ExecutionEvent>>>` (at 0.65 the
+  slot holds an `EventSender<ExecutionEvent>`, the dispatch sender that carries
+  callback ancestry, with the sharing unchanged), documented as
   "Clones share the sender slot and observe later sender installations and
   replacements", with `test_clone_before_set_sender_observes_sender` pinning it.
 
@@ -115,13 +119,15 @@ problem, not a solution, and it closes when the problem goes away by any route.
   error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
   reconcile-and-distrust-the-window signal.
 
-  Still open at the 0.64 pin: `DataEvent` carries `Response`, `Data`,
-  `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks` and a
-  `defi`-gated variant, and none of them means a hole in the stream - the
-  enumeration in `client/data.rs`'s gap comment matches the pinned source
-  exactly. `SystemEvent::SocketState` and 0.64's new
-  `SystemCommand::ReconnectSocket` sit beside it, and neither helps: both are
-  about the socket itself, and this gap happens while the socket never breaks.
+  Still open at the 0.65 pin: `DataEvent` carries `Response`, `Data`,
+  `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks` and two
+  `defi`-gated variants, and none of them means a hole in the stream - the
+  enumeration in `client/data.rs`'s gap comment matches the pinned source.
+  `SystemEvent::SocketState` and `SystemCommand::ReconnectSocket` are still the
+  only system variants, and neither helps: both are about the socket itself,
+  and this gap happens while the socket never breaks. 0.65's book-recovery and
+  stale-feed work is per adapter and internal to each, not a host-visible
+  signal.
 
 - **No registration signal at the account cache insertion boundary.**
   `await_account_registered` polls every 10 ms until nautilus's runner has
@@ -131,7 +137,7 @@ problem, not a solution, and it closes when the problem goes away by any route.
   queues it. The PR: a signal at the cache insertion boundary. No adapter-side
   latch can substitute.
 
-  Still open at the 0.64 pin: `Cache::add_account` writes the database, inserts
+  Still open at the 0.65 pin: `Cache::add_account` writes the database, inserts
   into `accounts` and indexes `venue_account`, then returns. There is no notify,
   no watch and no subscriber hook on that path, so a waiter has nothing to sleep
   on.
@@ -158,9 +164,10 @@ problem, not a solution, and it closes when the problem goes away by any route.
   the caller's `ts_init`, so our override could compose through it on the
   simulated clock if that is ever wanted. Nothing to file, nothing to wait for.
 
-The first three below came from the 2026-08-14 product-type plan and are ordered
-by leverage - a fourth, the cash-account guard over dated futures, closed
-upstream at 0.64 - and the last was filed later, from the 0.63 sweep. They are
+Funding, expiry and corporate actions below came from the 2026-08-14
+product-type plan and are ordered by leverage - a fourth, the cash-account
+guard over dated futures, closed upstream at 0.64. The rest were filed later.
+They are
 what separates mogwai modelling a product from mogwai faking it the way every
 other adapter fakes it. `reference/nautilus.md` carries the mechanism each one
 names.
@@ -170,7 +177,9 @@ names.
   Every shipped perp adapter currently launders funding through an unattributed
   balance delta. The highest-value change in this list: it is additive, its
   shape is obvious - an `ExecutionEvent` variant plus a live emitter method -
-  and mogwai emitting it correctly is what makes the gap visible.
+  and mogwai emitting it correctly is what makes the gap visible. Still open
+  at 0.65: `FundingSettlement` appears only in the model and backtest crates,
+  and `ExecutionEvent` gained no variant.
 
 - **Make expiry act on the live path.** `InstrumentClose` carrying a
   contract-expired reason already arrives; the machinery that cancels orders and
@@ -178,10 +187,33 @@ names.
   forward-testable until this exists. At 0.64 the cache and database store an
   `InstrumentClose`, and still nothing acts on one.
 
+  Moved at 0.65, but not for us. The live node now subscribes every execution
+  client's venue to instrument closes, unless the client declares
+  `settles_contract_expirations`, and `settle_instrument_close` in the
+  execution engine acts on a `ContractExpired` close - but only for a
+  `BinaryOption`, settling its open positions at the close price. No order is
+  cancelled, and a `FuturesContract` is untouched, so dated futures are exactly
+  where they were. The shape the PR needs is now in the tree, though: widening
+  that one class match, plus order cancellation, is a far smaller ask than the
+  entry originally described. And mogwai is owed its half regardless - the
+  adapter publishes no `InstrumentClose` at all.
+
+- **Variation margin settlement has no carrier.** Filed 2026-10-05, from the
+  0.65 sweep. A futures venue settles variation into cash daily and restates
+  the position's cost basis at the settlement price; nautilus can receive the
+  cash half as an `AccountState` but has nothing that moves its own position
+  cost basis, so `Portfolio::equity` on a margin account counts every
+  settlement since the last fill twice - once in the balance, once in
+  unrealized PnL computed from the original fill price. The PR: a position
+  adjustment carrying a settlement price, the sibling of the funding
+  adjustment above and deliverable the same way. Until then the mogwai-side
+  choice is the owner decision filed in `notes/todo.md`.
+
 - **Corporate actions.** Genuinely new - no dividend or split type exists
   anywhere. Splits are the hard half, because they rewrite an open position's
   quantity and average price retroactively. Only needed when equities become
-  real.
+  real. Still open at 0.65: no dividend, split or corporate-action type exists
+  under the model crate.
 
 - **`Equity` cannot express a fractional share.** Filed 2026-09-02, from the
   0.63 sweep of `reference/nautilus.md`, which recorded the constraint without
@@ -201,6 +233,12 @@ names.
   and normalizes quantity itself, so a preserved precision in `Params` would sit
   beside a wrong number rather than correct it.
 
+  Still open at 0.65: the three methods are still trait bodies on `Equity`.
+  `FuturesContract` shares the size half of the shape - its constructor fixes
+  size precision 0 and size increment 1 with no parameter - which `convert`
+  already guards with a named refusal, so a PR carrying the fields on one type
+  would want them on both.
+
   Not urgent, and honestly stated as such: no shipped preset is a fractional-lot
   equity, NVDA is whole-share, and this only bites when equities become real. It
   is filed because the constraint is verified and the fix is small and additive,
@@ -212,3 +250,6 @@ names.
   correctly answers `200 []` - but it still costs the consumer a fatal halt, and
   one of the two fixes is blocked on the same gap as `FeedLagged`: an empty
   historical response carries no feed identity, so it cannot be attributed.
+  Still open at 0.65: `TradesResponse` carries correlation id, client id,
+  instrument id, the window and `params`, and nothing naming the feed or why
+  the window is empty.

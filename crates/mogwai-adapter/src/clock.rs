@@ -377,7 +377,7 @@ impl MogwaiTimer {
                 // (inclusive at the stop boundary, so a fire landing exactly on
                 // the stop is emitted and then the timer expires), matching
                 // nautilus `LiveTimer`'s `should_fire_scheduled_time` gate
-                // (common/src/live/timer.rs) and `TestTimer`'s property-tested
+                // (common/src/live/timer.rs) and `VirtualTimer`'s property-tested
                 // `ts_event <= stop_time_ns` invariant. LiveTimer used to be
                 // fire-then-check and could emit one event past its stop; that
                 // was reported upstream and fixed, and this mirror follows it.
@@ -754,7 +754,7 @@ mod tests {
         // fires: the loop checks the stop against the scheduled fire before
         // emitting, so no event carries a ts_event past the stop. Mirrors the
         // fixed nautilus LiveTimer (which used to fire once past stop) and
-        // TestTimer's `ts_event <= stop_time_ns` invariant. Pin the shape so a
+        // VirtualTimer's `ts_event <= stop_time_ns` invariant. Pin the shape so a
         // regression back to fire-then-check trips this test.
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {

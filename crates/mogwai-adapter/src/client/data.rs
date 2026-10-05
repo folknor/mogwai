@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use mogwai_protocol::{InstrumentDef, SimClock, Symbol, TradeTick, VenueMessage};
 use nautilus_common::{
     clients::DataClient,
-    live::{get_data_event_sender, get_runtime},
+    live::{get_data_event_sender, get_runtime, sender::EventSender},
     messages::{
         DataEvent,
         data::{
@@ -67,7 +67,7 @@ pub struct MogwaiDataClient {
     config: MogwaiDataClientConfig,
     connected: Arc<AtomicBool>,
     connected_notify: Arc<tokio::sync::Notify>,
-    sink: Option<UnboundedSender<DataEvent>>,
+    sink: Option<EventSender<DataEvent>>,
     http: HttpClient,
     http_quota: HttpQuota,
     sim: SimClock,
@@ -291,7 +291,7 @@ impl MogwaiDataClient {
         Ok(())
     }
 
-    fn sink(&self) -> anyhow::Result<UnboundedSender<DataEvent>> {
+    fn sink(&self) -> anyhow::Result<EventSender<DataEvent>> {
         self.sink
             .as_ref()
             .cloned()
@@ -1549,7 +1549,7 @@ fn route_history(
 #[allow(clippy::too_many_arguments)]
 async fn handle_market_message(
     msg: VenueMessage,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -1706,7 +1706,7 @@ async fn handle_market_message(
 
 fn handle_quote_message(
     quote: &mogwai_protocol::QuoteTick,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -1780,7 +1780,7 @@ fn retain_funding(
 
 fn emit_funding(
     funding: &CachedFunding,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     def: &InstrumentDef,
     sim: SimClock,
 ) {
@@ -1804,7 +1804,7 @@ fn emit_funding(
 
 fn emit_quote(
     quote: &mogwai_protocol::QuoteTick,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     def: &InstrumentDef,
     sim: SimClock,
 ) {
@@ -1831,7 +1831,7 @@ fn emit_quote(
 
 fn emit_trade(
     trade: &TradeTick,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -1874,7 +1874,7 @@ fn emit_live_bars(
     trade: &mogwai_protocol::TradeTick,
     id: InstrumentId,
     def: &InstrumentDef,
-    sink: &UnboundedSender<DataEvent>,
+    sink: &EventSender<DataEvent>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
     sim: SimClock,
 ) {
@@ -2283,6 +2283,7 @@ mod quote_cache_tests {
         let delivery = Arc::new(Mutex::new(()));
         let bars = Arc::new(Mutex::new(HashMap::new()));
         let (sink, mut events) = unbounded_channel();
+        let sink = EventSender::from(sink);
         let frame = VenueMessage::FundingRate {
             symbol: Arc::clone(&symbol),
             rate: rust_decimal::Decimal::new(125, 6),
@@ -2381,6 +2382,7 @@ mod quote_cache_tests {
         };
         let mut client = MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).unwrap();
         let (sink_tx, mut sink_rx) = unbounded_channel();
+        let sink_tx = EventSender::from(sink_tx);
         client.sink = Some(sink_tx.clone());
         let def = mogwai_protocol::default_instruments().remove(0);
         client

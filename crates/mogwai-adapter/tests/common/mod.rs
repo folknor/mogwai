@@ -109,7 +109,7 @@ use mogwai_protocol::{
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
-    clock::TestClock,
+    clock::VirtualClock,
     factories::OrderFactory,
     messages::{DataEvent, ExecutionEvent},
 };
@@ -1502,7 +1502,7 @@ pub fn trade_json(ts_event: u64, price: &str) -> String {
 pub fn cached_order(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
     let trader_id = TraderId::from(DEFAULT_TRADER_ID);
     let strategy_id = StrategyId::from("S-001");
-    let clock = Rc::new(RefCell::new(TestClock::new()));
+    let clock = Rc::new(RefCell::new(VirtualClock::new()));
     let mut factory = OrderFactory::new(trader_id, strategy_id, None, None, clock, false, false);
     let order = factory.limit(
         instrument_id(),
@@ -1659,7 +1659,7 @@ fn order_factory() -> OrderFactory {
         StrategyId::from("S-001"),
         None,
         None,
-        Rc::new(RefCell::new(TestClock::new())),
+        Rc::new(RefCell::new(VirtualClock::new())),
         false,
         false,
     )

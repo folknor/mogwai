@@ -25,7 +25,7 @@ use mogwai_protocol::{
 };
 use nautilus_common::{
     clients::ExecutionClient,
-    live::{get_runtime, try_get_exec_event_sender},
+    live::{get_runtime, sender::EventSender, try_get_exec_event_sender},
     messages::ExecutionEvent,
     messages::execution::{
         CancelOrder, GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
@@ -270,7 +270,7 @@ pub struct MogwaiExecutionClient {
     /// only when every one of its channels closes, so a witness outliving the
     /// emitter retention would convert a clean shutdown into a hang. This one
     /// shares the emitter's ownership graph exactly.
-    sink: Arc<Mutex<Option<UnboundedSender<ExecutionEvent>>>>,
+    sink: Arc<Mutex<Option<EventSender<ExecutionEvent>>>>,
     /// The transport generation currently entitled to emit; `NO_GENERATION`
     /// when none is.
     ///
@@ -353,7 +353,7 @@ impl MogwaiExecutionClient {
     /// the thread-local to reclaim it from a previous runner, so a client that
     /// is handed a newer sender must move to it; refusing would pin it to a
     /// runner that may already be gone.
-    pub(crate) fn install_sink(&mut self, sender: UnboundedSender<ExecutionEvent>) {
+    pub(crate) fn install_sink(&mut self, sender: EventSender<ExecutionEvent>) {
         *lock_recover(&self.sink, "exec sink witness") = Some(sender.clone());
         self.emitter.set_sender(sender);
     }
@@ -2372,7 +2372,7 @@ struct ExecContext {
     /// The client's live generation. See `MogwaiExecutionClient::generation`.
     generation: Arc<AtomicU64>,
     /// The client's sink witness. See `MogwaiExecutionClient::sink`.
-    sink: Arc<Mutex<Option<UnboundedSender<ExecutionEvent>>>>,
+    sink: Arc<Mutex<Option<EventSender<ExecutionEvent>>>>,
     /// Raised by `emit` when this context observes its sink closed.
     sink_dead: Arc<AtomicBool>,
 }
@@ -2421,7 +2421,7 @@ impl ExecContext {
         send(&self.emitter);
         let closed = lock_recover(&self.sink, "exec sink witness")
             .as_ref()
-            .is_some_and(tokio::sync::mpsc::UnboundedSender::is_closed);
+            .is_some_and(EventSender::is_closed);
         if !closed {
             return;
         }
@@ -3996,7 +3996,7 @@ mod tests {
             sim: SimClock::identity(),
             epoch,
             generation: Arc::clone(&generation),
-            sink: Arc::new(Mutex::new(Some(tx))),
+            sink: Arc::new(Mutex::new(Some(tx.into()))),
             sink_dead: Arc::clone(&sink_dead),
         };
         (ctx, rx, generation, sink_dead)

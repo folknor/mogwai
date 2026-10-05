@@ -248,6 +248,15 @@ an unfunded account into a funded one. Accounts opened through `POST /accounts`
 cannot select the permissive mode because that route requires at least one
 funded currency.
 
+The permissive mode is the venue's; a nautilus host does not share it. The
+venue reports no balance row until a fill creates one, and nautilus's risk
+engine reads a missing row on a cash account as zero free balance, so every
+opening buy is denied on the host's side before it reaches the venue, unless
+the host's account allows borrowing. A balance the venue drives negative is
+also refused by a nautilus cash account, which then keeps its last accepted
+state. Pair the unfunded mode with `account_type = "margin"` on the exec
+client; `reference/nautilus.md` has the detail.
+
 `oms_type` is `netting` (the default) or `hedging`; the venue supports both
 styles, one per run - every account inherits the run's choice, per
 `docs/oms-types.md` - it refuses a consumer over neither, and `/health` reports

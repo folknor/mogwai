@@ -168,13 +168,25 @@ versa; a consumer configured with a cash account can trade a futures instrument
 that posts margin. The venue is authoritative for its own book regardless of
 what the connecting consumer declares about itself.
 
-That permissiveness has one real consequence worth knowing about rather than
-discovering: nautilus' `CashAccount` has no storage for margin balances, so a
-consumer left on the default `account_type = "cash"` while trading a futures
-instrument will see the venue's reported margin rows dropped on its own side.
-The venue still posts and reports margin correctly - `/account`, the account
-snapshot on the wire, and the adapter's forwarded `MarginBalance` rows are all
-correct - the consumer simply has nowhere local to keep what it receives. If you
-are trading futures instruments and want your own nautilus account object to
-carry margin, configure `account_type = "margin"` on the exec client. mogwai
-will not do this for you and will not refuse you if you don't.
+That permissiveness has real consequences worth knowing about rather than
+discovering, all on your side of the wire. A consumer left on the default
+`account_type = "cash"` while trading a futures instrument meets three:
+
+- nautilus' `CashAccount` has no storage for margin balances, so the venue's
+  reported margin rows are dropped on your side;
+- nautilus values a cash account's open positions at their full notional, so
+  your equity reads the whole contract value on top of a balance that never
+  paid it;
+- a cash account refuses any state with a negative balance, so a loss that
+  takes the venue's balance below zero leaves your account frozen at its last
+  accepted state.
+
+The venue still posts and reports correctly - `/account`, the account snapshot
+on the wire, and the adapter's forwarded balance and `MarginBalance` rows are
+all right - the consumer's account type simply reads them wrongly. If you are
+trading futures instruments, configure `account_type = "margin"` on the exec
+client. The reverse mismatch also misreads: an equity held under a margin
+account is valued at its cash after purchase plus only its unrealized PnL,
+understating it by the whole cost basis. `reference/nautilus.md` rule 1 has
+the mechanism. mogwai will not choose for you and will not refuse you if you
+choose wrongly.

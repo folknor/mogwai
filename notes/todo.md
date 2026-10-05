@@ -438,18 +438,65 @@ classes.
   publishing nothing and leave the check inert, or refuse the way `forex` does,
   loudly, on the grounds that a wrong number is invisible where an absence is
   not. Whichever way it lands, it is a wire change owing broadarrow a message,
-  because their percent and cash sizers read the account.
+  because their percent and cash sizers read the account. One 0.65 constraint
+  on the first branch: nautilus's margin check now reads a missing balance row
+  in the margin currency as zero free rather than skipping, so a published
+  rate denies every order on an account the venue has not yet reported a row
+  for - the unfunded mode, until its first fill.
 
-- **The remaining six account-correctness rules are unaudited.** They are stated
-  at `reference/nautilus.md`, and nothing in nautilus checks any of them, which
-  is what makes them rules rather than observations. Rule 1, cash-only balances,
-  was audited on 2026-08-29 and is honoured. Rule 5 is the entry above. Rule 6,
-  which margin model an account is configured with, is host-side configuration
-  and no reading was taken on it.
+- **The remaining account-correctness rules are unaudited against the engine.**
+  They are stated at `reference/nautilus.md`, and nothing in nautilus checks any
+  of them, which is what makes them rules rather than observations. Rule 1 was
+  re-audited on 2026-10-05 and is breached by futures settlement, the entry
+  below. Rule 5 is the entry above. Rule 6, which margin model an account is
+  configured with, is host-side configuration and no reading was taken on it.
+
+- **Daily futures settlement double counts equity on a nautilus margin
+  account.** An owner decision, found by the 0.65 sweep. `Engine::settle_read`
+  credits the variation to the balance and resets the venue position's average
+  price to the settlement price, which is what a real exchange does. Nautilus
+  never sees the reset - variation margin has no carrier - so it keeps
+  computing unrealized PnL from the original fill price, and
+  `Portfolio::equity` counts every settlement since the last fill twice until
+  the position closes. Live on MNQ and MES. The fork: keep settlement as real
+  venues do it and document the host-side correction, stop folding variation
+  into the reported balance and report it as unrealized instead, or find a
+  carrier that moves nautilus's cost basis, which the inbound channel does not
+  have.
+
+- **Venue-initiated fills never reach nautilus.** The adapter drops a fill for
+  an order its mirror does not know, with a warning, so a venue liquidation or
+  risk flatten (`LQ-` and `RISK-` orders) reaches a host only as an
+  `AccountState` change. Nautilus's path for these is a `FillReport` with no
+  matching local order, which the execution engine materializes as a
+  reduce-only external order; its adapter guide also asks for a `FILLED` order
+  report in mass status for such fills, and since 0.65 a startup
+  reconciliation inside the lookback warns when one is missing. Under netting,
+  an unclaimed external fill lands on an `EXTERNAL` position rather than the
+  strategy's own, so the routing needs a reading of
+  `determine_netting_position_id` before it is built.
+
+- **The adapter publishes no `InstrumentStatus` or `InstrumentClose`.** Halts
+  and expiry are inert on a nautilus live node, apart from binary-option
+  expiry, but the strategy is still owed the information. Whether the wire
+  carries a halt or close the adapter could translate is the first question.
+
+- **A cross-margin fallback row can collapse another.** A margin row whose
+  symbol has no known definition is forwarded with `instrument_id` None, which
+  nautilus files under its cross-margin map keyed by currency, replaced per
+  state. Two such rows, or one beside a genuine cross-margin row, in one
+  currency keep only the last. Rare, since a margin row names a symbol the
+  adapter normally holds a definition for.
+
+- **`ExecutionClient::calculate_commission` is not overridden.** Nautilus asks
+  it for the commission on a fill that reconciliation infers rather than
+  receives; the default answers none, so an inferred fill on a mogwai order
+  carries no commission although the venue charged one.
 
 - **Product economics have nowhere to land on the live path, and the venue's
   answer is undecided per class.** `reference/nautilus.md` states what the
-  channel can carry: liquidation works through venue-initiated fills, funding
+  channel can carry: liquidation can work through venue-initiated fills (the
+  adapter does not deliver them yet, entry above), funding
   survives only as an unattributed balance delta, expiry and halts inform the
   strategy and change nothing, and corporate actions have no carrier at all.
   What is owed here is per class, and only once an instrument of that class is
@@ -587,6 +634,19 @@ classes.
   Practically unreachable, but the comment claiming parity is now wrong by
   that much.
 
+- **The adapter's default `account_type` misreads two of the venue's
+  shapes, silently.** Found by the 0.65 sweep; the consumer-facing account is
+  in `docs/oms-types.md` and `docs/config.md`. `MogwaiExecClientConfig`
+  defaults to `Cash`. Under it a future is valued at full notional on top of a
+  balance that never paid it, a negative venue balance freezes the nautilus
+  account, and since 0.65 the venue's unfunded mode has every opening buy
+  denied by nautilus's risk engine before it is sent. The adapter knows both
+  halves at connect time - its own account type and every instrument's class,
+  and whether the first account snapshot carries any balance row - so it could
+  warn or refuse at the pairing rather than leave it to a doc paragraph. The
+  open question is which, and whether the default itself should follow the
+  served class; an owner decision, and a consumer-visible change either way.
+
 - `HavocSpec.data` was resolved and needs no entry: `config.rs`'s
   `validate_havoc` refuses the field outright with a named error telling the
   operator to use the offline `gen` command or configure the venue's river, and a
@@ -594,6 +654,17 @@ classes.
   field nothing consumes" claim outlived its fix twice.
 
 ## Tests and tooling
+
+- **Nothing here runs an order through nautilus's risk engine.** The adapter
+  tests call `ExecutionClient` methods directly, and no crate builds a
+  `RiskEngine`, `Trader` or `LiveNode`. So the 0.65 change that made the risk
+  engine deny what it cannot fund-check - the cash-account unfunded denial, the
+  trailing stop with no price, the modify that now runs the full check - landed
+  with every test green and was found only by reading. A lane that submits
+  through a real risk engine against the venue, for each account type and
+  funding mode the docs promise, would turn the next such change into a
+  failure. It is also the only thing that would pin the `reference/nautilus.md`
+  claims a pin bump keeps moving.
 
 - **Two timing sites remain deliberately blocked.** `serving.rs`'s
   market-reading gate spaces attempts 500 ms apart, and that spacing is the
@@ -623,6 +694,14 @@ classes.
   mogwai's side is only adopting it once brokkr can enumerate it.
 
 ## Documentation
+
+- **`docs/havoc.md` does not say where a duplicated fill lands on a nautilus
+  host.** Since 0.65 the execution engine republishes every fill it declines
+  on `events.order_fill_declined.{instrument_id}`, and a `DuplicateNextFill`
+  copy is declined as a duplicate trade id, so a host can now subscribe and
+  observe the divergence rather than infer it from a log line. The
+  `DuplicateNextFill` row should say so, after a run confirms the copy
+  arrives on that topic rather than being dropped earlier in the adapter.
 
 - **`docs/havoc.md` was patched rather than rewritten** and wants the same
   headings-then-split treatment `reference/architecture.md` got - step one
@@ -690,6 +769,18 @@ the delivery claim is only as good as the paragraph it read, and the paragraphs
 read for this audit were detailed and current rather than skeletal - which is
 weak evidence and should be treated as such. A compiler probe settles a public
 surface; nothing settles a semantic claim except one of us re-reading the code.
+
+- **The nautilus 0.65 risk engine meets their cash accounts, 2026-10-05.
+  Unverified on their side; read `research/broadarrow` before sending.** The
+  change is nautilus's, so they meet it through their own 0.65 bump, not
+  through anything of ours; what we can add is the venue half.
+  `venue-clients/src/venue/mogwai.rs` reportedly picks `Cash` for spot, and on
+  0.65 a cash account with no balance row in the notional currency has every
+  opening buy denied with `NotionalExceedsFreeBalance`. Whether any of their
+  spot scenarios trades a quote currency the account was not funded in is the
+  question, and only their tree answers it. If one does, the message is the
+  two consumer paragraphs this sweep added, in `docs/config.md` and
+  `docs/oms-types.md`.
 
 - **The default shape moved to USD cash equity, 2026-08-26.** An unconfigured
   venue now resolves every unmatched symbol through a new NVDA preset - cash
