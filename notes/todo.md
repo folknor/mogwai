@@ -549,6 +549,27 @@ classes.
   it, and `docs/oms-types.md` already warns shadow implementations about the
   extremes-versus-marks half of this.
 
+- **The per-pass trailing ratchet is silent on the wire - an owner decision,
+  not yet ruled.** `ratchet_trailing_stops` moves a trail's trigger, a
+  `TrailingStopLimit`'s limit and its hold, and emits no `OrderUpdated`; only
+  activation speaks (`on_activate`'s doc says the ratchet "stays silent, as it
+  always has", which describes the behaviour rather than ruling on it). Since
+  2026-10-05 a ratchet that moves a hold does publish the ledger through the
+  pass's `AccountState`, so the funds side is closed; what stays silent is the
+  order itself. Consequence: nautilus' cached trigger freezes at the activation
+  seed (or the stated trigger) while the venue's moves on, until the execution
+  manager's open-order reconciliation sees the drift and synthesizes an
+  `OrderUpdated`. A strategy reading `order.trigger_price()` for its own logic
+  reads a stale level in between. Real venues differ - most do not push a
+  ratchet - so silence is defensible as realism, and an update per improving
+  pass is defensible as the venue telling the truth about its own book; the
+  volume is at most one frame per trail per pass. The choice is which of the
+  two this venue models. Recommendation: emit, because the adapter already
+  routes `OrderUpdated` and reconciliation-as-correction is slower and harder
+  to reason about than the venue stating it; a quiet-ratchet havoc divergence
+  could restore the realistic silence on demand. Whichever is ruled gets
+  recorded at `ratchet_trailing_stops`.
+
 - A zero-price fill is still warned about and booked by `warn_zero_px`, so a
   position can carry `mark_px == 0` if the tape produces one.
   `position_unrealized_checked`'s zero answer is the backstop for exactly that
@@ -937,20 +958,29 @@ surface; nothing settles a semantic claim except one of us re-reading the code.
   absent re-check into their capital path rather than a style question. That
   is now recorded in `reference/architecture.md` beside the invariant, with
   the re-check named as owed in the same change as any relaxation.
-- **The warmup boot storm is already solved venue-side, and they should not
-  build daemon pacing for correctness.** Their question was whether the gate is
-  cheaper from our side; it was built here on 2026-08-25. Four synthesis slots
-  bound resident memory at the measured ceiling, and behind them sits a
-  128-deep queue with a 30-second bounded wait, so the fifth caller is served
-  late rather than refused. A `503` is reachable only past 128 concurrently
-  queued history requests or a caller that queued and lost the whole deadline,
-  and both carry `Retry-After` and distinct bodies naming which happened. Fifty
-  workers paging sequentially never reach either. Their point about the
-  refusal being invisible is right and sharpens the design rather than
-  changing it: nautilus' historical response types carry no error channel, so
-  a refusal arrives at their strategy as an empty page, which is why the wait
-  exists at all. Pacing spawns stays a throughput optimization for them, not a
-  precondition.
+- **Their `notes/mogwai.md` wishlist landed whole, 2026-10-05.** Verified
+  against this tree; the probe is their `brokkr check`, since each item but
+  the last is a public surface. (1) The launcher's stderr drain caps a line at
+  `STDERR_LINE_MAX_BYTES` with a truncation marker, and no longer stops
+  draining at a line that is not UTF-8 - which used to wedge the venue once the
+  pipe filled. (2) `mogwai_protocol::risk::info_keys` publishes every
+  account-info key, the three breach keys among them, and the adapter writes
+  from it. (3) `mogwai_protocol::http` publishes `MAX_CONCURRENT_HISTORY_SLOTS`,
+  `HISTORY_SLOT_WAIT` and `MAX_QUEUED_HISTORY_REQUESTS`, and the venue enforces
+  them from there; the wait runs from receipt and covers the wait alone, which
+  `docs/config.md` now states. (4) `wire_submit` maps a trailing order stating
+  both activation and trigger onto the wire's activation-only form. One rider
+  they did not ask for and must know: a stated trigger tighter than the trail's
+  first level (above activation less offset for a sell, below activation plus
+  offset for a buy) is refused before submit, because nautilus keeps it as a
+  floor and the wire cannot. Their planned placeholder, snapped away from the
+  market, is inside the bound. Two semantic changes they would not see in a
+  compile: an `OrderUpdated` answering a modify now carries the order's resting
+  trigger rather than echoing the request's, so a quantity-only amend reports
+  `Some` where it reported `None`; and `TriggerType::Default` is the last trade
+  here and bid/ask in nautilus' own trailing calculation, so a parity leg on
+  `Default` compares two trigger references - `LastPrice` on both sides removes
+  that.
 - **Their reading of `account_ttl_ms` is exactly right**, and the sweeper's own
   comment states it in the same words: an unattended account is frozen - orders
   do not rest, positions do not mark, funding does not accrue, and a policy
@@ -1013,10 +1043,6 @@ price from a `limit_offset`, so they send an offset and not a price.
   retryable is worse than a run that stops when the venue said no - is still
   sound, and the marker only changes what the decision rests on. Nothing here
   pushes them either way.
-- Boot-storm pacing for concurrent `/trades` and `/quotes` warmup, because their
-  daemon decides when workers spawn. Our bounded wait makes staggering an
-  optimization for ordinary paging rather than a precondition of correctness,
-  which is the change worth telling them about.
 - `submit_order_list` is the only route that emits a group frame, so a consumer
   wanting an atomic group by any other route has no API for it. None is owed
   until one is wanted.

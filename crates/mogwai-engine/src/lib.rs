@@ -1233,8 +1233,10 @@ impl Engine {
             }
         }
         // The trail follows the marks this pass saw, before the margin walk, so
-        // a stop that just ratcheted is the one a breach liquidation sees.
-        self.ratchet_trailing_stops(marks, extremes, ts);
+        // a stop that just ratcheted is the one a breach liquidation sees. A
+        // ratchet that moved a hold has moved the ledger as surely as a mark
+        // has, and owes the same snapshot.
+        moved |= self.ratchet_trailing_stops(marks, extremes, ts);
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {
@@ -7082,6 +7084,89 @@ mod tests {
         );
     }
 
+    /// A quantity-only amend of a resting stop reports the trigger the order
+    /// still rests at, read back from the order exactly as its price is. The
+    /// request states no trigger, and echoing that absence told the consumer
+    /// nothing about where the stop sits.
+    #[test]
+    fn a_quantity_amend_of_a_stop_reports_the_trigger_it_rests_at() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            Command::SubmitOrder(trailing_stop("T2", Side::Buy, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        let out = e.process_stamped(
+            Command::ModifyOrder {
+                client_order_id: "T2".into(),
+                price: None,
+                quantity: Some(Decimal::from(2)),
+                trigger_price: None,
+            },
+            2,
+        );
+        let reported = out
+            .iter()
+            .find_map(|event| match event {
+                VenueMessage::OrderUpdated { trigger_price, .. } => Some(*trigger_price),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the amend lands: {out:?}"));
+        assert_eq!(reported, Some(Decimal::from(110)));
+    }
+
+    /// A buy trail on a spot pair holds its notional at the trigger, so a
+    /// ratchet down frees quote. That moves the ledger, and the pass owes the
+    /// snapshot that says so - a spot pair has no marked position, so nothing
+    /// else in the pass would announce it.
+    #[test]
+    fn a_ratchet_that_moves_a_hold_publishes_the_ledger() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            Command::SubmitOrder(trailing_stop("T2", Side::Buy, 110, 10)),
+            1,
+            Some(MarketReading::flat(Decimal::from(100), 1, 0)),
+        );
+        let outcome = e.mark(&[("BTCUSDT".into(), Decimal::from(50))], 2);
+        assert_eq!(resting_trigger(&e, "T2"), Decimal::from(60));
+        let snapshot = outcome
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                VenueMessage::AccountState(state) => Some(state),
+                _ => None,
+            })
+            .expect("the ratchet moved the hold, so the pass owes a snapshot");
+        assert_eq!(
+            balance(snapshot, "USDT").locked,
+            Decimal::from(60),
+            "the published hold is the ratcheted trigger's, not the stated one's"
+        );
+
+        // A pass that leaves the trail where it was moves nothing and owes
+        // nothing.
+        let quiet = e.mark(&[("BTCUSDT".into(), Decimal::from(80))], 3);
+        assert!(
+            !quiet
+                .events
+                .iter()
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
+            "an unmoved trail publishes nothing: {:?}",
+            quiet.events
+        );
+    }
+
     fn trailing_stop_limit(
         id: &str,
         side: Side,
@@ -11208,7 +11293,7 @@ mod tests {
                 venue_order_id: Some(_),
                 reason,
                 ..
-            } if reason == "empty modify (no price or quantity)"
+            } if reason == "empty modify (no price, quantity or trigger price)"
         ));
         assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
         assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));

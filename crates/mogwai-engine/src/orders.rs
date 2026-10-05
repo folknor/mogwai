@@ -1226,12 +1226,22 @@ impl Engine {
     /// that printed nothing, or a symbol the tape did not cover) falls back to
     /// its mark, which is the pre-extremes behaviour and the honest answer when
     /// there is no finer evidence.
+    ///
+    /// Answers whether the ratchets moved the account's order holds. A buy
+    /// trail holds its notional at the trigger, so ratcheting it moves the
+    /// ledger, and the pass owes the snapshot that publishes it: on a spot pair
+    /// nothing else in the pass would, because a spot pair has no marked
+    /// position. The holds are compared whole rather than per order, because a
+    /// margin-equity sell's refresh rebuilds the aggregate hold.
     pub(crate) fn ratchet_trailing_stops(
         &mut self,
         marks: &[(mogwai_protocol::Symbol, Decimal)],
         extremes: &[(mogwai_protocol::Symbol, Decimal, Decimal)],
         ts: u64,
-    ) {
+    ) -> bool {
+        // Taken at the first ratchet, so a pass that moves no trail pays
+        // nothing for the comparison.
+        let mut holds_before: Option<HashMap<String, Decimal>> = None;
         for (symbol, mark) in marks {
             let span = extremes
                 .iter()
@@ -1306,6 +1316,9 @@ impl Engine {
                     None
                 };
                 let before = order.clone();
+                if holds_before.is_none() {
+                    holds_before = Some(self.order_holds.clone());
+                }
                 let order = &mut self.open[pos];
                 order.submit.trigger_price = Some(candidate);
                 if let Some(limit) = trailing_limit {
@@ -1324,6 +1337,7 @@ impl Engine {
                 self.refresh_open_hold(pos, &before);
             }
         }
+        holds_before.is_some_and(|holds| holds != self.order_holds)
     }
 
     /// As `apply_scans`, on the clock of the boat whose sweep produced these
@@ -3317,7 +3331,7 @@ impl Engine {
             return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
-                reason: "empty modify (no price or quantity)".into(),
+                reason: "empty modify (no price, quantity or trigger price)".into(),
                 ts_event: ts,
             }];
         }
@@ -3737,7 +3751,7 @@ impl Engine {
         }
 
         let before = self.open[pos].clone();
-        let (quantity, price, leaves_qty) = {
+        let (quantity, price, trigger_price, leaves_qty) = {
             let order = &mut self.open[pos];
             // Either kind of amend bumps the revision, so a trigger walk
             // already in flight against the pre-amend state is discarded.
@@ -3812,7 +3826,15 @@ impl Engine {
             // the order rests at, and a trigger amend on a trailing stop limit
             // must report the limit just rederived above. Reporting the request
             // instead published `price: None` for every quantity-only amend.
-            (order.submit.quantity, order.submit.price, order.leaves_qty)
+            // The trigger is read back for the same reason: a quantity-only
+            // amend of a resting stop still rests at its trigger, and the
+            // update must say where rather than report the request's absence.
+            (
+                order.submit.quantity,
+                order.submit.price,
+                order.submit.trigger_price,
+                order.leaves_qty,
+            )
         };
         self.refresh_open_hold(pos, &before);
 
