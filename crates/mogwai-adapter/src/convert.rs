@@ -167,6 +167,76 @@ pub(crate) fn wire_trail_offset(
     }
 }
 
+/// The trigger a nautilus order's submit carries onto the wire.
+///
+/// Passed through as stated, with one mapping: a trailing order stating both an
+/// activation and a trigger. The two ends read that pair differently. To
+/// nautilus the order is dormant until activation, and the trigger is the level
+/// its own matching engine starts the trail from - a stated trigger survives
+/// activation only where it is better than the trail's first level, because
+/// `maybe_move` takes only a strictly better candidate. To the wire a stated
+/// trigger means a trail armed on arrival, so the venue refuses the pair as
+/// contradictory. The wire's dormant form is the activation alone.
+///
+/// Nautilus 0.65's risk engine is why the pair arrives at all. It must price
+/// every order it admits, and a trailing order stating neither trigger nor
+/// price is priced off a cached trade tick, or denied without one - which a
+/// bar-driven strategy never has. So a host states the trigger the trail will
+/// have at the moment it activates, a level the trail can only improve on.
+///
+/// Dropping the trigger is exact only for such a level: at or below the
+/// activation less the offset for a sell, at or above it plus the offset for a
+/// buy. There the venue's trail, seeded from the activating print, starts at or
+/// beyond it exactly as nautilus' would. A tighter trigger is a floor nautilus
+/// would honour and the wire cannot state, so it is refused by name rather than
+/// dropped into an order that stops out somewhere the strategy did not ask
+/// for. A pair without a price-typed offset has no level to check against and
+/// is passed through, so the wire's validator names what is missing.
+pub(crate) fn wire_trigger_price(
+    order_type: OrderType,
+    side: OrderSide,
+    trigger_price: Option<Decimal>,
+    activation_price: Option<Decimal>,
+    trail_offset: Option<Decimal>,
+) -> anyhow::Result<Option<Decimal>> {
+    let trailing = matches!(
+        order_type,
+        OrderType::TrailingStopMarket | OrderType::TrailingStopLimit
+    );
+    let (true, Some(trigger), Some(activation), Some(offset)) =
+        (trailing, trigger_price, activation_price, trail_offset)
+    else {
+        return Ok(trigger_price);
+    };
+    let activation_level = match side {
+        OrderSide::Sell => activation.checked_sub(offset),
+        OrderSide::Buy => activation.checked_add(offset),
+    }
+    .context("a dormant trailing order's activation level overflows")?;
+    let within = match side {
+        OrderSide::Sell => trigger <= activation_level,
+        OrderSide::Buy => trigger >= activation_level,
+    };
+    if !within {
+        anyhow::bail!(
+            "a dormant trailing {side:?} states trigger_price {trigger} tighter than the \
+             {activation_level} its trail starts from at activation_price {activation}: \
+             MOGWAI arms a dormant trail from the activating print and has no floor to \
+             carry this trigger, so state it at or beyond {activation_level}, or drop it"
+        );
+    }
+    Ok(None)
+}
+
+/// The trigger reference a nautilus order names, checked against the one this
+/// venue triggers from: the last trade.
+///
+/// `Default` is accepted because it means "the venue's default", and the last
+/// trade is this venue's. That is not what nautilus' own simulated venue does
+/// with it - its trailing calculation reads `Default` as bid/ask - so a host
+/// comparing a backtest leg with a MOGWAI leg on `Default` is comparing two
+/// trigger references. Each venue states its own default; a host that needs
+/// the two to agree states `LastPrice` in both.
 pub(crate) fn wire_trigger_type(trigger: Option<TriggerType>) -> anyhow::Result<()> {
     match trigger {
         None | Some(TriggerType::Default | TriggerType::LastPrice) => Ok(()),
@@ -1247,6 +1317,90 @@ mod tests {
                 nautilus_order_type(wire),
                 order_type,
                 "{order_type:?} must round-trip"
+            );
+        }
+    }
+
+    fn dec(text: &str) -> Decimal {
+        Decimal::from_str(text).expect("a decimal literal")
+    }
+
+    /// A dormant trailing order stating the trigger its trail will start from,
+    /// or a looser one, reaches the wire as activation alone, for both trailing
+    /// types and both sides. The level itself is inside the bound: it is the
+    /// shape a host builds to satisfy nautilus 0.65's risk engine.
+    #[test]
+    fn a_dormant_trail_drops_a_trigger_no_tighter_than_its_first_level() {
+        for order_type in [OrderType::TrailingStopMarket, OrderType::TrailingStopLimit] {
+            for (side, trigger) in [
+                (OrderSide::Sell, "95.00"),
+                (OrderSide::Sell, "90.00"),
+                (OrderSide::Buy, "115.00"),
+                (OrderSide::Buy, "120.00"),
+            ] {
+                let activation = match side {
+                    OrderSide::Sell => dec("100.00"),
+                    OrderSide::Buy => dec("110.00"),
+                };
+                let mapped = wire_trigger_price(
+                    order_type,
+                    side,
+                    Some(dec(trigger)),
+                    Some(activation),
+                    Some(dec("5.00")),
+                )
+                .unwrap_or_else(|err| panic!("{order_type:?} {side:?} at {trigger}: {err}"));
+                assert_eq!(mapped, None, "{order_type:?} {side:?} at {trigger}");
+            }
+        }
+    }
+
+    /// A trigger tighter than the trail's first level is a floor nautilus would
+    /// keep and the wire cannot state. It is refused, naming the level, rather
+    /// than dropped into a stop that sits somewhere the strategy did not ask.
+    #[test]
+    fn a_dormant_trail_refuses_a_trigger_tighter_than_its_first_level() {
+        for (side, activation, trigger) in [
+            (OrderSide::Sell, "100.00", "95.25"),
+            (OrderSide::Buy, "110.00", "114.75"),
+        ] {
+            let err = wire_trigger_price(
+                OrderType::TrailingStopMarket,
+                side,
+                Some(dec(trigger)),
+                Some(dec(activation)),
+                Some(dec("5.00")),
+            )
+            .expect_err("a tighter trigger has no wire form")
+            .to_string();
+            assert!(err.contains("no floor"), "{side:?}: {err}");
+            let level = match side {
+                OrderSide::Sell => "95.00",
+                OrderSide::Buy => "115.00",
+            };
+            assert!(err.contains(level), "{side:?} names the level: {err}");
+        }
+    }
+
+    /// Every other shape is the identity: a trigger alone, an activation alone,
+    /// a non-trailing order, and a pair with no price offset to check, which the
+    /// wire's validator is left to refuse in its own words.
+    #[test]
+    fn the_trigger_passes_through_outside_the_dormant_pair() {
+        let trigger = Some(dec("95.00"));
+        let activation = Some(dec("100.00"));
+        let offset = Some(dec("5.00"));
+        for (order_type, trigger, activation, offset) in [
+            (OrderType::TrailingStopMarket, trigger, None, offset),
+            (OrderType::TrailingStopMarket, None, activation, offset),
+            (OrderType::StopMarket, trigger, activation, offset),
+            (OrderType::TrailingStopMarket, trigger, activation, None),
+        ] {
+            assert_eq!(
+                wire_trigger_price(order_type, OrderSide::Sell, trigger, activation, offset)
+                    .expect("passed through"),
+                trigger,
+                "{order_type:?} trigger {trigger:?} activation {activation:?} offset {offset:?}"
             );
         }
     }

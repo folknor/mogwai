@@ -425,4 +425,8 @@ Through the nautilus adapter these arrive in `AccountState.info` under
 position cap, and the breach's rule, action and instant if one has fired. Read
 them with `get_str` and parse: they are string-spelled for the same reason they
 are on the wire, and `get_f64` would reintroduce the very tolerance the string
-spelling exists to prevent.
+spelling exists to prevent. The breach instant is the exception, a JSON
+integer. Every key is published as a constant in
+`mogwai_protocol::risk::info_keys`, which the adapter writes from; read them by
+those names rather than a copy, so a rename is a build failure rather than a
+lookup that quietly finds nothing.

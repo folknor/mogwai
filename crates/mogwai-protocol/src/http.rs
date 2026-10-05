@@ -278,6 +278,74 @@ impl HistoryQuery {
     }
 }
 
+// The history admission contract: how the venue admits `/operator/trades`,
+// `/operator/quotes` and the socket's history path to synthesis. The venue
+// enforces these from here rather than from private copies, so a consumer
+// sizing its own client bound against them - one that must outlast the slot
+// wait to ever see the venue's refusal - cannot drift from what is enforced.
+
+/// How many history syntheses may be in flight at once. A further request
+/// waits for a slot rather than starting one - see [`HISTORY_SLOT_WAIT`] - so
+/// history can neither fill Tokio's blocking pool ahead of order-entry market
+/// readings nor accumulate response buffers without a ceiling.
+///
+/// The memory bound this buys is measured rather than asserted, by the venue's
+/// `worst_case_history_page_bytes` and recorded in `reference/performance.md`:
+/// a full `/quotes` page is 4.40 MB of `QuoteTick` vector and 5.90 MB of JSON
+/// resident together while it serializes, so four of them peak near 41 MB.
+/// `/trades` is narrower at 3.20 MB plus 5.05 MB. The number is a bound only
+/// because the venue's slot permit outlives both halves at once, the vector and
+/// the JSON.
+pub const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
+
+/// How long a history request waits for a slot before the venue refuses it
+/// with a `503` and `Retry-After`.
+///
+/// Measured by the venue from the moment it takes the request and covering the
+/// wait alone, not the synthesis or the transfer that follow a won slot. A
+/// client bound that should let the venue's refusal arrive therefore has to be
+/// this plus a margin for the work after it, measured from the client's send.
+///
+/// The gate was fail-fast, and that was wrong for the topology this venue is
+/// for. The cap exists to bound resident memory - four multi-megabyte pages -
+/// and a request that is merely waiting holds no page, so refusing it bought
+/// the memory bound nothing and cost the consumer everything: nautilus's
+/// historical response types carry no error channel, so an adapter's only
+/// alternative to an unresolvable hang is to resolve the request empty and log
+/// why. A refused warmup therefore reaches the consumer as a quiet window,
+/// indistinguishable from a tape that genuinely printed nothing, and the run
+/// then reasons about a market it was never shown.
+///
+/// That was survivable when one consumer owned one venue. It is not survivable in
+/// the attach topology, which exists to point tens of runs at one venue: one
+/// warmup is not one request, because the venue serves no bars and the adapter
+/// pages `/trades` and aggregates locally, so a boot storm is dozens of runs
+/// each taking dozens of sequential pages against four slots. Ordinary paging
+/// would fire the gate constantly, and silently.
+///
+/// Waiting fixes that without weakening the bound. Four syntheses are resident
+/// at once whatever the queue does, so the measured ~41 MB ceiling is untouched;
+/// what changes is that the fifth caller is served late instead of told nothing
+/// happened. The deadline is what keeps "late" from becoming "never": a consumer
+/// that waits this long is looking at a venue that is genuinely saturated rather
+/// than merely busy, and a refusal it can see beats a hang it cannot.
+///
+/// Generous on purpose. A full page synthesis is the dominant cost, so the wait
+/// has to cover several of them ahead in the queue; sizing it to one would
+/// reintroduce the refusal for exactly the paging this exists to absorb.
+pub const HISTORY_SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many history requests may be queued for a slot at once.
+///
+/// The wait above needs its own bound or it is not a bound at all: an unbounded
+/// queue turns a saturated venue into one that accepts everything and answers
+/// nothing, holding a connection and a task per waiter. This is what stays
+/// fail-fast, and it is the refusal an operator should read as real overload
+/// rather than as ordinary contention. Sized well above the concurrency so a
+/// mass-attach boot storm queues rather than trips it, and far below anything
+/// that could exhaust the listener.
+pub const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
+
 /// The `POST /accounts` body: open an account on terms the consumer states,
 /// before it trades.
 ///

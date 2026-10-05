@@ -126,12 +126,20 @@ slots, so ordinary paging fired the gate constantly and silently.
 
 Two things still answer 503, each with its own body naming its condition and
 both meaning the venue is genuinely saturated rather than merely busy: a wait
-that outlives its 30 seconds, and more than 128 requests in the building at
-once (synthesizing or waiting), which is the fail-fast bound that keeps the
-queue from becoming a way to accept everything and answer nothing. Both carry
-a `Retry-After` header derived from the wait bound. A consumer that sees
-either should treat it as real overload - stagger its boots - and never as an
-empty window.
+that outlives its 30 seconds, and more than 128 requests already waiting for a
+slot (a request holding one has stopped waiting and no longer counts), which is
+the fail-fast bound that keeps the queue from becoming a way to accept
+everything and answer nothing. Both carry a `Retry-After` header derived from
+the wait bound. A consumer that sees either should treat it as real overload -
+stagger its boots - and never as an empty window.
+
+The three numbers are published as `mogwai_protocol::http`'s
+`MAX_CONCURRENT_HISTORY_SLOTS`, `HISTORY_SLOT_WAIT` and
+`MAX_QUEUED_HISTORY_REQUESTS`, and the venue enforces them from there. The wait
+runs from the venue's receipt of the request and covers the wait alone, so a
+client timeout that should let the venue's refusal reach it has to be
+`HISTORY_SLOT_WAIT` plus a margin for the synthesis and transfer, measured from
+its own send. One equal to the wait always gives up first.
 
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
 limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from

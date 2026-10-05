@@ -19,8 +19,8 @@ use std::{
 
 use common::{
     StubState, assert_owns_a_fresh_exec_sink, bound_stub, cached_activation_trailing_stop,
-    cached_order, cached_stop_limit, cached_stop_market, cached_trailing_stop,
-    connected_exec_client, instrument_id, next_exec_event, submit_command,
+    cached_dormant_trailing_stop, cached_order, cached_stop_limit, cached_stop_market,
+    cached_trailing_stop, connected_exec_client, instrument_id, next_exec_event, submit_command,
 };
 use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
@@ -777,8 +777,8 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
     );
 }
 
-/// The shape broadarrow submits for every bare trailing exit: a price-typed
-/// offset, a stated activation price, and no trigger. This used to die at the
+/// A dormant trailing exit stated without a trigger: a price-typed offset, a
+/// stated activation price, and nothing else. This used to die at the
 /// decode boundary ("conditional order must carry trigger_price"), which made
 /// a trailing `strategy.exit` undeployable; the wire now takes the
 /// activation-stated form and the venue seeds the trigger at activation, so
@@ -824,6 +824,87 @@ async fn a_trigger_less_trailing_stop_with_activation_reaches_the_venue() {
     assert!(
         !frame.contains("trigger_price"),
         "no trigger is invented for the venue to refuse or obey: {frame}"
+    );
+}
+
+/// The same dormant trail stating the trigger its trail starts from, which is
+/// how a host gets it past nautilus 0.65's risk engine without a cached trade
+/// tick. Nautilus reads the pair as dormant; the wire reads a stated trigger as
+/// armed on arrival and refuses the pair. The adapter maps it onto the wire's
+/// dormant form, so the frame carries the activation and no trigger, exactly
+/// as the trigger-less shape does.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_dormant_trailing_stop_stating_its_first_level_reaches_the_venue_dormant() {
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_dormant_trailing_stop(&cache, Some("104.00"));
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("the trigger at the trail's first level maps onto the dormant form");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let submits = loop {
+        let seen: Vec<String> = state
+            .ws_client_messages
+            .lock()
+            .expect("ws client messages mutex")
+            .iter()
+            .filter(|text| text.contains(r#""type":"SubmitOrder""#))
+            .cloned()
+            .collect();
+        if !seen.is_empty() || Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(submits.len(), 1, "the submit reaches the wire: {submits:?}");
+    let frame = &submits[0];
+    assert!(
+        frame.contains(r#""activation_price":"105.00""#),
+        "the activation level travels: {frame}"
+    );
+    assert!(
+        !frame.contains("trigger_price"),
+        "the placeholder trigger is dropped, or the venue would arm the trail on arrival: {frame}"
+    );
+}
+
+/// A trigger tighter than the trail's first level is a floor nautilus keeps and
+/// the wire has no way to state, so dropping it would rest a stop somewhere the
+/// strategy did not ask. It is refused before any `OrderSubmitted`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_dormant_trailing_stop_with_a_tighter_trigger_is_refused_by_name() {
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_dormant_trailing_stop(&cache, Some("104.50"));
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    let err = client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect_err("a trigger above a sell's first level has no wire form")
+        .to_string();
+    assert!(err.contains("no floor"), "the refusal names why: {err}");
+    assert!(
+        err.contains("104"),
+        "the refusal names the level to state instead: {err}"
+    );
+    assert_no_exec_event(&mut sink_rx).await;
+    assert_eq!(
+        client.mirrored_order_status(order.client_order_id()),
+        None,
+        "a refused submit leaves no mirror record to leak"
     );
 }
 

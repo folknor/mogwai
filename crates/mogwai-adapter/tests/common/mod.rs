@@ -1621,11 +1621,22 @@ pub fn cached_trailing_stop(cache: &Rc<RefCell<Cache>>) -> nautilus_model::order
 }
 
 /// Seeds a BTCUSDT sell `TrailingStopMarketOrder` `O-TRAIL-ACT` into the
-/// cache in the shape broadarrow actually submits: a price-typed trailing
-/// offset, a stated activation price, and no trigger - nautilus's
-/// deferred-activation trail, whose trigger the venue seeds at activation.
+/// cache: a price-typed trailing offset of 1, a stated activation price of
+/// 105, and no trigger - nautilus's deferred-activation trail, whose trigger
+/// the venue seeds at activation.
 pub fn cached_activation_trailing_stop(
     cache: &Rc<RefCell<Cache>>,
+) -> nautilus_model::orders::OrderAny {
+    cached_dormant_trailing_stop(cache, None)
+}
+
+/// The same dormant trail stating a trigger as well, the shape a host builds
+/// so nautilus 0.65's risk engine can price it without a cached trade tick.
+/// The trail's first level is 104, so a trigger there or below is the
+/// placeholder and one above it is tighter than the wire can carry.
+pub fn cached_dormant_trailing_stop(
+    cache: &Rc<RefCell<Cache>>,
+    trigger_price: Option<&str>,
 ) -> nautilus_model::orders::OrderAny {
     let mut factory = order_factory();
     let order = factory.trailing_stop_market(
@@ -1635,7 +1646,7 @@ pub fn cached_activation_trailing_stop(
         rust_decimal::Decimal::from(1),
         Some(TrailingOffsetType::Price),
         Some(Price::from("105.00")),
-        None,
+        trigger_price.map(Price::from),
         Some(TriggerType::LastPrice),
         Some(TimeInForce::Gtc),
         None,

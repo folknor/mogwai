@@ -410,6 +410,35 @@ pub struct Breach {
     pub threshold: Decimal,
 }
 
+/// The keys a [`RiskState`] is published under in a consumer's account info
+/// bag.
+///
+/// `mogwai-adapter` renders the state into nautilus's `AccountState` info as
+/// flat string keys, and a consumer reads them back by name. A copy of a key
+/// held on the consumer side fails open on a rename here - the lookup finds
+/// nothing and a breach goes unclassified - so the names are published once,
+/// the adapter writes them from here, and a consumer pins against these.
+///
+/// Decimals are written as JSON strings and `ts_event` as a JSON integer; the
+/// breach keys are present only once a rule has fired.
+pub mod info_keys {
+    pub const EQUITY: &str = "mogwai_equity";
+    pub const PEAK_EQUITY: &str = "mogwai_peak_equity";
+    pub const DAY_OPEN_EQUITY: &str = "mogwai_day_open_equity";
+    pub const TRAILING_THRESHOLD: &str = "mogwai_trailing_threshold";
+    pub const TRAILING_REMAINING: &str = "mogwai_trailing_remaining";
+    pub const DAILY_REMAINING: &str = "mogwai_daily_remaining";
+    pub const OVERALL_THRESHOLD: &str = "mogwai_overall_threshold";
+    pub const OVERALL_REMAINING: &str = "mogwai_overall_remaining";
+    pub const MAX_POSITION: &str = "mogwai_max_position";
+    /// The fired [`super::BreachedRule`], in its snake-case wire spelling.
+    pub const BREACHED_RULE: &str = "mogwai_breached_rule";
+    /// The fired [`super::BreachAction`], in its snake-case wire spelling.
+    pub const BREACHED_ACTION: &str = "mogwai_breached_action";
+    /// The sim instant the rule fired, as a JSON integer.
+    pub const BREACHED_TS_EVENT: &str = "mogwai_breached_ts_event";
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BreachedRule {

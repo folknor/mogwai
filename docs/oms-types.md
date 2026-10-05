@@ -68,6 +68,16 @@ activate-at-first-print form is a shape this venue deliberately does not
 serve, so say where trailing begins. An activation level the market is
 already through activates on arrival.
 
+Through the nautilus adapter, a trailing order stating both is read the way
+nautilus reads it - dormant until activation - and reaches the wire as its
+activation alone. Nautilus 0.65's risk engine denies a trailing order it cannot
+price, so a host states the trigger the trail will start from: activation less
+`trail_offset` for a sell, plus it for a buy. The adapter drops a trigger at
+that level or beyond it, where the venue's trail started from the activating
+print is exactly what nautilus' would be. It refuses a trigger tighter than
+that level before submitting, because nautilus would keep it as a floor and the
+wire cannot carry one.
+
 A `TrailingStopLimit` carries two offsets and no price. `trail_offset` is how
 far its trigger sits from that extreme, as on a `TrailingStopMarket`. `limit_offset` is how far its limit sits from that
 trigger, on the side the order can fill from - a sell rests at

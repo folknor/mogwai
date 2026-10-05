@@ -100,6 +100,18 @@ const STDERR_HEAD: usize = 12;
 /// caller reading a snapshot cannot mistake a gap for adjacency.
 const STDERR_ELIDED: &str = "... (earlier venue stderr elided)";
 
+/// The most bytes of one stderr line the drain holds.
+///
+/// The ring bounds how many lines it keeps, which bounds nothing if one line can
+/// be any length: a venue that writes a runaway line with no newline would grow
+/// the ring, and every caller's callback, without limit. The cap is applied
+/// while reading, so the excess is skipped rather than buffered and then cut.
+const STDERR_LINE_MAX_BYTES: usize = 8192;
+
+/// Appended to a line cut at [`STDERR_LINE_MAX_BYTES`], so a truncated line
+/// cannot be read as the whole of what the venue wrote.
+const STDERR_TRUNCATED: &str = " ... (venue stderr line truncated)";
+
 /// How often the owning thread wakes to notice the venue exited on its own.
 const OWNER_POLL: Duration = Duration::from_millis(200);
 
@@ -120,6 +132,10 @@ pub enum StderrSink {
     /// Capture and hand each line to this callback, on the draining thread.
     /// Keep it cheap - it runs once per log line, and blocking here is the one
     /// way to reintroduce the wedge this type exists to prevent.
+    ///
+    /// A line arrives without its terminator, decoded lossily, and capped at
+    /// `STDERR_LINE_MAX_BYTES` with `STDERR_TRUNCATED` appended when the venue
+    /// wrote more.
     Lines(Box<dyn FnMut(String) + Send>),
 }
 
@@ -749,6 +765,50 @@ fn record_stderr_line(ring: &mut VecDeque<String>, line: String) {
     ring.push_back(line);
 }
 
+/// Read stderr to EOF, handing each line to `on_line`, never holding more than
+/// [`STDERR_LINE_MAX_BYTES`] of one.
+///
+/// Two ways a drain could stop holding its bound, both closed here. A runaway
+/// line is read through a `take`, and its remainder up to the newline skipped
+/// without being buffered. And a line that is not UTF-8 is decoded lossily: the
+/// `lines()` iterator this replaced yields an error on invalid UTF-8, and
+/// treating that error as the pipe closing ended the drain while the venue was
+/// still writing, so its next 64 KiB of stderr wedged it.
+fn drain_stderr_lines(stderr: &mut impl BufRead, mut on_line: impl FnMut(String)) {
+    let cap = u64::try_from(STDERR_LINE_MAX_BYTES).unwrap_or(u64::MAX);
+    let mut bytes = Vec::with_capacity(256);
+    loop {
+        bytes.clear();
+        // A read error means the pipe is gone and the process is exiting;
+        // there is nothing left to drain.
+        let Ok(read) = std::io::Read::take(&mut *stderr, cap + 1).read_until(b'\n', &mut bytes)
+        else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let terminated = bytes.last() == Some(&b'\n');
+        let truncated = !terminated && bytes.len() > STDERR_LINE_MAX_BYTES;
+        if terminated {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        } else if truncated {
+            bytes.truncate(STDERR_LINE_MAX_BYTES);
+            if stderr.skip_until(b'\n').is_err() {
+                return;
+            }
+        }
+        let mut line = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            line.push_str(STDERR_TRUNCATED);
+        }
+        on_line(line);
+    }
+}
+
 fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
     ring.lock()
         .map_or_default(|lines| lines.iter().cloned().collect())
@@ -833,17 +893,14 @@ fn own_venue(
         std::thread::Builder::new()
             .name("mogwai-venue-log".to_owned())
             .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    // A read error means the pipe is gone and the process is
-                    // exiting; there is nothing left to drain.
-                    let Ok(line) = line else { return };
+                drain_stderr_lines(&mut BufReader::new(stderr), |line| {
                     if let Ok(mut ring) = ring.lock() {
                         record_stderr_line(&mut ring, line.clone());
                     }
                     if let StderrSink::Lines(callback) = &mut sink {
                         callback(line);
                     }
-                }
+                });
             })
     });
 
@@ -1731,6 +1788,49 @@ mod tests {
             (0..STDERR_HEAD)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn drained(stderr: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        drain_stderr_lines(&mut BufReader::new(stderr), |line| lines.push(line));
+        lines
+    }
+
+    /// One runaway line is cut at the cap and marked, and the drain resumes at
+    /// the next line rather than handing the remainder on as lines of its own.
+    #[test]
+    fn a_runaway_stderr_line_is_capped_and_the_next_line_survives() {
+        let mut stderr = vec![b'x'; 1 << 20];
+        stderr.extend_from_slice(b"\nafter the runaway\n");
+        let lines = drained(&stderr);
+
+        assert_eq!(lines.len(), 2, "the remainder must be skipped, not split");
+        assert_eq!(
+            lines[0],
+            format!("{}{STDERR_TRUNCATED}", "x".repeat(STDERR_LINE_MAX_BYTES))
+        );
+        assert_eq!(lines[1], "after the runaway");
+    }
+
+    /// The cap is a ceiling, not an off-by-one: a line of exactly the cap, with
+    /// or without its newline, is whole and unmarked.
+    #[test]
+    fn a_stderr_line_at_the_cap_is_kept_whole() {
+        let at_cap = "y".repeat(STDERR_LINE_MAX_BYTES);
+        assert_eq!(drained(format!("{at_cap}\n").as_bytes()), [at_cap.as_str()]);
+        assert_eq!(drained(at_cap.as_bytes()), [at_cap.as_str()]);
+    }
+
+    /// A line that is not UTF-8 is delivered lossily and the drain goes on.
+    /// Ending the drain there would leave the venue writing into a pipe nobody
+    /// reads, which wedges it once the pipe fills.
+    #[test]
+    fn a_non_utf8_stderr_line_does_not_end_the_drain() {
+        let lines = drained(b"bad \xff byte\r\nstill draining\nunterminated");
+        assert_eq!(
+            lines,
+            ["bad \u{fffd} byte", "still draining", "unterminated"]
         );
     }
 

@@ -452,6 +452,12 @@ impl MogwaiExecutionClient {
                 "cross-instrument triggers are unsupported: MOGWAI triggers from the order instrument's tape"
             );
         }
+        // Nautilus states a trailing offset with a type beside it - price,
+        // ticks, basis points. Only the price form maps: the venue's trail
+        // is an absolute distance, and converting the others needs a
+        // reference price the two ends would have to agree on separately.
+        let trail_offset =
+            convert::wire_trail_offset(init.trailing_offset, init.trailing_offset_type)?;
         let wire = mogwai_protocol::SubmitOrder {
             client_order_id: client_order_id.to_string(),
             symbol: symbol_from_instrument(instrument_id),
@@ -463,15 +469,17 @@ impl MogwaiExecutionClient {
                 OrderType::TrailingStopLimit => None,
                 _ => init.price.map(|p| p.as_decimal()),
             },
-            trigger_price: init.trigger_price.map(|p| p.as_decimal()),
-            // Nautilus states a trailing offset with a type beside it - price,
-            // ticks, basis points. Only the price form maps: the venue's trail
-            // is an absolute distance, and converting the others needs a
-            // reference price the two ends would have to agree on separately.
-            trail_offset: convert::wire_trail_offset(
-                init.trailing_offset,
-                init.trailing_offset_type,
+            // A dormant trailing order's stated trigger is dropped onto the
+            // wire's activation-only form, or refused where it is tighter than
+            // the trail's first level; see `wire_trigger_price`.
+            trigger_price: convert::wire_trigger_price(
+                init.order_type,
+                init.order_side,
+                init.trigger_price.map(|p| p.as_decimal()),
+                init.activation_price.map(|p| p.as_decimal()),
+                trail_offset,
             )?,
+            trail_offset,
             // The limit half of a trailing stop limit, under the same
             // offset-type restriction and for the same reason. The venue
             // derives the limit price from it, so a nautilus-stated `price` on
@@ -484,13 +492,13 @@ impl MogwaiExecutionClient {
                 }
                 _ => None,
             },
-            // Where trailing begins. Forwarded as stated: the wire's own
-            // validator below owns the shape rules - exactly one of
-            // trigger_price and activation_price on a trailing type - so a
-            // nautilus trailing order stating both, or neither (nautilus's
-            // activate-at-first-print form, which this venue deliberately
-            // does not serve), is refused here with the venue's reason
-            // rather than silently reshaped.
+            // Where trailing begins. Forwarded as stated. A nautilus trailing
+            // order stating both this and a trigger is dormant, and reaches
+            // the wire as this alone - the trigger mapping above. One stating
+            // neither (nautilus's activate-at-first-print form, which this
+            // venue deliberately does not serve) is refused by the wire's
+            // own validator below, with the venue's reason, rather than
+            // silently reshaped.
             activation_price: init.activation_price.map(|p| p.as_decimal()),
             reduce_only: init.reduce_only,
             post_only: init.post_only,
@@ -3764,6 +3772,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
 /// An empty bag would be indistinguishable from a policed account whose
 /// optionals are all absent.
 fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> {
+    use mogwai_protocol::risk::info_keys;
     let risk = risk?;
     let mut info = Params::new();
     let mut put = |key: &str, value: Option<rust_decimal::Decimal>| {
@@ -3771,15 +3780,15 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
             info.insert(key.into(), serde_json::Value::String(value.to_string()));
         }
     };
-    put("mogwai_equity", Some(risk.equity));
-    put("mogwai_peak_equity", Some(risk.peak_equity));
-    put("mogwai_day_open_equity", Some(risk.day_open_equity));
-    put("mogwai_trailing_threshold", risk.trailing_threshold);
-    put("mogwai_trailing_remaining", risk.trailing_remaining);
-    put("mogwai_daily_remaining", risk.daily_remaining);
-    put("mogwai_overall_threshold", risk.overall_threshold);
-    put("mogwai_overall_remaining", risk.overall_remaining);
-    put("mogwai_max_position", risk.max_position);
+    put(info_keys::EQUITY, Some(risk.equity));
+    put(info_keys::PEAK_EQUITY, Some(risk.peak_equity));
+    put(info_keys::DAY_OPEN_EQUITY, Some(risk.day_open_equity));
+    put(info_keys::TRAILING_THRESHOLD, risk.trailing_threshold);
+    put(info_keys::TRAILING_REMAINING, risk.trailing_remaining);
+    put(info_keys::DAILY_REMAINING, risk.daily_remaining);
+    put(info_keys::OVERALL_THRESHOLD, risk.overall_threshold);
+    put(info_keys::OVERALL_REMAINING, risk.overall_remaining);
+    put(info_keys::MAX_POSITION, risk.max_position);
     // The breach, if one has fired. Carried because a strategy that has
     // already been locked or terminated should be able to see that its budget
     // is gone rather than infer it from a remaining that reads at or below
@@ -3787,7 +3796,7 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
     // next boundary and a `Terminate` never does.
     if let Some(breach) = &risk.breached {
         info.insert(
-            "mogwai_breached_rule".into(),
+            info_keys::BREACHED_RULE.into(),
             serde_json::Value::String(
                 serde_json::to_value(breach.rule)
                     .ok()
@@ -3796,7 +3805,7 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
             ),
         );
         info.insert(
-            "mogwai_breached_action".into(),
+            info_keys::BREACHED_ACTION.into(),
             serde_json::Value::String(
                 serde_json::to_value(breach.action)
                     .ok()
@@ -3804,7 +3813,7 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
                     .unwrap_or_default(),
             ),
         );
-        info.insert("mogwai_breached_ts_event".into(), breach.ts_event.into());
+        info.insert(info_keys::BREACHED_TS_EVENT.into(), breach.ts_event.into());
     }
     Some(info)
 }
