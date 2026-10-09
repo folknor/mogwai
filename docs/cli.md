@@ -206,7 +206,7 @@ reported back in the readiness record's `run_seed`, the value that with the
 config, the fingerprint and `version_string` reproduces every served path; the
 requested symbol label is the fifth input that selects one path from the run.
 
-`mogwai --version` prints semver, build hash, build time and the tape
+`mogwai --version` prints semver, build hash, commit time and the tape
 protocol version on one
 line; the same string is what the readiness record reports as
 `version_string`, so an operator can tell whether two runs' tapes are even

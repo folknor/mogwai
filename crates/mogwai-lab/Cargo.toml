@@ -38,7 +38,7 @@ rand_distr.workspace = true
 zrip.workspace = true
 sha2.workspace = true
 rust_decimal.workspace = true
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # `sidecar` opens the benchmark marker FIFO non-blocking, and needs exactly one
 # thing from here: the `O_NONBLOCK` flag value. Same pin mogwai-venue carries;
 # no feature is enabled because `nix::libc` is unconditional.

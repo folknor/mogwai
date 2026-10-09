@@ -203,6 +203,15 @@ default_profile = "dev"
 # reader remembering to pass `--release`.
 debug = true
 
+# `brokkr run` builds dev too. `[test] debug` above covers only the focused
+# runner; this is the key `run` reads. The dev profile is optimized, so the
+# offline subcommands stay usable, and a quick `--version` or `serve` no longer
+# pays a fat-LTO release build. A run whose wall time is the point - a criterion
+# harness, a probe - passes `--release` at the call site, as their documented
+# invocations do.
+[bin]
+debug = true
+
 # The edit loop: what a bare `brokkr check` runs. The two dev sweeps and no
 # libtest filters, so the behaviour is exactly the old no-profile default minus
 # the `timing` entry - that one compiles release for a wall-clock contract this

@@ -39,7 +39,7 @@ pub use serve::serve;
 
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
-/// The `--version` string: semver, git hash and build time from `build.rs`,
+/// The `--version` string: semver, git hash and commit time from `build.rs`,
 /// composed with the tape protocol version the binary was built against.
 ///
 /// Lives here rather than in the CLI because the readiness record carries it

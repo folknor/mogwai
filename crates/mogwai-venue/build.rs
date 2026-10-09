@@ -5,18 +5,29 @@
 //! `main.rs` reads for `--version`.
 //!
 //! Composes semver (from `CARGO_PKG_VERSION`) with the short git hash and the
-//! UTC build time into `MOGWAI_LONG_VERSION`, e.g.
+//! UTC commit time into `MOGWAI_LONG_VERSION`, e.g.
 //! `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. Kept dependency-light: shells
-//! `git` and `date` directly rather than pulling crates, and falls back to
-//! `unknown` outside a checkout (e.g. a `cargo install` tarball with no `.git`)
-//! so a release never fails to build for lack of git metadata.
+//! `git` directly rather than pulling crates, and falls back to `unknown`
+//! outside a checkout (e.g. a `cargo install` tarball with no `.git`) so a
+//! release never fails to build for lack of git metadata.
+//!
+//! Every stamped value is a function of the tree, never of the moment the
+//! script ran, so two builds of one tree state print one version string.
+//! A rerun still recompiles this crate and its dependents whatever it emits,
+//! which is why the watched set is kept to the files that move the hash or
+//! the dirty flag.
 
 use std::process::Command;
 
 /// Run `cmd args`, returning trimmed stdout, or `None` on failure / empty
-/// output (so a missing `git`/`date` or a non-repo build degrades cleanly).
+/// output (so a missing `git` or a non-repo build degrades cleanly).
+/// `TZ=UTC` makes `--date=format-local` render in UTC whatever the host zone.
 fn capture(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).output().ok()?;
+    let out = Command::new(cmd)
+        .env("TZ", "UTC")
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -37,18 +48,43 @@ fn main() {
         hash
     };
 
-    let build_time =
-        capture("date", &["-u", "+%Y-%m-%d %H:%M:%S UTC"]).unwrap_or_else(|| "unknown".to_owned());
+    let commit_time = capture(
+        "git",
+        &[
+            "log",
+            "-1",
+            "--date=format-local:%Y-%m-%d %H:%M:%S UTC",
+            "--format=%cd",
+        ],
+    )
+    .unwrap_or_else(|| "unknown".to_owned());
 
     let semver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned());
 
-    println!("cargo:rustc-env=MOGWAI_LONG_VERSION={semver} ({hash} {build_time})");
+    println!("cargo:rustc-env=MOGWAI_LONG_VERSION={semver} ({hash} {commit_time})");
 
     // Re-run when the checked-out commit or the index moves so the hash and the
     // dirty flag stay honest. The workspace `.git` is two levels up from this
-    // crate. There is no portable way to force a fresh timestamp on an otherwise
-    // unchanged rebuild; the build time therefore tracks the last commit/index
-    // change, which is the meaningful moment.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/index");
+    // crate. `.git/HEAD` alone is not enough: on a branch it holds
+    // `ref: refs/heads/<name>` and only changes on a checkout, while a commit
+    // moves the ref file it names, or `packed-refs` once refs are packed.
+    watch("../../.git/HEAD");
+    watch("../../.git/index");
+    watch("../../.git/packed-refs");
+    if let Some(r) = std::fs::read_to_string("../../.git/HEAD")
+        .ok()
+        .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_owned()))
+    {
+        watch(&format!("../../.git/{r}"));
+    }
+}
+
+/// Watch `path` only if it exists. Cargo treats a missing rerun-if-changed
+/// path as always stale, so watching an absent `packed-refs` reran this script
+/// and rebuilt every dependent on every invocation. Nothing is lost: packing
+/// refs deletes the loose ref file being watched, and a deletion triggers.
+fn watch(path: &str) {
+    if std::path::Path::new(path).exists() {
+        println!("cargo:rerun-if-changed={path}");
+    }
 }

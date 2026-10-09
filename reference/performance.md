@@ -423,13 +423,14 @@ chosen rather than measured for the same reason.
 ## The criterion harnesses
 
 ```
-brokkr run fill_bench -- --bench
-brokkr run fill_walk_bench -- --bench
+brokkr run --release fill_bench -- --bench
+brokkr run --release fill_walk_bench -- --bench
 ```
 
 Both are criterion benchmarks shipped as example targets, not `[[bench]]`
 targets: `criterion_main!` parses `--bench` out of its own argv, `brokkr run`
-forwards everything after `--` raw and defaults to release, and examples link
+forwards everything after `--` raw and builds dev unless told `--release`
+(`[bin] debug` in `brokkr.toml`), and examples link
 dev-dependencies so criterion never enters the shipped dependency graph.
 
 Read a verdict from `target/criterion/<bench_id>/new/estimates.json`:
