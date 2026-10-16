@@ -171,6 +171,15 @@ exchange machinery.** All the machinery of a real exchange can be built against
 the tapes we have. Better tapes are gated on v2 regardless, so an unfitted
 instrument class is not a finding and does not need re-reporting.
 
+- **The BTCUSDT fit sits above its own lag-10 abs-return ACF band.** Over 64
+  seeds the generated lag-10 mean is about 0.165 to 0.170 against the
+  fingerprint band's 0.1565 ceiling, identically under ChaCha12 and
+  `TapeRng` draws, with a heavy upper tail of realizations. `realism`
+  (`mogwai-data`, seed 42) is red on it at tape 38 and runs in every lane, so
+  the plain `brokkr check` is red until the fit moves. Fit work: the GARCH
+  persistence or the arrival clustering that feeds it, re-run over many seeds
+  rather than tuned to seed 42.
+
 - **Nothing has been fitted for equity, perpetual or inverse.** A symbol
   configured as one is served the default tape wearing a different shape. The
   intake sequence is what makes a preset honest and none has been run. Note that
@@ -810,6 +819,17 @@ classes.
   field nothing consumes" claim outlived its fix twice.
 
 ## Tests and tooling
+
+- **`mogwai arrival-control` cannot complete against the shipped MNQ
+  preset.** Its corrected arm re-centres `session.intensity_hour`, but the
+  preset's calendar carries an activity envelope, which replaces the hourly
+  session curves, so profile resolution refuses the override as inert and
+  the run stops at the first test seed. The arm either retargets the
+  envelope or is retired for envelope-bearing presets; that is owed an
+  owner ruling. Until then
+  `arrival_control_refuses_a_tree_that_changed_during_the_run`
+  (`mogwai-cli`) fails with the inert refusal, because its mid-run hook sits
+  after the test walks it can no longer reach.
 
 - **Nothing here runs an order through nautilus's risk engine.** The adapter
   tests call `ExecutionClient` methods directly, and no crate builds a

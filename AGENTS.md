@@ -113,7 +113,7 @@ one-leaf correction of `analysis/fingerprint.json`
 an exhaustive reader audit proved its sole consumer advisory and never on the
 generator's path. It does not generalize to any other leaf: the rule stays
 unconditional, and the next leaf needs its own audit and its own ruling.
-`TAPE_PROTOCOL_VERSION` next takes 38. If a non-tape artifact revision ever
+`TAPE_PROTOCOL_VERSION` next takes 39. If a non-tape artifact revision ever
 needs an identity of its own, give it a content hash or a method version
 rather than overloading this constant.
 
@@ -139,6 +139,13 @@ how the Python-to-Rust port was proven, and bind nothing. The standing rules:
   defect to optimize before it is run. Algebraic float operations and
   `target-cpu` SIMD are sanctioned wherever a serial recursion does not
   forbid reordering, with the re-bless and gate re-runs they imply.
+
+### Build profiles (owner ruling, 2026-10-16)
+
+Never set `opt-level` - not per package, not per profile, not in a
+workspace or host cargo configuration. A test that is too slow in an
+unoptimized dev build is fixed by making the code or the test cheaper, or
+by an ignore reason beginning `debug-slow:`, never by optimizing the build.
 
 ### Standing lessons from the 2026-08 bug-hunt arcs
 

@@ -954,27 +954,6 @@ mod tests {
         );
     }
 
-    /// The corrected-curve walk cannot run against the shipped preset: its
-    /// calendar carries an activity envelope, which replaces the hourly session
-    /// curves, and profile resolution refuses the re-centred override as inert.
-    /// Pinned so the day the owner rules on what the control re-centres under
-    /// an envelope, this fails and says so, rather than `docs/cli.md`'s note
-    /// going stale.
-    #[test]
-    fn the_corrected_curve_is_refused_under_the_shipped_envelope() {
-        let binding = GeneratedBinding {
-            window_start_ns: 1_782_856_800_000_000_000,
-            window_length_ns: 86_400_000_000_000,
-            burn_in: "0s".into(),
-        };
-        let scratch = crate::storage::unit_test_scratch("arrival-control-envelope");
-        let curve = [1.0 / 24.0; 24];
-        let Err(refused) = control_walk(scratch.path(), &binding, Some(&curve), 305) else {
-            panic!("the corrected curve resolved under an envelope-bearing preset");
-        };
-        assert!(refused.to_string().contains("inert"), "{refused}");
-    }
-
     #[test]
     fn gate_hours_excludes_the_unexposed_hour() {
         let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();

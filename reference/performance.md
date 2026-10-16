@@ -54,7 +54,7 @@ gaps rather than kernel defects.
 The recommendation is to bound those two knobs and leave the kernel alone. The
 per-cell RNG draw inside `advance_state_to` is itself the tape: skipping it, batching
 it, or substituting the closed-form n-step transition changes how many values
-come off the `ChaCha12Rng` and therefore every later draw, so no byte-preserving
+come off the cadence stream and therefore every later draw, so no byte-preserving
 O(1) jump-ahead exists and any rewrite spends the chart gate. Upper bounds cost
 nothing by comparison - they are admission changes that move no byte of any tape
 a bounded config produces - but refusing a config that works today is a product

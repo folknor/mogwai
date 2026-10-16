@@ -855,7 +855,8 @@ impl GeneratorScalars {
     /// Warns when the state rail sits close enough to `vol_scalar` to take part
     /// in ordinary operation rather than bounding pathology. The threshold is
     /// measured, not chosen: the clean process was observed reaching 57.2x its
-    /// unconditional scale over sixteen million updates, so a rail below
+    /// unconditional scale over the sixteen-million-update sizing run (see
+    /// `GARCH_SIGMA_CAP` for how that maximum varies by seed), so a rail below
     /// [`SIGMA_RAIL_HEADROOM_RATIO`] would clip the process's normal excursions.
     #[must_use]
     pub fn rail_diagnostics(&self) -> Vec<ScalarDiagnostic> {

@@ -43,16 +43,15 @@
 //! draw, the reporting stream owns the record splits, so reporting
 //! parameters cannot move a price.
 
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha12Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use super::fingerprint::ScalarError;
+use crate::TapeRng;
 pub use mogwai_protocol::ladder_level_units;
-use mogwai_protocol::seeds::splitmix64;
 
-/// Stream tag for the book mechanics rng: `xor`ed into the realization
-/// seed and mixed, the same derivation the cadence stream uses.
+/// Stream domain for the book mechanics rng: the realization's
+/// [`TapeRng`] in this domain, the same derivation the cadence stream uses.
 const BOOK_STREAM_TAG: u64 = 0x626F_6F6B_6479_6E31;
 /// Stream tag for the reporting rng.
 const REPORTING_STREAM_TAG: u64 = 0x7265_706F_7274_3161;
@@ -511,8 +510,8 @@ pub struct DiscreteBook {
     /// Whether the last settled parent's depletion was witnessed - the
     /// same-parent relaxation skip.
     witnessed: bool,
-    rng: ChaCha12Rng,
-    reporting_rng: ChaCha12Rng,
+    rng: TapeRng,
+    reporting_rng: TapeRng,
 }
 
 /// A struck side, as a direction on the tick grid: `+1` is the ask (a
@@ -545,8 +544,8 @@ impl DiscreteBook {
     /// realization seed under stable domain tags.
     #[must_use]
     pub fn new(seed: u64, anchor_ticks: f64, knobs: &BookPhaseKnobs) -> Self {
-        let mut rng = ChaCha12Rng::seed_from_u64(splitmix64(seed ^ BOOK_STREAM_TAG));
-        let reporting_rng = ChaCha12Rng::seed_from_u64(splitmix64(seed ^ REPORTING_STREAM_TAG));
+        let mut rng = TapeRng::new(seed, BOOK_STREAM_TAG);
+        let reporting_rng = TapeRng::new(seed, REPORTING_STREAM_TAG);
         let bid = (anchor_ticks - 1.0).round().max(1.0) as i64;
         let bid_units = replenish(&mut rng, knobs, 2);
         let ask_units = replenish(&mut rng, knobs, 2);
@@ -920,7 +919,7 @@ fn replenish_mean(knobs: &BookPhaseKnobs, spread: i64) -> f64 {
 
 /// A geometric draw on one and up with the given mean, by inverse
 /// transform: the smallest k with 1 - (1 - p)^k >= u.
-fn geometric(rng: &mut ChaCha12Rng, mean: f64) -> u64 {
+fn geometric(rng: &mut TapeRng, mean: f64) -> u64 {
     let p = 1.0 / mean.max(1.0);
     let u: f64 = rng.random();
     let k = ((1.0 - u).ln() / (1.0 - p).ln()).ceil();
@@ -935,7 +934,7 @@ fn geometric(rng: &mut ChaCha12Rng, mean: f64) -> u64 {
 /// This is the law behind a fresh queue, fitted so the simulated
 /// pre-trade touch distribution matches the observed one - which is
 /// size-biased by survival and must not be drawn from directly.
-fn replenish(rng: &mut ChaCha12Rng, knobs: &BookPhaseKnobs, spread: i64) -> u64 {
+fn replenish(rng: &mut TapeRng, knobs: &BookPhaseKnobs, spread: i64) -> u64 {
     geometric(rng, replenish_mean(knobs, spread))
 }
 

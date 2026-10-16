@@ -8,11 +8,10 @@ use std::time::Instant;
 
 use mogwai_data::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, ArrivalEnv, CadenceWalk, GeneratedSource,
-    ParentSummary, SizeGrid,
+    ParentSummary, SizeGrid, TapeRng,
 };
 use mogwai_venue::source::InstrumentProfile;
 use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha12Rng;
 use rand_distr::{Distribution, Exp, Exp1, Gamma, Poisson, StandardNormal};
 use serde::Serialize;
 use serde_json::Value;
@@ -279,7 +278,7 @@ enum State {
     ShotNoise { s: f64 },
 }
 
-fn initial_state(cell: &Cell, rng: &mut ChaCha12Rng) -> State {
+fn initial_state(cell: &Cell, rng: &mut TapeRng) -> State {
     match cell {
         Cell::EventMarkov { .. } => State::EventMarkov { quiet: false },
         Cell::WallMmpp { occupancy, .. } => State::WallMmpp {
@@ -391,7 +390,7 @@ fn transition(
     expected: f64,
     count: u64,
     dt_s: f64,
-    rng: &mut ChaCha12Rng,
+    rng: &mut TapeRng,
 ) {
     match (cell, state) {
         (Cell::EventMarkov { switch_rate }, State::EventMarkov { quiet }) => {
@@ -453,7 +452,7 @@ fn transition(
 }
 
 pub fn simulate_month(cell: &Cell, grid: &ExposureGrid, seed: u64) -> LabResult<MonthStats> {
-    let mut rng = ChaCha12Rng::seed_from_u64(seed);
+    let mut rng = TapeRng::seed_from_u64(seed);
     let mut state = initial_state(cell, &mut rng);
     let mut counts = [0_u64; 24];
     let mut exposure_s = [0.0_f64; 24];

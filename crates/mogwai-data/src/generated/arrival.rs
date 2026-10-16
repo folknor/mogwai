@@ -18,8 +18,7 @@
 
 use std::sync::Arc;
 
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha12Rng;
+use rand::RngExt;
 use rand_distr::{Distribution, Exp, Gamma, Poisson, StandardNormal};
 use serde::Deserialize;
 
@@ -30,7 +29,7 @@ use super::{
     fingerprint::{GeneratorScalars, SessionProfile},
     session::SessionModulator,
 };
-use mogwai_protocol::seeds::splitmix64;
+use crate::TapeRng;
 
 const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 
@@ -57,8 +56,10 @@ pub(super) fn cadence_base_mean_s(scalars: &GeneratorScalars) -> f64 {
 /// Identity of the cadence draw used by Stage A cache entries.
 ///
 /// Changes to `ArrivalKernel::next_parent`, a family's parameterization,
-/// `CADENCE_STREAM_TAG`, or cadence seed derivation must bump this value.
-pub const ARRIVAL_KERNEL_VERSION: u32 = 3;
+/// `CADENCE_STREAM_TAG`, the cadence stream's generator, or cadence seed
+/// derivation must bump this value. 4 moved the cadence stream from
+/// `ChaCha12Rng` to [`TapeRng`] (tape protocol 38).
+pub const ARRIVAL_KERNEL_VERSION: u32 = 4;
 
 /// The cadence half of a generated walk, assembled exactly as the generator
 /// assembles it and driven independently under neutral runtime modifiers.
@@ -67,7 +68,7 @@ pub struct CadenceWalk {
     state: ArrivalState,
     env: ArrivalEnv,
     shape: SweepShape,
-    rng: ChaCha12Rng,
+    rng: TapeRng,
     base_mean_s: f64,
     clock_ns: u64,
 }
@@ -77,7 +78,7 @@ pub struct CadenceParts {
     pub kernel: Option<ArrivalKernel>,
     pub state: Option<ArrivalState>,
     pub env: Option<ArrivalEnv>,
-    pub rng: Option<ChaCha12Rng>,
+    pub rng: Option<TapeRng>,
     pub base_mean_s: f64,
 }
 
@@ -142,8 +143,7 @@ impl CadenceWalk {
         step_ns: u64,
     ) -> CadenceParts {
         let kernel = scalars.arrival.and_then(ArrivalConfig::kernel);
-        let mut rng =
-            kernel.map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
+        let mut rng = kernel.map(|_| TapeRng::new(seed, CADENCE_STREAM_TAG));
         let state = kernel.as_ref().map(|kernel| {
             ArrivalState::new(
                 kernel,
@@ -624,13 +624,13 @@ impl SelfExcitingParams {
 }
 
 impl ShotNoiseParams {
-    fn stationary(self, rng: &mut ChaCha12Rng) -> f64 {
+    fn stationary(self, rng: &mut TapeRng) -> f64 {
         Gamma::new(self.k, self.m / self.k)
             .expect("validated shot-noise Gamma parameters")
             .sample(rng)
     }
 
-    fn transition(self, s: f64, dt_s: f64, rng: &mut ChaCha12Rng) -> f64 {
+    fn transition(self, s: f64, dt_s: f64, rng: &mut TapeRng) -> f64 {
         let decay = (-dt_s / self.tau_s).exp();
         let lambda = self.k / self.tau_s;
         let jumps = Poisson::new(lambda * dt_s)
@@ -684,7 +684,7 @@ pub enum ArrivalState {
 
 impl ArrivalState {
     #[must_use]
-    pub fn new(kernel: &ArrivalKernel, _origin_ns: u64, rng: &mut ChaCha12Rng) -> Self {
+    pub fn new(kernel: &ArrivalKernel, _origin_ns: u64, rng: &mut TapeRng) -> Self {
         let cell_index = 0;
         match *kernel {
             ArrivalKernel::WallMmpp(params) => Self::WallMmpp {
@@ -758,7 +758,7 @@ impl ArrivalKernel {
         shape: &SweepShape,
         env: &ArrivalEnv,
         modifiers: RuntimeModifiers,
-        rng: &mut ChaCha12Rng,
+        rng: &mut TapeRng,
     ) -> Result<ParentDraw, ArrivalRefusal> {
         let budget = -rng.random::<f64>().ln();
         let mut remaining = budget;
@@ -902,7 +902,7 @@ impl ArrivalKernel {
         env: &ArrivalEnv,
         base_mean_s: f64,
         rate_mult: f64,
-        rng: &mut ChaCha12Rng,
+        rng: &mut TapeRng,
         clock_ns: u64,
     ) -> Result<(), ArrivalRefusal> {
         let step_ns = env.step_ns;
@@ -1080,7 +1080,7 @@ mod tests {
             tau_s: 4.0,
         });
         let environment = env(None);
-        let mut rng = ChaCha12Rng::seed_from_u64(17);
+        let mut rng = TapeRng::seed_from_u64(17);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let mut quiet = 0_u64;
         for cell in 1..=500_000 {
@@ -1120,7 +1120,7 @@ mod tests {
             tau_s: 1.0,
         });
         let environment = env(None);
-        let mut rng = ChaCha12Rng::seed_from_u64(23);
+        let mut rng = TapeRng::seed_from_u64(23);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let mut sum = 0.0;
         let mut sum_sq = 0.0;
@@ -1153,7 +1153,7 @@ mod tests {
             tau_s: 8.0,
         });
         let environment = env(None);
-        let mut rng = ChaCha12Rng::seed_from_u64(29);
+        let mut rng = TapeRng::seed_from_u64(29);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let mut sum = 0.0;
         for cell in 1..=500_000 {
@@ -1234,7 +1234,7 @@ mod tests {
             },
         ];
         for (cell_index, params) in cells.into_iter().enumerate() {
-            let mut rng = ChaCha12Rng::seed_from_u64(0x51A7_0000 + cell_index as u64);
+            let mut rng = TapeRng::seed_from_u64(0x51A7_0000 + cell_index as u64);
             let stationary: Vec<f64> = (0..N).map(|_| params.stationary(&mut rng)).collect();
             assert_gamma_moments(&stationary, params, "stationary law");
 
@@ -1245,7 +1245,7 @@ mod tests {
             assert_gamma_moments(&transitioned, params, "transition preservation");
 
             for dt_s in [1.0, 0.25] {
-                let mut pair_rng = ChaCha12Rng::seed_from_u64(
+                let mut pair_rng = TapeRng::seed_from_u64(
                     0x510F_0000 + cell_index as u64 * 2 + u64::from(dt_s == 0.25),
                 );
                 let pre: Vec<f64> = (0..N).map(|_| params.stationary(&mut pair_rng)).collect();
@@ -1278,7 +1278,7 @@ mod tests {
             // `tau_s` and the slow one hundreds; the expensive cell is the
             // fast one, which draws `k / tau_s` jumps per step.
             let path_len = ((PATH_TAUS * params.tau_s) as usize).min(30 * DAY_SECONDS);
-            let mut path_rng = ChaCha12Rng::seed_from_u64(0x30DA_0000 + cell_index as u64);
+            let mut path_rng = TapeRng::seed_from_u64(0x30DA_0000 + cell_index as u64);
             let mut s = params.stationary(&mut path_rng);
             let mut x_sum = params.level(s);
             assert!(params.level(s) >= 1.0 - params.m);
@@ -1317,7 +1317,7 @@ mod tests {
             ..RuntimeModifiers::NEUTRAL
         };
         let shape = SweepShape::new(1.2, 0.9, 1.1);
-        let mut rng = ChaCha12Rng::seed_from_u64(0x5E1F_0001);
+        let mut rng = TapeRng::seed_from_u64(0x5E1F_0001);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let mut from = 0;
         let mut sum = 0.0;
@@ -1392,7 +1392,7 @@ mod tests {
             rate_ratio: 2.0,
             tau_s: 10.0,
         });
-        let mut rng = ChaCha12Rng::seed_from_u64(31);
+        let mut rng = TapeRng::seed_from_u64(31);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let shape = SweepShape::new(1.2, 0.9, 1.1);
         let mut from = 0;
@@ -1600,7 +1600,7 @@ mod tests {
         shape: SweepShape,
         /// The cadence stream as it stood immediately before `next_parent`
         /// ran, so a caller can replay the draws the kernel was about to make.
-        reference: ChaCha12Rng,
+        reference: TapeRng,
         environment: ArrivalEnv,
         from_ns: u64,
     }
@@ -1661,7 +1661,7 @@ mod tests {
         pending_reopen: Option<PendingReopen>,
     ) -> KernelRun {
         let environment = conformance_env(calendar, origin_ns, step_ns);
-        let mut rng = ChaCha12Rng::seed_from_u64(4242);
+        let mut rng = TapeRng::seed_from_u64(4242);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let shape = SweepShape::new(1.2, 0.9, 1.1);
         let reference = rng.clone();
@@ -1706,24 +1706,23 @@ mod tests {
 
     /// The shipped contract-A slot order, after checking the generator keeps
     /// it: since tape protocol 37 every legacy parent draws exactly one `u64`
-    /// per slot from the main stream - two 32-bit words - whatever branches
-    /// it takes. Checked parent by parent over a walk long enough to cross
-    /// both bounce regimes, both arrival states, both count branches, repeat
-    /// eligibility and multi-child sweeps, whose level steps no longer touch
-    /// the main stream.
+    /// per slot from the main stream, whatever branches it takes. Checked
+    /// parent by parent over a walk long enough to cross both bounce regimes,
+    /// both arrival states, both count branches, repeat eligibility and
+    /// multi-child sweeps, whose level steps no longer touch the main stream.
     fn shipped_contract_a_stages() -> Vec<String> {
         use super::super::draws::LEGACY_SLOTS;
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
         let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
-        let stride = 2 * LEGACY_SLOTS.len() as u128;
+        let stride = LEGACY_SLOTS.len() as u64;
         let mut multi_child = 0;
         for parent in 0..20_000 {
-            let before = generator.main_stream_words();
+            let before = generator.main_stream_position();
             let summary = generator.advance_parent().expect("an unbounded walk");
             multi_child += u32::from(summary.child_count > 1);
             assert_eq!(
-                generator.main_stream_words() - before,
+                generator.main_stream_position() - before,
                 stride,
                 "parent {parent} drew off the fixed stride"
             );
@@ -2272,9 +2271,7 @@ mod tests {
             assert_eq!(transcript.records.len(), 10_000);
 
             let kernel = transcript_kernel(&transcript.family, &transcript.params);
-            let mut cadence_rng = ChaCha12Rng::seed_from_u64(mogwai_protocol::seeds::splitmix64(
-                transcript.seed ^ 0x6D6F6777_61693132,
-            ));
+            let mut cadence_rng = TapeRng::new(transcript.seed, 0x6D6F6777_61693132);
             let mut state = ArrivalState::new(&kernel, transcript.origin_ns, &mut cadence_rng);
             let environment =
                 ArrivalEnv::for_profile(&fp.session_profile, None, 1.0, transcript.origin_ns);
@@ -2354,7 +2351,7 @@ mod tests {
         assert_eq!(transcript.params["phi"], 0.85);
         let fp = Fingerprint::from_repo_json();
         let kernel = transcript_kernel(&transcript.family, &transcript.params);
-        let mut rng = ChaCha12Rng::seed_from_u64(splitmix64(transcript.seed ^ CADENCE_STREAM_TAG));
+        let mut rng = TapeRng::new(transcript.seed, CADENCE_STREAM_TAG);
         let mut state = ArrivalState::new(&kernel, transcript.origin_ns, &mut rng);
         let environment =
             ArrivalEnv::for_profile(&fp.session_profile, None, 1.0, transcript.origin_ns);
@@ -2576,7 +2573,7 @@ mod tests {
             rate_ratio: 2.0,
             tau_s: 10.0,
         });
-        let mut rng = ChaCha12Rng::seed_from_u64(37);
+        let mut rng = TapeRng::seed_from_u64(37);
         let mut state = ArrivalState::new(&kernel, 0, &mut rng);
         let shape = SweepShape::new(1.2, 0.9, 1.1);
         // Friday 23:00 through Sunday 22:00, expressed as UTC minutes in the

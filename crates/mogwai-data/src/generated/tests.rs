@@ -1330,20 +1330,16 @@ fn clean_regime_is_byte_identical() {
     ];
 
     let expected = [
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.0, ask_px: 60000.1, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00336870, aggressor: Buyer, ts_event: 1651680 }))"#,
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.0, ask_px: 60000.1, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 4070702 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00300000, aggressor: Buyer, ts_event: 4070702 }))"#,
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.3, ask_px: 60000.4, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 6765079 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.4, size: 0.00200000, aggressor: Buyer, ts_event: 6765079 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 59999.6, ask_px: 59999.7, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1751811 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 59999.7, size: 0.00331448, aggressor: Buyer, ts_event: 1751811 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 59999.7, size: 0.00950284, aggressor: Buyer, ts_event: 1752811 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 59999.7, size: 0.00036870, aggressor: Buyer, ts_event: 1753811 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 59999.7, size: 0.00182305, aggressor: Buyer, ts_event: 1754811 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 59999.7, size: 0.00400000, aggressor: Buyer, ts_event: 1755811 }))"#,
     ];
-    // Re-blessed at tape protocol 37. The first parent's instant is the
-    // protocol 36 one: its gap reads the same first word through an open
-    // uniform that differs from the old one in the last bits, which rounds to
-    // the same nanosecond. Its price moved, because the innovation is now the
-    // fixed-word t(4); its child count moved, because the count's words sit
-    // at fixed slots. The sizes follow children 0, 1 and 2 as they did,
-    // because the size stream is untouched.
+    // Re-blessed at tape protocol 38, when every stream moved from ChaCha12
+    // to `TapeRng`: the first parent's instant, price, child count and sizes
+    // are all new draws.
     let actual: Vec<_> = (0..expected.len())
         .map(|_| format!("{:?}", src.next_tick()))
         .collect();
@@ -2253,23 +2249,24 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     // the next edit to either arm.
     //
     // Compared as values, not as text. Re-blessed at tape protocol 36, which
-    // replaced the sampler: these are the first twelve children of seed 42's
-    // size stream, so the first four are also the first parent's four sizes
-    // in `clean_regime_is_byte_identical`. The claim kept is that the spot
-    // grid moves no spot draw; the pre-grid values themselves are history.
+    // replaced the sampler, and at 38, which replaced the stream's generator:
+    // these are the first twelve children of seed 42's size stream, so the
+    // first five are also the first parent's five sizes in
+    // `clean_regime_is_byte_identical`. The claim kept is that the spot grid
+    // moves no spot draw; the pre-grid values themselves are history.
     const PRE_GRID_HEAD: [&str; 12] = [
-        "0.00336870",
-        "0.00300000",
-        "0.00200000",
-        "0.01494218",
-        "0.00110740",
-        "0.00904890",
-        "0.00085536",
-        "0.00130474",
-        "0.01272536",
-        "0.01969588",
-        "0.00228108",
-        "0.00551194",
+        "0.00331448",
+        "0.00950284",
+        "0.00036870",
+        "0.00182305",
+        "0.00400000",
+        "0.00584672",
+        "0.00074168",
+        "0.00852194",
+        "0.02261498",
+        "0.00100000",
+        "0.00451825",
+        "0.00100000",
     ];
     assert_eq!(default_draws, gridded_draws);
     let pre_grid: Vec<Decimal> = PRE_GRID_HEAD
@@ -2284,12 +2281,17 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
 }
 
 // A 2M-parent-event walk: see the heavy-walk cfg note at the top of this file.
-// Disabled on cost: in an unoptimized dev build the 2M parents' draws alone
-// take about 22 s, past the per-test watchdog before any measurement runs, and
-// the lag-50 autocorrelations need one continuous series, so the walk cannot
-// be split the way the dwell arms were.
+// It runs in every lane: about 8 s in an unoptimized dev build since tape 38's
+// `TapeRng`, where ChaCha12 had put its draws alone past the watchdog.
+//
+// It fails `abs_return_acf_lag10` at seed 42, and that is a finding about the
+// fit, not about the generator. The shipped BTCUSDT law sits above its own
+// lag-10 band: over 64 seeds the lag-10 mean is about 0.165 to 0.170 against
+// a 0.1565 ceiling, on ChaCha12 and `TapeRng` draws alike, with a heavy upper
+// tail of realizations. Seed 42 landed inside the band at tape 35 and 37 by
+// chance and above it at 36 and 38. The seed, the band and the assertion stay
+// as they are; the fix is owed to the fit.
 #[test]
-#[ignore = "debug-slow: a 2M-parent serial walk; its draws alone exceed the per-test watchdog in a dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn realism() {
     let fp = Fingerprint::from_repo_json();
@@ -2861,14 +2863,13 @@ fn assert_dwell_is_bounded(measured: &Dwell, scalars: &GeneratorScalars, fp: &Fi
 // `dow_weight` assertions below need several whole weeks to separate a weekend
 // from a weekday; halving the draw halves the span to two weeks, which does not
 // fail sooner, it passes on less evidence. The harness steps whole parents
-// and reads no record, so what is left is parent resolution itself.
-// Resolution itself still lays out every child record of a parent before
-// the helper drops them.
+// and reads no record, so what is left is parent resolution itself, which
+// resolves a placed sweep without laying its children out.
 //
 // A 15M-parent-event walk: see the heavy-walk cfg note at the top of this file.
 #[test]
 #[cfg(not(feature = "hotpath"))]
-#[ignore = "walks 15M parent events, about 30 simulated days, in 7.5 s; kept out of the fast lane, run by the full gate"]
+#[ignore = "walks 15M parent events, about 30 simulated days, in about 17 s in a dev build; kept out of the fast lane, run by the full gate"]
 fn session_modulation_reproduces_curves() {
     assert_eq!(utc_hour_dow(0), (0, 4));
     assert_eq!(utc_hour_dow(1_700_000_000_000_000_000), (22, 2));
@@ -4002,7 +4003,7 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
         vol.a1 = over.a1;
         vol.b1 = over.b1;
         vol.sigma2 = uncond;
-        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(seed);
+        let mut rng = crate::TapeRng::seed_from_u64(seed);
         let normal = Normal::new(0.0, 1.0).expect("valid normal");
         let chi_squared = ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared");
         for _ in 0..horizon {
@@ -4047,7 +4048,9 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // every entry there outlives the 20-second per-test hang watchdog. Measured on
 // 2026-08-18, one test per process in dev, it took 0.43 s, so the durable
 // numbers in `consts.rs` (a sigma reaching 57.2x its unconditional scale, a
-// largest clean return of 3.33e-3, an RMS of 1.2393e-5, all over 16M updates)
+// largest clean return of 3.33e-3, an RMS of 1.2393e-5, all over 16M ChaCha12
+// updates; the same seeds on tape 38's `TapeRng` read 21.3x, 1.09e-3 and
+// 1.1331e-5, one draw of a wide per-seed distribution - see `consts.rs`)
 // had rested on a test nothing had run since it was written, and both the
 // `#[ignore]` and the skip entry went. That dev build was optimized by the
 // owner's host-wide cargo configuration, not by anything in this repository;
@@ -5879,7 +5882,7 @@ fn run_garch_harness(vol_scalar: f64, burn_in: u64, total: u64, standardize: boo
     use rand_distr::{ChiSquared, Normal};
 
     let mut vol = super::dynamics::GarchVol::new(21_000.0, vol_scalar);
-    let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(42);
+    let mut rng = crate::TapeRng::seed_from_u64(42);
     let normal = Normal::new(0.0, 1.0).expect("valid normal");
     let chi_squared = ChiSquared::new(super::consts::STUDENT_T_DF).expect("valid chi-squared");
     let unit = super::consts::STUDENT_T_UNIT_SCALE;
@@ -6862,12 +6865,12 @@ fn a_bounce_parent_draws_a_fixed_main_stream_stride() {
         let mut src = fresh();
         let mut children = std::collections::BTreeSet::new();
         for parent in 0..10_000 {
-            let before = src.main_stream_words();
+            let before = src.main_stream_position();
             let summary = src.advance_parent().expect("an unbounded walk");
             children.insert(summary.child_count.min(6));
             assert_eq!(
-                src.main_stream_words() - before,
-                2 * slots as u128,
+                src.main_stream_position() - before,
+                slots as u64,
                 "{label} parent {parent}"
             );
         }
@@ -6881,9 +6884,8 @@ fn a_bounce_parent_draws_a_fixed_main_stream_stride() {
 /// The placed cascade's and the discrete book's records, hashed: the oracle
 /// in `mogwai-cli` covers only the crypto lineage, so this is what says a
 /// change to shared sweep code left the MNQ-shaped walks' bytes alone. Both
-/// were blessed at tape protocol 37, from a tree whose cascade path the 37
-/// rewrite had not touched, before the level-step sampler was made generic
-/// over its word source. A change that moves either re-blesses it knowingly.
+/// were re-blessed at tape protocol 38, which moved every stream from ChaCha12
+/// to `TapeRng`. A change that moves either re-blesses it knowingly.
 #[test]
 fn the_cascade_walks_hash_to_their_blessed_bytes() {
     let digest = |mut src: GeneratedSource| {
@@ -6916,7 +6918,7 @@ fn the_cascade_walks_hash_to_their_blessed_bytes() {
     let book = digest(cascade_mnq_source(7, BOOK_START_NS, true));
     assert_eq!(
         (placed.as_str(), book.as_str()),
-        ("7af79ba940809484", "2f55f0355cad8a9e")
+        ("21ac9c8df62c9642", "e7e7325fdedd5d52")
     );
 }
 

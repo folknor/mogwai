@@ -38,9 +38,10 @@
 use std::sync::Arc;
 
 use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, decimal_to_f64};
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha12Rng;
+use rand::RngExt;
 use rust_decimal::Decimal;
+
+use crate::TapeRng;
 
 use crate::record::{
     ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, SweepTrades, TradeRec,
@@ -83,6 +84,11 @@ use super::session::SessionModulator;
 /// overshoot bound and the plan buffer's high-water mark are both proved from
 /// it.
 pub const MAX_PARENT_RECORDS: usize = CHILD_CAP as usize + 2;
+
+/// The main stream's domain: every walk's feedback draws come from the
+/// river's [`TapeRng`] in this domain, beside the cadence, size, step, book
+/// and reporting domains, each at counter addresses of its own.
+const MAIN_STREAM_TAG: u64 = 0x6D61_696E_7374_7233;
 
 /// Everything about a river that is fixed once it is built: the config, the
 /// record scale, the compiled calendar and session tables, the cascade tables
@@ -138,10 +144,6 @@ struct PlacedSweep {
 /// then the fingerprint-fitted legacy clock - so the variant never changes
 /// after construction, and parent resolution dispatches on it once per parent.
 #[derive(Clone)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one walk per source, held inline; boxing would add an allocation to every snapshot clone to save bytes no collection multiplies"
-)]
 enum Walk {
     Legacy(LegacyWalk),
     Integrated(IntegratedWalk),
@@ -167,7 +169,7 @@ struct LegacyWalk {
 #[derive(Clone)]
 struct IntegratedWalk {
     state: ArrivalState,
-    cadence_rng: ChaCha12Rng,
+    cadence_rng: TapeRng,
     bounce: BounceState,
 }
 
@@ -190,13 +192,12 @@ struct BookWalk {
 /// its current state, so a clone taken at a parent boundary, advanced,
 /// reproduces the records after it byte-for-byte. The immutable half is one
 /// shared `RiverSpec`; what a clone copies is the walk state below, including
-/// the `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped `Clone`,
-/// which is why the generator holds `ChaCha12Rng` directly).
+/// the main stream's [`TapeRng`] position and cached block.
 #[derive(Clone)]
 pub struct GeneratedSource {
     spec: Arc<RiverSpec>,
     walk: Walk,
-    rng: ChaCha12Rng,
+    rng: TapeRng,
     /// The last instant the walk has reserved: after a parent resolves, the
     /// end of its reserved span - its last child on the placed paths, its
     /// post-trade slot on the discrete-book path. It is not the consumed
@@ -800,7 +801,7 @@ impl GeneratedSource {
             drift_dir: 1,
             drift_hot: false,
         };
-        let mut rng = ChaCha12Rng::seed_from_u64(seed);
+        let mut rng = TapeRng::new(seed, MAIN_STREAM_TAG);
         // The walk's mode, in `begin_event`'s old dispatch order. The
         // cascade's components start from their stationary law, which costs
         // main-stream draws only on a cascade source: a calendar-less source
@@ -1684,7 +1685,7 @@ impl GeneratedSource {
             self.clock_ns,
             self.reopen_frontier_ns,
             self.next_child,
-            self.rng.get_word_pos(),
+            self.rng.position(),
             self.vol.mid.to_bits(),
             self.vol.sigma2.to_bits(),
             self.vol.prev_return.to_bits(),
@@ -1692,10 +1693,10 @@ impl GeneratedSource {
         )
     }
 
-    /// The main stream's position in 32-bit words.
+    /// The main stream's position, in `u64` outputs.
     #[cfg(test)]
-    pub(super) fn main_stream_words(&self) -> u128 {
-        self.rng.get_word_pos()
+    pub(super) fn main_stream_position(&self) -> u64 {
+        self.rng.position()
     }
 
     /// Whether the walk is the discrete-book path, whose parents publish

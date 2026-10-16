@@ -6,8 +6,8 @@
 //! geometric gaps ([`LevelSteps`]), and the sizes, which never feed back and,
 //! for a river's fixed size law, are a pure function of the seed and a
 //! child's global index ([`SizeStream`]). Since protocol 37 the bounce walks'
-//! gaps are SplitMix64 words addressed by child index ([`StepStream`]); the
-//! cascade's are still drawn from its main stream.
+//! gaps are words addressed by child index ([`StepStream`]); the cascade's
+//! are still drawn from its main stream.
 //!
 //! The split is what lets a parent be skipped at the cost of its feedback
 //! draws alone. A skipped parent - a checkpoint extension, `advance_parent`,
@@ -21,19 +21,15 @@
 //! ([`LevelSteps::drain`]) and the sweep resolved from them without laying a
 //! child out ([`resolve_sweep`]).
 
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha12Rng;
+use crate::TapeRng;
 
-use mogwai_protocol::seeds::splitmix64;
-
-/// The size stream's domain tag: the stream is
-/// `ChaCha12Rng::seed_from_u64(splitmix64(seed ^ SIZE_STREAM_TAG))`.
+/// The size stream's [`TapeRng`] domain.
 const SIZE_STREAM_TAG: u64 = 0x7369_7A65_7331_3336;
 
-/// 32-bit words each child reads from the size stream: two `u64`, the size
-/// uniform and the snap uniform, always both, so child `i` starts at word
-/// `4 * i` whatever the snap probability.
-const WORDS_PER_CHILD: u128 = 4;
+/// Positions each child reads from the size stream: the size uniform and the
+/// snap uniform, always both, so child `i` starts at position `2 * i`
+/// whatever the snap probability.
+const POSITIONS_PER_CHILD: u64 = 2;
 
 /// A uniform strictly inside `(0, 1)` from one raw `u64`: the top 52 bits
 /// plus a half, scaled by 2^-52. The largest input lands on `1 - 2^-53`,
@@ -221,53 +217,38 @@ pub(super) fn resolve_sweep(
     unreachable!("a refused endpoint is a refused child of a monotone sweep")
 }
 
-/// The step stream's domain tag: its key is `splitmix64(seed ^ STEP_STREAM_TAG)`.
+/// The step stream's [`TapeRng`] domain.
 const STEP_STREAM_TAG: u64 = 0x7374_6570_7331_3337;
 
-/// SplitMix64's increment.
-const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
 /// The bounce walks' level-step gaps, addressed by child index (tape
-/// protocol 37) and computed rather than generated: the `j`-th gap of a
-/// sweep whose first child is `c0` is SplitMix64 at counter `c0 + j` from
-/// the river's step key - `splitmix64(key + (c0 + j) * gamma)`, the finalizer
-/// adding the gamma itself, which is exactly the SplitMix64 sequence seeded
-/// at `key` evaluated at step `c0 + j + 1`. A sweep of `n` children has
-/// `n - 1` trials and draws at most one gap per trial, so its counters stay
-/// inside the `[c0, c0 + n)` range its children reserve, and no two parents
-/// of one trajectory share a counter. Only the gaps read are computed: a
-/// buffered stream positioned per parent spent most of its output on
-/// reserved words no parent read.
+/// protocol 37): the `j`-th gap of a sweep whose first child is `c0` is the
+/// river's step-domain output at position `c0 + j`. A sweep of `n` children
+/// has `n - 1` trials and draws at most one gap per trial, so its positions
+/// stay inside the `[c0, c0 + n)` range its children reserve, and no two
+/// parents of one trajectory share a position. Only the gaps read are
+/// computed, at most a block apiece.
 ///
 /// The gaps still feed back - the final level re-centres the drift and is the
 /// repeat branch's price - so every parent drains them in turn; what the
 /// stream buys is a main stream that takes the same number of draws from
 /// every parent.
-///
-/// SplitMix64 passes BigCrush over consecutive counters, which is the use
-/// here. Its keys are not independent streams, though: every key selects a
-/// rotation of one full-period sequence, so two rivers' step words coincide
-/// at some offset. Nothing reads two rivers' steps against each other.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct StepStream {
-    key: u64,
+    rng: TapeRng,
 }
 
 impl StepStream {
     pub(super) fn new(seed: u64) -> Self {
         Self {
-            key: splitmix64(seed ^ STEP_STREAM_TAG),
+            rng: TapeRng::new(seed, STEP_STREAM_TAG),
         }
     }
 
     /// The words of the sweep whose first child is `first`, in order.
-    pub(super) fn from(self, first: u64) -> impl FnMut() -> u64 {
-        let mut counter = first;
-        move || {
-            let word = splitmix64(self.key.wrapping_add(counter.wrapping_mul(SPLITMIX_GAMMA)));
-            counter = counter.wrapping_add(1);
-            word
-        }
+    pub(super) fn from(&self, first: u64) -> impl FnMut() -> u64 + use<> {
+        let mut rng = self.rng.clone();
+        rng.seek(first);
+        move || rng.next_word()
     }
 }
 
@@ -287,7 +268,7 @@ pub(super) struct SizeDraw {
 /// so a fraction of zero never snaps and one always does.
 #[derive(Clone)]
 pub(super) struct SizeStream {
-    rng: ChaCha12Rng,
+    rng: TapeRng,
     mu: f64,
     sigma: f64,
     snap_frac: f64,
@@ -296,7 +277,7 @@ pub(super) struct SizeStream {
 impl SizeStream {
     pub(super) fn new(seed: u64, median: f64, sigma: f64, snap_frac: f64) -> Self {
         Self {
-            rng: ChaCha12Rng::seed_from_u64(splitmix64(seed ^ SIZE_STREAM_TAG)),
+            rng: TapeRng::new(seed, SIZE_STREAM_TAG),
             mu: median.ln(),
             sigma,
             snap_frac,
@@ -304,22 +285,21 @@ impl SizeStream {
     }
 
     /// Position the stream at child `first`; the following `draw` calls
-    /// return that child's size and its successors' in order. A stream
-    /// already there is left alone: repositioning regenerates the cipher's
-    /// whole buffer, which for a reader decorating consecutive parents would
-    /// cost a buffer per parent rather than per few dozen children.
+    /// return that child's size and its successors' in order. Refuses a child
+    /// index whose positions the stream cannot address, rather than wrapping
+    /// onto another child's draw.
     pub(super) fn seek(&mut self, first: u64) {
-        let word = u128::from(first) * WORDS_PER_CHILD;
-        if self.rng.get_word_pos() != word {
-            self.rng.set_word_pos(word);
-        }
+        let position = first
+            .checked_mul(POSITIONS_PER_CHILD)
+            .expect("a child index past the size stream's position space");
+        self.rng.seek(position);
     }
 
     /// The next child's size draw.
     pub(super) fn draw(&mut self) -> SizeDraw {
-        let z = normal_quantile(open_unit(self.rng.random::<u64>()));
+        let z = normal_quantile(open_unit(self.rng.next_word()));
         let base = (self.mu + self.sigma * z).exp().max(f64::MIN_POSITIVE);
-        let lot_snap = half_open_unit(self.rng.random::<u64>()) < self.snap_frac;
+        let lot_snap = half_open_unit(self.rng.next_word()) < self.snap_frac;
         SizeDraw { base, lot_snap }
     }
 }
@@ -456,15 +436,15 @@ mod tests {
     #[test]
     fn level_steps_draw_nothing_at_the_degenerate_ends() {
         for (p, count, steps) in [(0.0, 9, 0), (1.0, 9, 8), (0.3, 1, 0), (0.3, 0, 0)] {
-            let mut rng = ChaCha12Rng::seed_from_u64(7);
+            let mut rng = TapeRng::new(7, 0);
             let untouched = rng.clone();
             let taken = {
-                let mut word = || rng.random::<u64>();
+                let mut word = || rng.next_word();
                 let mut level = LevelSteps::new(p, count, &mut word);
                 (0..count).filter(|&c| level.steps_at(c, &mut word)).count()
             };
             assert_eq!(taken, steps, "p {p} count {count}");
-            assert_eq!(rng.get_word_pos(), untouched.get_word_pos(), "p {p}");
+            assert_eq!(rng.position(), untouched.position(), "p {p}");
         }
     }
 
@@ -473,11 +453,11 @@ mod tests {
     #[test]
     fn level_steps_draw_once_per_step_plus_the_terminal_gap() {
         for seed in 0..2_000 {
-            let mut rng = ChaCha12Rng::seed_from_u64(seed);
-            let start = rng.get_word_pos();
+            let mut rng = TapeRng::new(seed, 0);
+            let start = rng.position();
             let count = 1 + (seed % 12) as u32;
             let stepped: Vec<u32> = {
-                let mut word = || rng.random::<u64>();
+                let mut word = || rng.next_word();
                 let mut level = LevelSteps::new(0.37, count, &mut word);
                 (0..count)
                     .filter(|&c| level.steps_at(c, &mut word))
@@ -487,9 +467,9 @@ mod tests {
             let draws = if count == 1 {
                 0
             } else {
-                stepped.len() as u128 + u128::from(!last_stepped)
+                stepped.len() as u64 + u64::from(!last_stepped)
             };
-            assert_eq!(rng.get_word_pos() - start, 2 * draws, "seed {seed}");
+            assert_eq!(rng.position() - start, draws, "seed {seed}");
             assert!(stepped.iter().all(|&c| c > 0 && c < count));
         }
     }
@@ -502,9 +482,9 @@ mod tests {
     #[test]
     fn draining_steps_is_asking_every_child() {
         let walk = |p: f64, count: u32, seed: u64, drain: bool| {
-            let mut rng = ChaCha12Rng::seed_from_u64(seed);
+            let mut rng = TapeRng::new(seed, 0);
             let stepped: Vec<u32> = {
-                let mut word = || rng.random::<u64>();
+                let mut word = || rng.next_word();
                 let mut steps = LevelSteps::new(p, count, &mut word);
                 if drain {
                     let mut out = Vec::new();
@@ -516,7 +496,7 @@ mod tests {
                         .collect()
                 }
             };
-            (stepped, rng.get_word_pos(), rng.random::<u64>())
+            (stepped, rng.position(), rng.next_word())
         };
         let mut last_trial = false;
         let mut overshoot = false;
@@ -668,24 +648,14 @@ mod tests {
         assert!(placed > 0 && first > 0 && mid > 0 && last > 0);
     }
 
-    /// The step stream is SplitMix64 at a counter: its words are the
-    /// reference sequence's, by index, and a parent's words do not depend on
-    /// where any other parent's were read.
+    /// The step stream is the river's step domain read by child index: its
+    /// words are that domain's sequence, by position, and a parent's words do
+    /// not depend on where any other parent's were read.
     #[test]
-    fn step_words_are_splitmix_by_child_index() {
+    fn step_words_are_the_step_domain_by_child_index() {
         let stream = StepStream::new(5);
-        let key = splitmix64(5 ^ STEP_STREAM_TAG);
-        // The reference SplitMix64 generator: add gamma, then mix.
-        let mut state = key;
-        let reference: Vec<u64> = (0..64)
-            .map(|_| {
-                state = state.wrapping_add(SPLITMIX_GAMMA);
-                let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^ (z >> 31)
-            })
-            .collect();
+        let mut sequential = TapeRng::new(5, STEP_STREAM_TAG);
+        let reference: Vec<u64> = (0..64).map(|_| sequential.next_word()).collect();
         let mut from_zero = stream.from(0);
         let run: Vec<u64> = (0..64).map(|_| from_zero()).collect();
         assert_eq!(run, reference);

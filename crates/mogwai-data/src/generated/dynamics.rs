@@ -9,9 +9,9 @@
 //! meaningful on its own - each is a small piece of state plus the update the
 //! walk drives it with.
 
+use crate::TapeRng;
 use mogwai_protocol::AggressorSide;
 use rand::RngExt;
-use rand_chacha::ChaCha12Rng;
 
 use super::draws::coin;
 
@@ -84,7 +84,7 @@ impl SweepShape {
     /// `truncated` counts draws clipped by `CHILD_CAP`, because a clipped draw
     /// is indistinguishable from one that legitimately landed on the cap once it
     /// has been clipped, and the realism gate asserts a truncation fraction.
-    pub(super) fn next_count(&mut self, rng: &mut ChaCha12Rng) -> u32 {
+    pub(super) fn next_count(&mut self, rng: &mut TapeRng) -> u32 {
         self.drawn += 1;
         if rng.random::<f64>() < self.q {
             return 1;
@@ -107,7 +107,7 @@ impl SweepShape {
     /// Draws the same mixture after an arrival-side child multiplier. The
     /// kernel owns a cloned shape, so its accounting is intentionally separate
     /// from the generated source's diagnostics.
-    pub(super) fn next_count_scaled(&self, multiplier: f64, rng: &mut ChaCha12Rng) -> u32 {
+    pub(super) fn next_count_scaled(&self, multiplier: f64, rng: &mut TapeRng) -> u32 {
         let children_mean = self.q + (1.0 - self.q) * self.m;
         let single_frac = self.q + (1.0 - self.q) / self.m;
         let mut scaled = Self::new(children_mean * multiplier, single_frac, 1.0);
@@ -224,7 +224,7 @@ impl GarchVol {
 /// second-moment instrumentation can demonstrate the unstandardized variance
 /// against the standardized one using the same shipped draw.
 pub(super) fn draw_student_t(
-    rng: &mut ChaCha12Rng,
+    rng: &mut TapeRng,
     normal: &rand_distr::Normal<f64>,
     chi_squared: &rand_distr::ChiSquared<f64>,
 ) -> f64 {

@@ -42,9 +42,9 @@
 //! This harness arms no divergence, so an order that rests fills completely
 //! when it fills. It can still leave a remainder: under the band, an order can
 //! take a partial fill on arrival and rest the rest, which then fills under a
-//! redrawn band. The tape at protocol 37 does this once, so the artifact
-//! covers that path too; the counting above is what keeps such an order from
-//! being two samples.
+//! redrawn band. A tape can do this to an order in this population - the one
+//! blessed at protocol 37 did, once - and the counting above is what keeps
+//! such an order from being two samples.
 //!
 //! Where the band comes from: nothing hands this harness a `MarketReading`,
 //! because it never goes through the HTTP submit path, so it takes one itself

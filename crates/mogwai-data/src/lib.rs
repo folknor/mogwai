@@ -43,6 +43,7 @@ mod bars;
 mod generated;
 mod record;
 pub mod segment;
+mod tape_rng;
 mod trigger;
 
 // This library carries no `hotpath` annotation: the dependency exists for the
@@ -84,6 +85,7 @@ pub use record::{
     QuoteRec, Record, RecordScale, RiverSource, Round, ScaleError, SweepTrades, TradeRec,
     UnsizedParentView, UnsizedRecord, record_from_event,
 };
+pub use tape_rng::{TapeRng, UNTAGGED_DOMAIN, philox4x32_10};
 pub use trigger::{
     BookState, FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk,
     book_reading, market_snapshot_reading, scan_triggers, vol_reading, vol_reading_from_trades,
@@ -259,7 +261,17 @@ pub use trigger::{
 /// stream for a stream addressed by child index. Every legacy tape moves -
 /// BTCUSDT and NVDA - and every integrated one; the cascade presets, MNQ and
 /// MES, are byte-identical.
-pub const TAPE_PROTOCOL_VERSION: u32 = 37;
+/// 38 moves every generated-tape stream - the main stream, the integrated
+/// cadence stream, the sizes, the level steps, the discrete book and its
+/// reporting splits - from `ChaCha12Rng` and the step stream's SplitMix64 to
+/// [`TapeRng`], Philox4x32-10 keyed by the river and addressed by a stream
+/// domain and a position. In an unoptimized build ChaCha12 cost about 300 ns
+/// per word, most of a parent's cost; Philox has no buffer to regenerate on
+/// a seek, and its domains sit at disjoint counter addresses rather than at
+/// random rotations of one sequence. Every generated tape moves, cascade
+/// presets included; the session-segment composer keeps its ChaCha stream
+/// and does not move.
+pub const TAPE_PROTOCOL_VERSION: u32 = 38;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

@@ -200,18 +200,24 @@ pub(super) const CHILD_CAP: u32 = 4_096;
 //                              it never scales with a regime either, which is
 //                              the whole point of naming it separately.
 //
-/// Bounds the GARCH state. Sized from a measured tail rather than chosen: over
-/// eight seeds by two million clean updates the recursion's sigma reached 57.2x
-/// its unconditional scale, so this sits above that at roughly 83x `VOL_SCALAR`
-/// and does not participate in calibration. Not "never hit" - the standardized
-/// t(4) still has infinite kurtosis, so the running maximum grows with the
-/// horizon. The honest statement is that no participation was observed over the 16M
-/// calibration sample. See `shipped_garch_rails_sit_above_the_clean_tail`,
-/// which is the measurement and runs on every lane.
+/// Bounds the GARCH state. Sized from a measured tail rather than chosen: when
+/// it was sized, on the ChaCha12 draws of tape protocols up to 37, eight seeds
+/// by two million clean updates took the recursion's sigma to 57.2x its
+/// unconditional scale, so this sits above that at roughly 83x `VOL_SCALAR`
+/// and does not participate in calibration. The per-seed maximum is itself
+/// heavy-tailed: on the `TapeRng` draws of protocol 38 the same eight seeds
+/// reach only 21.3x, while 64 seeds of each generator spread their maxima from
+/// about 7x to 57x (ChaCha12) and 65x (`TapeRng`) with the same mean RMS, so
+/// the eight-seed figure is one draw of a wide distribution, not a property of
+/// either generator. Not "never hit" - the standardized t(4) still has
+/// infinite kurtosis, so the running maximum grows with the horizon. See
+/// `shipped_garch_rails_sit_above_the_clean_tail`, which is the measurement,
+/// asserts on every step that this cap is not reached, and runs on every lane.
 pub(super) const GARCH_SIGMA_CAP: f64 = 1e-3;
 /// Bounds the clean feedback return. Same sizing run: the largest clean
-/// |return| observed over 16M updates was 3.33e-3, so this sits just above it
-/// and shapes nothing in ordinary operation.
+/// |return| observed over 16M ChaCha12 updates was 3.33e-3 (1.09e-3 on the
+/// same seeds' `TapeRng` draws), so this sits above it and shapes nothing in
+/// ordinary operation.
 pub(super) const FEEDBACK_RETURN_CEILING: f64 = 4e-3;
 /// Absolute ceiling on the realized log return, applied after the session and
 /// regime envelopes and never scaled by either.
@@ -233,7 +239,9 @@ pub(super) const FEEDBACK_RETURN_CEILING: f64 = 4e-3;
 pub(super) const REALIZED_RETURN_CEILING: f64 = 5e-2;
 /// A sigma rail below this multiple of `vol_scalar` would participate in
 /// ordinary calibration rather than bounding pathology, because the clean
-/// process was measured reaching 57.2x. Diagnosed, not enforced: a hard
+/// process was measured reaching 57.2x over the eight-seed sizing run (and one
+/// of 64 `TapeRng` seeds reaches 65x, so this is a floor on the evidence, not a
+/// ceiling on the process). Diagnosed, not enforced: a hard
 /// universal ratio gate would repeat the `scalar_ranges` mistake in another
 /// dimension, denying a legitimately higher-scale instrument.
 pub(super) const SIGMA_RAIL_HEADROOM_RATIO: f64 = 60.0;

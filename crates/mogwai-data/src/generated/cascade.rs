@@ -76,9 +76,9 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use crate::TapeRng;
 use mogwai_protocol::AggressorSide;
 use rand::RngExt;
-use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, Normal, Poisson};
 use serde::Deserialize;
 
@@ -569,8 +569,8 @@ pub(super) struct CascadeState {
 }
 
 impl CascadeState {
-    pub(super) fn new(tables: &CascadeTables, rng: &mut ChaCha12Rng, start_ts: u64) -> Self {
-        let draw = |rng: &mut ChaCha12Rng, n: usize| -> Vec<f64> {
+    pub(super) fn new(tables: &CascadeTables, rng: &mut TapeRng, start_ts: u64) -> Self {
+        let draw = |rng: &mut TapeRng, n: usize| -> Vec<f64> {
             (0..n).map(|_| tables.normal.sample(rng)).collect()
         };
         let texture = draw(rng, tables.texture_tau_s.len());
@@ -640,7 +640,7 @@ impl CascadeState {
         }
     }
 
-    fn step_components(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng, elapsed_s: f64) {
+    fn step_components(&mut self, tables: &CascadeTables, rng: &mut TapeRng, elapsed_s: f64) {
         let coefficients = |tau: f64| ar1_coefficients(elapsed_s, tau);
         for (y, tau) in self.texture.iter_mut().zip(&tables.texture_tau_s) {
             *y = ar1_step(*y, coefficients(*tau), tables, rng);
@@ -658,7 +658,7 @@ impl CascadeState {
     /// `step_components(.., 1.0)` over the coefficients the tables solved
     /// once for a one-second step, which is every step but a closure's.
     /// Draw order and arithmetic are the general step's.
-    fn step_components_one_second(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng) {
+    fn step_components_one_second(&mut self, tables: &CascadeTables, rng: &mut TapeRng) {
         let one = &tables.one_second;
         for (y, c) in self.texture.iter_mut().zip(&one.texture) {
             *y = ar1_step(*y, *c, tables, rng);
@@ -710,7 +710,7 @@ impl CascadeState {
     pub(super) fn fill_next_bucket(
         &mut self,
         tables: &CascadeTables,
-        rng: &mut ChaCha12Rng,
+        rng: &mut TapeRng,
         clock_ns: u64,
         modifiers: SecondModifiers,
     ) -> Result<(), CascadeRefusal> {
@@ -824,7 +824,7 @@ impl CascadeState {
     /// The next immigrant's instant inside the current second, staged so a
     /// child landing earlier can print first without disturbing the order
     /// statistics that place the immigrants.
-    fn stage_immigrant(&mut self, rng: &mut ChaCha12Rng) -> Option<u64> {
+    fn stage_immigrant(&mut self, rng: &mut TapeRng) -> Option<u64> {
         if self.staged_immigrant_ns.is_none() && self.remaining > 0 {
             // Sequential order statistics: with n parents left in the
             // window, the next lands after a fraction 1 - u^(1/n) of what
@@ -844,7 +844,7 @@ impl CascadeState {
     /// Spawn the children a parent at `ts_ns` owes: Poisson(`n_j`) per
     /// kernel at exponential offsets. Children past the heap ceiling are
     /// dropped, which only a runaway kernel reaches.
-    fn spawn_children(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng, ts_ns: u64) {
+    fn spawn_children(&mut self, tables: &CascadeTables, rng: &mut TapeRng, ts_ns: u64) {
         let config = &tables.config;
         for (ratio, tau) in config.excitation_ratio.iter().zip(&config.excitation_tau_s) {
             let count = poisson(rng, *ratio);
@@ -877,7 +877,7 @@ impl CascadeState {
     }
 
     /// The parent's aggressor side under the order-splitting model.
-    fn draw_side(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng) -> AggressorSide {
+    fn draw_side(&mut self, tables: &CascadeTables, rng: &mut TapeRng) -> AggressorSide {
         let config = &tables.config;
         if config.sign_repeat > 0.0 && rng.random_bool(config.sign_repeat) {
             return self.last_side;
@@ -897,7 +897,7 @@ impl CascadeState {
     pub(super) fn draw_parent(
         &mut self,
         tables: &CascadeTables,
-        rng: &mut ChaCha12Rng,
+        rng: &mut TapeRng,
         clock_ns: u64,
     ) -> CascadeParent {
         debug_assert!(self.has_parent(), "draw_parent needs a filled bucket");
@@ -968,7 +968,7 @@ fn ar1_step(
     y: f64,
     (rho, innovation_scale): (f64, f64),
     tables: &CascadeTables,
-    rng: &mut ChaCha12Rng,
+    rng: &mut TapeRng,
 ) -> f64 {
     rho * y + innovation_scale * tables.normal.sample(rng)
 }
@@ -981,7 +981,7 @@ fn sign_of(side: AggressorSide) -> f64 {
     }
 }
 
-fn random_side(rng: &mut ChaCha12Rng) -> AggressorSide {
+fn random_side(rng: &mut TapeRng) -> AggressorSide {
     if rng.random_bool(0.5) {
         AggressorSide::Buyer
     } else {
@@ -990,13 +990,13 @@ fn random_side(rng: &mut ChaCha12Rng) -> AggressorSide {
 }
 
 /// A metaorder's print count: discrete Pareto, `P(L >= l) = l^-alpha`.
-fn metaorder_prints(rng: &mut ChaCha12Rng, alpha: f64) -> u32 {
+fn metaorder_prints(rng: &mut TapeRng, alpha: f64) -> u32 {
     let u: f64 = rng.random();
     let draw = (1.0 - u).powf(-1.0 / alpha).floor();
     draw.clamp(1.0, MAX_METAORDER_PRINTS) as u32
 }
 
-fn poisson(rng: &mut ChaCha12Rng, lambda: f64) -> u32 {
+fn poisson(rng: &mut TapeRng, lambda: f64) -> u32 {
     if !lambda.is_finite() || lambda <= 0.0 {
         return 0;
     }
@@ -1146,7 +1146,7 @@ mod tests {
         config.gap_log_clamp_sd = 1.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(&config, &calendar, 0.08).unwrap();
-        let mut rng = ChaCha12Rng::seed_from_u64(7);
+        let mut rng = TapeRng::seed_from_u64(7);
         // Thursday 1970-01-01 is local day 4. Start ten seconds before the
         // Thursday 16:00 close so parents certainly land before it (a
         // single second can draw an empty count under a low texture) and
@@ -1197,7 +1197,7 @@ mod tests {
     fn walk(config: &CascadeConfig, seed: u64, start: u64, end: u64) -> Vec<CascadeParent> {
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(config, &calendar, 0.08).unwrap();
-        let mut rng = ChaCha12Rng::seed_from_u64(seed);
+        let mut rng = TapeRng::seed_from_u64(seed);
         let mut state = CascadeState::new(&tables, &mut rng, start);
         let modifiers = SecondModifiers {
             rate_mult: 1.0,
@@ -1374,7 +1374,7 @@ mod tests {
         config.sigma_level_log_sd = 0.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(&config, &calendar, 0.08).unwrap();
-        let mut rng = ChaCha12Rng::seed_from_u64(3);
+        let mut rng = TapeRng::seed_from_u64(3);
         let start = 1_020 * NS_PER_MINUTE;
         let end = start + 600 * NS_PER_MINUTE;
         let mut state = CascadeState::new(&tables, &mut rng, start);

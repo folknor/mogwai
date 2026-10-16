@@ -1713,7 +1713,6 @@ dependencies = [
  "mogwai-venue",
  "nix",
  "rand 0.10.3",
- "rand_chacha 0.10.0",
  "rand_distr",
  "rust_decimal",
  "serde",

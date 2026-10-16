@@ -117,9 +117,8 @@ Found on the way, open:
 - The corrected-curve arm cannot run. The MNQ preset's calendar carries an
   activity envelope, and profile resolution refuses a `session.intensity_hour`
   override as inert, so `mogwai arrival-control` stops at the first test
-  seed. Pinned by `the_corrected_curve_is_refused_under_the_shipped_envelope`
-  and recorded in `docs/cli.md`. What the control should re-centre under an
-  envelope needs an owner ruling.
+  seed. Recorded in `docs/cli.md` and filed in `notes/todo.md`. What the
+  control should re-centre under an envelope needs an owner ruling.
 - The same refusal makes `arrival_control_refuses_a_tree_that_changed_during_the_run`
   (`mogwai-cli`) fail with the wrong refusal: its mid-run hook sits after
   the test walks it can no longer reach. Not run here (it needs a clean
@@ -362,22 +361,84 @@ enable, below. Still open:
   bitwise with `libm`'s, so this is another bump; `student_t4`'s expression
   is fixed in the code so the transform can be matched or knowingly
   re-blessed.
-- A cheaper main-stream generator (ChaCha8, or a counter-based one like the
-  step stream) would halve the 26 ns of draws; another bump.
+- A cheaper main-stream generator: landed as priority 4b below, for the
+  dev-build cost rather than the release one.
 - Parallel size decoration for `realism`.
 - The cascade's fixed-draw core: its t draw has configurable degrees of
   freedom, so it needs the gamma path for odd ones.
 
+## Priority 4b. One counter-based generator for every tape stream (landed)
+
+Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 38
+and `ARRIVAL_KERNEL_VERSION` 4. Sparred with codex to consensus, audited by a
+fresh session afterwards.
+
+Why. Measured in a dev build: 24M `ChaCha12Rng` words took 7.3 s, about
+300 ns per word, and 1M legacy parents through `advance_parent` 4.15 s. At
+twelve main-stream words per parent the cipher was about 3.6 of the 4.15
+microseconds, and that is what kept `realism` and
+`session_modulation_reproduces_curves` past the 20 s watchdog. `opt-level`
+is ruled out, so the generator had to get cheaper.
+
+What it is now. `mogwai_data::TapeRng` (`crates/mogwai-data/src/tape_rng.rs`):
+Philox4x32-10, the published Random123 constants, pinned by their
+known-answer vectors. Key: `splitmix64(river seed)`. Counter: block in the
+low half, a stream domain in the high half, so one river's streams sit at
+disjoint counter addresses. One `u64` per position, two per block, the last
+block cached by address. Every generated stream moved to it: main, cadence,
+size (position `2 * child`), step (position = child index), book, reporting,
+and the lab envelope simulator. The session-segment composer and the
+engine's fill-band ChaCha8 did not move.
+
+SplitMix64 in counter mode was proposed first and refused in the spar: every
+key is a rotation of one sequence, and a slot read at stride 12 is SplitMix
+with gamma `12 * gamma`, outside its published evidence.
+
+Re-blessed: the five arrival transcripts (`regenerate_arrival_transcript` now
+regenerates all five from their own headers), `clean_regime_is_byte_identical`,
+the size-stream head, the cascade hashes, the stage-A manifest (version
+fields and digest only, no cell moved), the fill golden and the tape oracle.
+
+Measured, dev, one test alone:
+
+| Test | Before | After |
+|---|---|---|
+| `realism` | 24.0 s | 8.4 s |
+| `session_modulation_reproduces_curves` | 65.1 s | 17.0 s |
+| `session_edge_spike_lifts_realized_clamp` | 9.0 s | 2.4 s |
+| `parent_helpers_match_the_record_readers` | not recorded | 3.4 s |
+
+Statistical validation. The realism statistics were surveyed over 64 seeds,
+against a ChaCha-backed arm of the same code. Seeds 32 to 63 agree to the
+third decimal (lag-10 abs ACF 0.1646 against 0.1645, lag-50 0.1135 against
+0.1139). Seeds 0 to 31 read higher on Philox (0.1758) because a few
+realizations land extreme. A main-stream-only ChaCha arm reproduced the
+all-ChaCha arm seed for seed, so each seed's statistic is decided by its
+main-stream realization, and the per-seed distribution is heavy-tailed. The
+t(4) innovation tails and |t| autocorrelations of the two generators agree
+within noise over 20M parents. The GARCH rail-sizing tail was compared the
+same way over 64 seeds: mean RMS 1.1736e-5 against 1.1745e-5, per-seed sigma
+maxima from about 7x to 65x against 7x to 57x. The eight-seed sizing run
+reads 21.3x where ChaCha read 57.2x, one draw of that distribution;
+`consts.rs` now says so.
+
+Consequences:
+
+- `realism` lost its `debug-slow` ignore, whose reason was now false, and
+  runs in every lane. It is red at seed 42 on `abs_return_acf_lag10`
+  (0.186), the long-known fit miss, now filed in `notes/todo.md`. So the plain
+  `brokkr check` is red on that one test until the fit moves.
+- `session_modulation_reproduces_curves` keeps its cost ignore, with the
+  dev wall corrected to about 17 s.
+- `opt-level = 3` was deleted from `[profile.release]`: it was the default,
+  so the build is unchanged, and the line contradicted the owner ruling.
+
 Found on the way, open:
 
-- `session_modulation_reproduces_curves` takes 64 s in an unoptimized dev
-  build against the 7.5 s its comment records, which dates from when the
-  owner's host-wide cargo configuration optimized dev builds. Dev parent
-  resolution runs about 4 to 4.5 microseconds per parent today, before and
-  after this change, so the gate has likely been past the watchdog under
-  `--gate` since that configuration changed. A per-package dev `opt-level`
-  for `mogwai-data` would bring every heavy walk back under it; that is a
-  build-configuration call for the owner.
+- The rail-sizing harness and the second-moment harness still draw the old
+  ziggurat-plus-gamma t(4) through `draw_student_t`, not the fixed-word
+  `student_t4` the bounce walks ship. Same law, different sampler; worth
+  aligning when that harness is next touched.
 
 The reports' original framing, kept for the open items:
 
@@ -551,14 +612,6 @@ site rather than land them alone.
 - One parent-block producer feeding sinks as the runner for every lab walk:
   `arrival_screen`, `arrival_envelope`, the fit driver and `gen --type summary`
   (report B).
-- Multi-seed `realism` (report B, needs an owner ruling): K arms of `DRAW/K`,
-  each reporting mergeable sufficient statistics. Report B holds that the
-  comment's "lag-50 autocorrelations need one continuous series" does not
-  hold statistically - segments of 250k parents against a GARCH half-life of
-  about 700 parents pool to essentially the same estimator - and that what is
-  actually tied to the single seed-42 draw is `ARRIVAL_MEAN_CAL`'s provenance.
-  Report A holds that lag 50 requires one continuous realization. Both
-  positions stand until measured.
 - Instruments built on many independent seeds (the dwell arms, rail sizing,
   envelope cells) running seeds in SIMD lanes (report B).
 
@@ -643,6 +696,15 @@ simulation.
 Each carries an ignore reason beginning `debug-slow:`, so
 `git grep -n "debug-slow:"` lists them; `brokkr check --gate` still runs
 them. Walls are one test alone in a dev build, measured 2026-10-16.
+
+To time a test past the 20 s per-test watchdog, raise it and ask for the
+wall: `brokkr test -p <crate> <NAME> --timings --timeout 280`. `--timeout`
+is the per-test watchdog in seconds; `--timings` prints every matched
+test's wall, slowest first. Without them an over-watchdog test reports only
+"exceeded the 20s per-test timeout", not how long it would have taken.
+
+At tape 37, measured that way: `realism` 24.0 s, and it passes at seed 42;
+`session_modulation_reproduces_curves` 65.1 s.
 
 | Test | File | Tape 35 | Tape 36 | After priority 2 |
 |---|---|---|---|---|

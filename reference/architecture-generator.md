@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 37; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 38; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -210,6 +210,24 @@ children never reads more than `n - 1`, so no two parents share a counter. The l
 are the old ones in the continuous limit, not on the 52- and 53-bit grids,
 which is what the statistical gates judge. The cascade keeps its own
 sampler, so MNQ and MES are byte-identical; BTCUSDT and NVDA move.
+
+Version 38 replaces the generator behind every generated-tape stream.
+`ChaCha12Rng` (the main, cadence, size, book and reporting streams) and the
+step stream's SplitMix64 give way to one type, `mogwai_data::TapeRng`:
+Philox4x32-10 with the published Random123 constants, checked against their
+known-answer vectors. The river seed, mixed once by SplitMix64, is the key, and
+the 128-bit counter carries a stream domain in its high half and a position in
+its low half. A position counts `u64` outputs, two per block. So the streams
+of one river sit at disjoint counter addresses by construction, where
+SplitMix64's keyed streams had been random rotations of one sequence, and a
+seek is setting the position. Its draw counts are fixed per call: one position
+per `u64`, one per `u32` (its low half), one per eight bytes filled. Running
+out of positions panics rather than wrapping. The cause was cost in an
+unoptimized build: ChaCha12 ran at about 300 ns per word there, about 3.6 of
+a legacy parent's 4.15 microseconds, and that kept the heavy test walks past
+the per-test watchdog. Every generated tape moves, the cascade presets
+included, and `ARRIVAL_KERNEL_VERSION` went to 4 with the cadence stream. The
+session-segment composer still draws from ChaCha12 and does not move.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

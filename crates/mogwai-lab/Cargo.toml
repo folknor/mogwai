@@ -32,7 +32,6 @@ mogwai-venue.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
-rand_chacha.workspace = true
 rand_distr.workspace = true
 zrip.workspace = true
 sha2.workspace = true
