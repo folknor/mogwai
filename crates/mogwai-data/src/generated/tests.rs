@@ -1330,18 +1330,20 @@ fn clean_regime_is_byte_identical() {
     ];
 
     let expected = [
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00336870, aggressor: Buyer, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00300000, aggressor: Buyer, ts_event: 1652680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00200000, aggressor: Buyer, ts_event: 1653680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.01494218, aggressor: Buyer, ts_event: 1654680 }))"#,
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 59999.8, ask_px: 59999.9, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1835517 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.0, ask_px: 60000.1, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00336870, aggressor: Buyer, ts_event: 1651680 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.0, ask_px: 60000.1, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 4070702 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00300000, aggressor: Buyer, ts_event: 4070702 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.3, ask_px: 60000.4, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 6765079 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.4, size: 0.00200000, aggressor: Buyer, ts_event: 6765079 }))"#,
     ];
-    // Re-blessed at tape protocol 36. The first parent's instant, opening
-    // book and child count are the protocol 35 ones, because every stage
-    // that resolves them is unchanged; its level steps and sizes are drawn
-    // differently now, and from the second parent on the main stream carries
-    // neither size draws nor per-child coins, so the walk itself moves.
+    // Re-blessed at tape protocol 37. The first parent's instant is the
+    // protocol 36 one: its gap reads the same first word through an open
+    // uniform that differs from the old one in the last bits, which rounds to
+    // the same nanosecond. Its price moved, because the innovation is now the
+    // fixed-word t(4); its child count moved, because the count's words sit
+    // at fixed slots. The sizes follow children 0, 1 and 2 as they did,
+    // because the size stream is untouched.
     let actual: Vec<_> = (0..expected.len())
         .map(|_| format!("{:?}", src.next_tick()))
         .collect();
@@ -6838,6 +6840,84 @@ fn compact_sweeps_resolve_as_the_per_child_walk_did() {
         }
         assert!(multi_child > 100, "{label}: too few multi-child sweeps");
     }
+}
+
+/// Both bounce walks draw a fixed number of main-stream words per parent
+/// since tape protocol 37, whatever the parent does: the legacy walk under
+/// every regime the fixtures carry, and the integrated walk, whose clock and
+/// child count ride the cadence stream. The level steps ride the step
+/// stream, so a sweep's length moves neither.
+#[test]
+fn a_bounce_parent_draws_a_fixed_main_stream_stride() {
+    use super::draws::{INTEGRATED_SLOTS, LEGACY_SLOTS};
+    for (label, fresh) in placed_sweep_fixtures() {
+        if label == "cascade" {
+            continue;
+        }
+        let slots = if label == "integrated" {
+            INTEGRATED_SLOTS.len()
+        } else {
+            LEGACY_SLOTS.len()
+        };
+        let mut src = fresh();
+        let mut children = std::collections::BTreeSet::new();
+        for parent in 0..10_000 {
+            let before = src.main_stream_words();
+            let summary = src.advance_parent().expect("an unbounded walk");
+            children.insert(summary.child_count.min(6));
+            assert_eq!(
+                src.main_stream_words() - before,
+                2 * slots as u128,
+                "{label} parent {parent}"
+            );
+        }
+        assert!(
+            children.len() >= 5,
+            "{label}: sweeps of every length: {children:?}"
+        );
+    }
+}
+
+/// The placed cascade's and the discrete book's records, hashed: the oracle
+/// in `mogwai-cli` covers only the crypto lineage, so this is what says a
+/// change to shared sweep code left the MNQ-shaped walks' bytes alone. Both
+/// were blessed at tape protocol 37, from a tree whose cascade path the 37
+/// rewrite had not touched, before the level-step sampler was made generic
+/// over its word source. A change that moves either re-blesses it knowingly.
+#[test]
+fn the_cascade_walks_hash_to_their_blessed_bytes() {
+    let digest = |mut src: GeneratedSource| {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut eat = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for _ in 0..200_000 {
+            match RiverSource::next_record(&mut src).expect("an unbounded walk") {
+                Record::Trade(t) => {
+                    eat(t.ts);
+                    eat(t.px as u64);
+                    eat(t.qty);
+                    eat(t.side as u64);
+                }
+                Record::Quote(q) => {
+                    eat(q.ts);
+                    eat(q.bid_px as u64);
+                    eat(q.ask_px as u64);
+                    eat(q.bid_qty);
+                    eat(q.ask_qty);
+                }
+            }
+        }
+        format!("{hash:016x}")
+    };
+    let placed = digest(cascade_mnq_source(7, BOOK_START_NS, false));
+    let book = digest(cascade_mnq_source(7, BOOK_START_NS, true));
+    assert_eq!(
+        (placed.as_str(), book.as_str()),
+        ("7af79ba940809484", "2f55f0355cad8a9e")
+    );
 }
 
 /// A seek that parks inside a parent lays out that same resolution, and one

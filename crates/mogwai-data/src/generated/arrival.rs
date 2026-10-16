@@ -1694,41 +1694,75 @@ mod tests {
         }
     }
 
-    /// The stage sequence with consecutive repeats collapsed. A vector writes
-    /// its contract-A order out with the per-stage draw counts it declares;
-    /// production records one tag per stage, and the multiplicities are not
-    /// gated (see the V4 fixture's derivation for why they cannot be).
-    fn collapsed_stages(order: &Value) -> Vec<String> {
-        let mut collapsed: Vec<String> = Vec::new();
-        for tag in order.as_array().expect("a stage order array") {
-            let tag = tag.as_str().expect("a stage tag").to_string();
-            if collapsed.last() != Some(&tag) {
-                collapsed.push(tag);
-            }
-        }
-        assert!(!collapsed.is_empty(), "a stage order is never empty");
-        collapsed
+    /// A vector's contract-A order: one name per main-stream word, exactly.
+    fn slot_order(order: &Value) -> Vec<String> {
+        order
+            .as_array()
+            .expect("a slot order array")
+            .iter()
+            .map(|tag| tag.as_str().expect("a slot name").to_string())
+            .collect()
     }
 
-    /// The shipped contract-A stage trace of one generator event, read off the
-    /// generator itself rather than restated here.
+    /// The shipped contract-A slot order, after checking the generator keeps
+    /// it: since tape protocol 37 every legacy parent draws exactly one `u64`
+    /// per slot from the main stream - two 32-bit words - whatever branches
+    /// it takes. Checked parent by parent over a walk long enough to cross
+    /// both bounce regimes, both arrival states, both count branches, repeat
+    /// eligibility and multi-child sweeps, whose level steps no longer touch
+    /// the main stream.
     fn shipped_contract_a_stages() -> Vec<String> {
+        use super::super::draws::LEGACY_SLOTS;
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
         let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
-        let _summary = generator.advance_parent().expect("stage-recording draw");
-        assert!(
-            !generator.draw_stages.is_empty(),
-            "the generator recorded no stages: only the contract-A path pushes \
-             tags, so an anchor whose scalars carry an `arrival` kernel takes \
-             `begin_integrated_event` and traces nothing. Pick a contract-A \
-             anchor, or teach the integrated path its own trace."
+        let stride = 2 * LEGACY_SLOTS.len() as u128;
+        let mut multi_child = 0;
+        for parent in 0..20_000 {
+            let before = generator.main_stream_words();
+            let summary = generator.advance_parent().expect("an unbounded walk");
+            multi_child += u32::from(summary.child_count > 1);
+            assert_eq!(
+                generator.main_stream_words() - before,
+                stride,
+                "parent {parent} drew off the fixed stride"
+            );
+        }
+        assert!(multi_child > 1_000, "the walk crossed multi-child sweeps");
+        // The order itself, read off the drawing code rather than the table:
+        // a counting source hands word `i` out `i`-th, so the field each
+        // word landed in names slot `i`. A swap inside `LegacyDraws::draw`
+        // reorders this; the table must agree with it.
+        let mut next = 0_u64;
+        let draws = super::super::draws::LegacyDraws::draw(|| {
+            next += 1;
+            next - 1
+        });
+        let mut landed = [
+            (draws.gap, "gap"),
+            (draws.state_flip, "state_flip"),
+            (draws.innovation[0], "innovation_normal"),
+            (draws.innovation[1], "innovation_chi_a"),
+            (draws.innovation[2], "innovation_chi_b"),
+            (draws.bounce.regime, "regime"),
+            (draws.bounce.side_flip, "side_flip"),
+            (draws.bounce.drift_direction, "drift_direction"),
+            (draws.bounce.drift, "drift"),
+            (draws.count_branch, "count_branch"),
+            (draws.count_geometric, "count_geometric"),
+            (draws.repeat, "repeat"),
+        ];
+        landed.sort_by_key(|(word, _)| *word);
+        let order: Vec<String> = landed.iter().map(|(_, name)| (*name).to_string()).collect();
+        assert_eq!(
+            order,
+            LEGACY_SLOTS
+                .iter()
+                .map(|slot| (*slot).to_string())
+                .collect::<Vec<_>>(),
+            "the slot table disagrees with the drawing order"
         );
-        generator
-            .draw_stages
-            .iter()
-            .map(|tag| (*tag).to_string())
-            .collect()
+        order
     }
 
     fn execute_v4_event_markov_contract(vector: &Value) {
@@ -1753,8 +1787,8 @@ mod tests {
         assert_eq!(clock.quiet, vector["expected"][0]["next_quiet"]);
         assert_eq!(
             shipped_contract_a_stages(),
-            collapsed_stages(&vector["expected"][0]["main_stream_order"]),
-            "V4 contract-A stage order",
+            slot_order(&vector["expected"][0]["main_stream_order"]),
+            "V4 contract-A slot order",
         );
     }
 
@@ -1781,8 +1815,8 @@ mod tests {
         }
         assert_eq!(
             shipped_contract_a_stages(),
-            collapsed_stages(&expected["contract_a_order"]),
-            "V5 contract-A stage order",
+            slot_order(&expected["contract_a_order"]),
+            "V5 contract-A slot order",
         );
 
         // Contract B is checked by replaying the cadence stream in the order

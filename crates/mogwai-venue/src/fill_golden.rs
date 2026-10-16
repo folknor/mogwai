@@ -36,11 +36,15 @@
 //!
 //! Orders unfilled at the horizon are censored - counted, and excluded from the
 //! sample rather than folded in at the horizon value, which would make the
-//! artifact move whenever the horizon moved.
+//! artifact move whenever the horizon moved. An order is one sample, taken at
+//! the fill that completes it.
 //!
-//! Out of scope, deliberately: the tranche-redraw path. A remainder needs an
-//! armed `PartialFillNext`; this harness arms no divergence, so every admitted
-//! order fills completely and leaves the book.
+//! This harness arms no divergence, so an order that rests fills completely
+//! when it fills. It can still leave a remainder: under the band, an order can
+//! take a partial fill on arrival and rest the rest, which then fills under a
+//! redrawn band. The tape at protocol 37 does this once, so the artifact
+//! covers that path too; the counting above is what keeps such an order from
+//! being two samples.
 //!
 //! Where the band comes from: nothing hands this harness a `MarketReading`,
 //! because it never goes through the HTTP submit path, so it takes one itself
@@ -301,8 +305,10 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             // the first order of each scenario anchors on the tape's first
             // print instead. That is a look-ahead the venue itself would refuse,
             // but it only positions the harness's price: the limit is placed
-            // `offset_ticks` away from the very reading it is judged against, so
-            // no order is ever marketable on arrival either way.
+            // `offset_ticks` away from the very reading it is judged against.
+            // That keeps it off the last print, not out of the fill band, so
+            // under the band an order can still take a partial fill on arrival
+            // (see `record_fills`).
             let market = fills::read_last(&profiles.test_key(SYMBOL), ts, profiles)
                 .or_else(|| {
                     let mut tape = profiles
@@ -446,6 +452,15 @@ fn record_fills(
         // every acceptance lands on a pass - which is also why the elapsed pass
         // count is exactly the latency divided by the interval rather than a
         // separately tracked counter that could disagree with it.
+        // An order is a sample once, at the fill that completes it. Under the
+        // fill band an order can take a partial fill on arrival - the band's
+        // reading can make a limit placed a tick away briefly marketable -
+        // and rest the remainder, so counting fill events would count it
+        // twice. Its latency is to completion; one incomplete at the horizon
+        // is censored.
+        if !fill.leaves_qty.is_zero() {
+            continue;
+        }
         let latency = fill.ts_event - order.accept_ns;
         samples.entry(order.offset_ticks).or_default().push((
             latency,

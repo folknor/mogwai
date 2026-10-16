@@ -296,12 +296,90 @@ sweep, and `GeneratedAcc` observes every print forensically, so it needs
 its own design, and at 3 percent of an unsized read the view is not where
 the time is.
 
-## Priority 4. A serial feedback core with fixed draws per parent, and pure emission
+## Priority 4. A serial feedback core with fixed draws per parent, and pure emission (fixed core landed; batching not)
 
-Both reports (report A section 5, report B R3). Byte-moving: owes a
-`TAPE_PROTOCOL_VERSION` bump, re-blessed goldens and re-run gates. Both say
-to land it after the exact priorities above, which leave the walk as the
-remaining cost and make this one's gain measurable.
+Landed 2026-10-16 (uncommitted at the time of writing) as tape protocol 37,
+for the two bounce walks only; sparred with fresh codex sessions to
+consensus, the step stream re-sparred after a measured regression, and the
+whole audited afterwards.
+
+What it is now.
+
+- A legacy parent draws exactly twelve main-stream words and an integrated
+  one seven (its clock and count are the kernel's, on the cadence stream),
+  one per slot in a fixed order (`generated/draws.rs`), every slot drawn
+  whatever branch is taken; the results are applied in the unchanged causal
+  order. The transforms reject nothing: the gap is `-ln` of an open uniform,
+  a coin a uniform below its probability, the innovation
+  `Phi_inv(u0) / sqrt(-0.5 ln(u1 u2))`, the count its branch and geometric
+  words. The laws are the old ones in the continuous limit, not on the 52-
+  and 53-bit grids (the exponential's zero atom and its cap near 36.7, coin
+  quantization at `2^-53`, a bounded t(4) support).
+- The bounce walks' level-step gaps left the main stream for a counter-based
+  `StepStream`: the `j`-th gap of a sweep whose first child is `c0` is
+  SplitMix64 at counter `c0 + j`. A ChaCha stream addressed the same way was
+  built first and measured 19 ns per parent, nearly all of it generating
+  reserved words no parent read; the counter form computes only what is read
+  (under 1 ns).
+- The cascade and the discrete book are untouched and byte-identical, which
+  `the_cascade_walks_hash_to_their_blessed_bytes` now pins: nothing else
+  hashed a cascade walk.
+- The V4 and V5 conformance vectors' contract-A order is now an exact
+  twelve-slot list, checked against the drawing code through a counting word
+  source and against the measured stride of a 20,000-parent walk (the first
+  version checked only the stride; codex's audit caught it, and a swap inside
+  `LegacyDraws::draw` now fails it).
+
+Re-blessed: `clean_regime_is_byte_identical`, `analysis/tape-oracle-hashes.json`,
+the fill-distribution golden, the stage-A manifest's version and digest.
+The fill golden needed a harness fix first: under the band, the new tape
+gives one order a partial fill on arrival, and the harness counted fill
+events, so that order was two samples and the shape assertion refused. It
+now counts an order once, at the fill that completes it.
+
+Gates on the new tape: every plain-lane statistical gate (the eight dwell
+arms, `sweep_structure`, the floor-branch and surge tests);
+`session_modulation_reproduces_curves`; `realism` passes at seed 42, but the
+16-seed lag-10 mean is 0.1628 against 0.164 on the old tapes, 11 of 16 seeds
+above the 0.1565 ceiling - the same law, and seed 42 is luck. The mean gap
+is 0.1747 s against the declared 0.17104 s; `ARRIVAL_MEAN_CAL`'s provenance
+comment now says its bisection realization is gone and the gate holds it.
+
+Measured, release, per million parents: legacy about 164 ms, integrated
+about 188 ms, against about 168 and 184 before (this host's run-to-run
+noise is about 10 percent). Break-even. In isolation the new t(4) costs 20 ns
+against 27 for the ziggurat-plus-gamma, and the twelve ChaCha words 26 ns per
+parent; those and the state update are now the irreducible per-parent work
+in scalar code.
+
+Not done, and why it matters: the speedup report B estimated (60 to 100 ns
+per parent) was never in the fixed draws themselves; it is in what they
+enable, below. Still open:
+
+- Block generation and SIMD transforms. A block's 12 words per parent can be
+  generated and transformed in vector lanes (AS 241 is a ratio of
+  polynomials; `ln`, `sqrt`, `exp` vectorize). A vector `ln` will not agree
+  bitwise with `libm`'s, so this is another bump; `student_t4`'s expression
+  is fixed in the code so the transform can be matched or knowingly
+  re-blessed.
+- A cheaper main-stream generator (ChaCha8, or a counter-based one like the
+  step stream) would halve the 26 ns of draws; another bump.
+- Parallel size decoration for `realism`.
+- The cascade's fixed-draw core: its t draw has configurable degrees of
+  freedom, so it needs the gamma path for odd ones.
+
+Found on the way, open:
+
+- `session_modulation_reproduces_curves` takes 64 s in an unoptimized dev
+  build against the 7.5 s its comment records, which dates from when the
+  owner's host-wide cargo configuration optimized dev builds. Dev parent
+  resolution runs about 4 to 4.5 microseconds per parent today, before and
+  after this change, so the gate has likely been past the watchdog under
+  `--gate` since that configuration changed. A per-package dev `opt-level`
+  for `mogwai-data` would bring every heavy walk back under it; that is a
+  build-configuration call for the owner.
+
+The reports' original framing, kept for the open items:
 
 Bottleneck. One ChaCha12 stream consumed in parent order, with a variable
 amount per parent (report B): the ziggurat normal and the Marsaglia-Tsang

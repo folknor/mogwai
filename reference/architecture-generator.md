@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 36; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 37; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -188,6 +188,28 @@ will see the parent, so checkpoint extensions, `advance_parent` and the
 parents a seek drops draw no size at all, and for a river's fixed size law
 and grid a child's quantity depends on its index alone, not on how its
 parent was read. Every placed tape moves; the discrete-book path is untouched.
+
+Version 37 fixes how much of the main stream a bounce-walk parent consumes.
+Before it, a parent drew a variable amount: the ziggurat normal and the
+rejection gamma behind the t(4) innovation, one or two uniforms for the
+child count, drift coins only in the high regime, a repeat coin only for a
+single-child low-regime parent, and level-step gaps that varied with the
+sweep. Now a legacy parent draws exactly twelve 64-bit words and an
+integrated one seven, one per slot in a fixed order (`generated/draws.rs`),
+every slot drawn whether its branch is taken or not. Each becomes its
+variate by a pure function of its own words: the gap as `-ln` of an open
+uniform, a coin as a uniform below its probability, the innovation as a
+normal quantile over `sqrt(-0.5 ln(u1 u2))` - chi-squared with four degrees
+of freedom being `-2 ln` of a product of two uniforms - and the count from
+its branch and geometric words. The results are applied in the walk's
+unchanged causal order. The level-step gaps move to a stream addressed by
+child index, like the sizes, but computed rather than generated: the `j`-th
+gap of a sweep whose first child is `c0` is SplitMix64 at counter `c0 + j`
+from a key derived from the seed under its own tag, and a sweep of `n`
+children never reads more than `n - 1`, so no two parents share a counter. The laws
+are the old ones in the continuous limit, not on the 52- and 53-bit grids,
+which is what the statistical gates judge. The cascade keeps its own
+sampler, so MNQ and MES are byte-identical; BTCUSDT and NVDA move.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

@@ -29,7 +29,7 @@
 //! correlates with empty history windows is this, not a startup or warm-up
 //! defect.
 //!
-//! The fitted ACD arrival process is persistent and heavy-tailed, so a short
+//! Every walk's arrival process is persistent and bursty, so a short
 //! historical window legitimately holds zero trades. The history routes are
 //! correct to answer an empty list there, and widening the window or seeding
 //! filler to avoid the empty answer would be falsifying the river to flatter a
@@ -38,10 +38,8 @@
 use std::sync::Arc;
 
 use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, decimal_to_f64};
-use rand::distr::{Bernoulli, OpenClosed01};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rand_distr::{ChiSquared, Distribution, Normal, Weibull};
 use rust_decimal::Decimal;
 
 use crate::record::{
@@ -59,18 +57,17 @@ use super::calendar::{CompiledCalendar, SessionCalendar};
 use super::cascade::{
     CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
 };
-use super::children::{LevelSteps, SizeStream, SweepOutcome, resolve_sweep};
+use super::children::{LevelSteps, SizeStream, StepStream, SweepOutcome, resolve_sweep};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
-    ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, CHILD_CAP, DRIFT_RECENTER_FRAC,
-    EVENT_PRICE_REPEAT_PROB, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
-    LOW_INTENSITY_ARR_MULT, LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING,
-    NS_PER_HOUR, REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    ARRIVAL_WEIBULL_MEAN, CHILD_CAP, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
+    HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_INTENSITY_ARR_MULT,
+    LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
+    REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_UNIT_SCALE,
 };
-use super::dynamics::{
-    ArrivalClock, BounceLaws, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
-};
+use super::draws::{BounceDraws, LegacyDraws, coin, mixture_count, student_t4, unit_exponential};
+use super::dynamics::{ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape};
 use super::fingerprint::{
     Fingerprint, GeneratedSourceError, GeneratorScalars, ScalarError, SessionProfile,
 };
@@ -113,9 +110,6 @@ struct RiverSpec {
     /// state-dependent displacement would move it into the walk state. See
     /// the constant for why this is not a spread.
     trade_bounce_ticks: f64,
-    duration_dist: Weibull<f64>,
-    normal: Normal<f64>,
-    chi_squared: ChiSquared<f64>,
     prices: PriceGrid,
     sizes: SizeQuantizer,
     /// The configured top-of-book sizes and the size increment as quantity
@@ -229,6 +223,10 @@ pub struct GeneratedSource {
     /// first child - and keeping it here only saves repositioning it between
     /// consecutive decorated parents.
     size_stream: SizeStream,
+    /// The bounce walks' level-step gaps, addressed by child index like the
+    /// sizes, so the main stream takes a fixed number of words per parent.
+    /// The cascade still draws its steps from the main stream.
+    step_stream: StepStream,
     /// Test-only cursor for `next_size`, which samples the river's size law
     /// from indices of its own.
     #[cfg(test)]
@@ -290,31 +288,6 @@ pub struct GeneratedSource {
     /// about the reader.
     #[cfg(test)]
     reader_emitted: u32,
-    /// The main-stream stage order of the shipped (contract A) event path,
-    /// recorded as the event executes and cleared at the top of every
-    /// `begin_event`. One tag per stage, not one per RNG draw: the stochastic
-    /// contract fixes which stage runs before which, and the number of
-    /// primitive draws a stage makes is a property of the distribution it
-    /// samples (`draw_student_t` alone takes a normal and a chi-squared, and
-    /// the ziggurat's rejection loop makes even that count variable), so a
-    /// per-draw counter could not be pinned. Recording costs nothing in
-    /// release: the field does not exist there.
-    ///
-    /// It is a soft gate and must be read as one. The pushes are hand-placed
-    /// statements adjacent to the work, not instrumentation inside the draws,
-    /// so what they pin is the order of the pushes. A change that moves a
-    /// draw past its own tag - reordering `next_latent_mid` against
-    /// `next_side_and_book` while both tags stay put - leaves this trace
-    /// unchanged. What it does catch is a reordering of the stages as
-    /// written, which is how the contract-A order is actually expressed here,
-    /// and that is the whole of the claim V4 and V5 rest on it.
-    ///
-    /// Only `begin_event` feeds it. `begin_integrated_event` pushes nothing,
-    /// so a generator whose scalars carry an `arrival` kernel traces an empty
-    /// sequence rather than a wrong one; the reader in `arrival.rs` refuses on
-    /// emptiness and says so.
-    #[cfg(test)]
-    pub(super) draw_stages: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,13 +335,11 @@ pub struct VolTrace {
     pub mid_after: f64,
 }
 
-/// The probabilities fixed for a source's life, built once: the legacy
-/// walk's price-repeat coin, and the three level-step probabilities a placed
-/// sweep selects between, each computed by the expression that used to run
-/// per child.
+/// The probabilities fixed for a source's life, built once: the three
+/// level-step probabilities a placed sweep selects between, each computed by
+/// the expression that used to run per child.
 #[derive(Clone, Copy)]
 struct ChildCoins {
-    price_repeat: Bernoulli,
     level_step_cascade: f64,
     level_step_high: f64,
     level_step_low: f64,
@@ -377,8 +348,6 @@ struct ChildCoins {
 impl ChildCoins {
     fn new(level_step_prob: f64) -> Self {
         Self {
-            price_repeat: Bernoulli::new(EVENT_PRICE_REPEAT_PROB)
-                .expect("probability validated into [0, 1]"),
             level_step_cascade: level_step_prob,
             level_step_high: (level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0),
             level_step_low: level_step_prob * LOW_REGIME_LEVEL_STEP_MULT,
@@ -662,17 +631,6 @@ impl GeneratedSource {
         .expect("generated source inputs are inside fingerprint ranges")
     }
 
-    // The only fallible inputs are `scalars`/`session`/`calendar` and the
-    // record scale they imply, guarded by the `?`-propagated checks at the
-    // top. The distribution constructors below (`LogNormal`/`Weibull`/
-    // `Normal`/`ChiSquared`) take compile-time constants that are always
-    // valid params, so their `expect`s cannot fire - `unwrap_in_result` is
-    // silenced here because there is no meaningful error variant to map them
-    // onto, not because a failure is being swallowed.
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "distribution params are constant and valid; only the validated scalars/session can fail"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "the calendar is a construction input rather than a later attachment; see SessionModulator::new"
@@ -841,7 +799,6 @@ impl GeneratedSource {
             drift_ticks: 0,
             drift_dir: 1,
             drift_hot: false,
-            laws: BounceLaws::new(),
         };
         let mut rng = ChaCha12Rng::seed_from_u64(seed);
         // The walk's mode, in `begin_event`'s old dispatch order. The
@@ -899,9 +856,6 @@ impl GeneratedSource {
             arrival_kernel: cadence.kernel,
             arrival_env: cadence.env,
             trade_bounce_ticks,
-            duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
-            normal: Normal::new(0.0, 1.0).expect("valid normal"),
-            chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             prices: PriceGrid { tick_mantissa },
             sizes,
             top_bid_units,
@@ -921,6 +875,7 @@ impl GeneratedSource {
             plan_first_child: 0,
             plan_decorated: true,
             size_stream,
+            step_stream: StepStream::new(seed),
             #[cfg(test)]
             size_probe: 0,
             plan: Vec::new(),
@@ -948,8 +903,6 @@ impl GeneratedSource {
             rejected_repeat_draws: 0,
             #[cfg(test)]
             reader_emitted: 0,
-            #[cfg(test)]
-            draw_stages: Vec::new(),
         })
     }
 
@@ -1004,29 +957,20 @@ impl GeneratedSource {
         }
     }
 
-    /// One `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap. rand_distr samples it as
-    /// `scale * (-ln u).powf(1 / shape)` over `u` in `(0, 1]`; at the shipped
-    /// shape of one that is `1 * (-ln u).powf(1)`, and both the unit scale and
-    /// `powf(x, 1.0) == x` are exact, so the short form draws the same `u` and
-    /// returns the same bits without the `powf`. Any other shape takes the
-    /// distribution itself.
-    fn draw_unit_weibull(&mut self) -> f64 {
-        if ARRIVAL_WEIBULL_SHAPE == 1.0 {
-            let u: f64 = self.rng.sample(OpenClosed01);
-            -u.ln()
-        } else {
-            self.spec.duration_dist.sample(&mut self.rng)
-        }
+    /// One main-stream word.
+    fn next_word(&mut self) -> u64 {
+        self.rng.random()
     }
 
-    fn next_duration_ns(&mut self) -> u64 {
+    /// The parent's gap from its two words: the gap itself, a unit
+    /// exponential (the `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap at the shape
+    /// of one `draws` asserts), and the arrival-state flip.
+    fn next_duration_ns(&mut self, gap_raw: u64, flip_raw: u64) -> u64 {
         let walk = legacy(&mut self.walk);
         if let Some(quiet) = walk.arrival_override {
             walk.arrival.quiet = quiet;
         }
-        #[cfg(test)]
-        self.draw_stages.push("gap");
-        let raw_eps = self.draw_unit_weibull();
+        let raw_eps = unit_exponential(gap_raw);
         let arrival = &legacy(&mut self.walk).arrival;
         let state_mean = if arrival.quiet {
             arrival.quiet_mean_s
@@ -1039,9 +983,7 @@ impl GeneratedSource {
         } else {
             arrival.active_to_quiet
         };
-        #[cfg(test)]
-        self.draw_stages.push("flip");
-        let flips = self.rng.random_bool(flip_probability);
+        let flips = coin(flip_raw, flip_probability);
         let walk = legacy(&mut self.walk);
         walk.arrival.advance_after_gap(flips);
         if let Some(quiet) = walk.arrival_override {
@@ -1146,21 +1088,17 @@ impl GeneratedSource {
         MAX_SESSION_GAP_NS
     }
 
-    fn next_latent_mid(&mut self) -> f64 {
+    fn next_latent_mid(&mut self, innovation_words: [u64; 3]) -> f64 {
         #[cfg(test)]
         {
             self.latent_updates += 1;
         }
-        // The chi-squared draw inside `draw_student_t` is floored at
-        // `f64::MIN_POSITIVE`: an unguarded 0.0 denominator makes `student_t`
-        // `0.0/0.0 = NaN` when `normal` also happens to be 0.0, and
-        // `f64::clamp` propagates NaN through `base_return` into `mid`,
-        // poisoning the walk for the rest of the session.
-        // Drawn raw then standardized in two named steps - numerically the
-        // identical sequence `draw_standardized_innovation` performs - so the
-        // observation-only trace can carry both without a second draw.
-        let innovation_raw =
-            draw_student_t(&mut self.rng, &self.spec.normal, &self.spec.chi_squared);
+        // The fixed-word t(4) (see `draws::student_t4`): its chi-squared is
+        // `-2 ln` of a product of two open uniforms, which is never zero, so
+        // the denominator is finite and positive with no floor needed.
+        // Drawn raw then standardized in two named steps so the
+        // observation-only trace can carry both.
+        let innovation_raw = student_t4(innovation_words);
         let innovation = innovation_raw / STUDENT_T_UNIT_SCALE;
         // The base process is regime-independent by construction. `step` applies
         // the GARCH-state rail and the feedback rail, neither of which takes a
@@ -1235,10 +1173,14 @@ impl GeneratedSource {
     /// The bounce side and drift step, then the book placed on the drifted
     /// mid. The legacy and integrated walks only: the cascade draws its own
     /// side and places on the mid exactly.
-    fn next_side_and_book(&mut self, mid: f64) -> (AggressorSide, PublishedBook) {
+    fn next_side_and_book(
+        &mut self,
+        mid: f64,
+        draws: BounceDraws,
+    ) -> (AggressorSide, PublishedBook) {
         let bounce = bounce_mut(&mut self.walk);
-        let side = bounce.next_side(&mut self.rng);
-        bounce.next_drift(&mut self.rng);
+        let side = bounce.next_side(draws.regime, draws.side_flip);
+        bounce.next_drift(draws.drift_direction, draws.drift);
         let drifted_mid_ticks = mid / self.spec.tick_f64 + bounce.drift_ticks as f64;
         let book = place_book(
             drifted_mid_ticks,
@@ -1350,8 +1292,15 @@ impl GeneratedSource {
             // move, no end-of-sweep state. No sampler draws one.
             return Ok(());
         }
-        let mut steps = LevelSteps::new(self.level_step_prob(), burst.remaining, &mut self.rng);
-        steps.drain(&mut self.rng, &mut self.sweep_steps);
+        let p = self.level_step_prob();
+        if self.steps_on_main_stream() {
+            let rng = &mut self.rng;
+            let mut word = || rng.random::<u64>();
+            LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
+        } else {
+            let mut word = self.step_stream.from(self.plan_first_child);
+            LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
+        }
         match resolve_sweep(
             burst.price_ticks,
             burst.side,
@@ -1454,19 +1403,46 @@ impl GeneratedSource {
             .checked_add(u64::from(burst.remaining))
             .expect("the child index space is not exhausted");
         self.plan_decorated = false;
-        let mut steps = LevelSteps::new(self.level_step_prob(), burst.remaining, &mut self.rng);
+        // The gaps' word source, taken out for the walk so `step_child` can
+        // take `self` whole; a main stream taken out is put back after it.
+        let on_main = self.steps_on_main_stream();
+        let mut main = self.rng.clone();
+        let p = self.level_step_prob();
+        let step_words = self.step_stream.from(self.plan_first_child);
+        let mut word: Box<dyn FnMut() -> u64 + '_> = if on_main {
+            Box::new(|| main.random::<u64>())
+        } else {
+            Box::new(step_words)
+        };
+        let mut steps = LevelSteps::new(p, burst.remaining, &mut word);
         let mut emitted = 0;
+        let mut outcome = Ok(());
         while burst.remaining > 0 {
-            let price_ticks = self.step_child(&mut burst, &mut emitted, &mut steps);
-            let record = Record::Trade(TradeRec {
-                ts: self.clock_ns,
-                px: self.price(price_ticks)?,
-                qty: 0,
-                side: burst.side,
-            });
-            self.plan.push(record);
+            let price_ticks = self.step_child(&mut burst, &mut emitted, &mut steps, &mut word);
+            match self.price(price_ticks) {
+                Ok(px) => self.plan.push(Record::Trade(TradeRec {
+                    ts: self.clock_ns,
+                    px,
+                    qty: 0,
+                    side: burst.side,
+                })),
+                Err(fault) => {
+                    outcome = Err(fault);
+                    break;
+                }
+            }
         }
-        Ok(())
+        drop(word);
+        if on_main {
+            self.rng = main;
+        }
+        outcome
+    }
+
+    /// Whether this walk's level-step gaps are drawn from the main stream:
+    /// the cascade's are; the bounce walks' come from the step stream.
+    fn steps_on_main_stream(&self) -> bool {
+        matches!(self.walk, Walk::Cascade(_))
     }
 
     /// The level-step probability of the sweep about to be placed. The bounce
@@ -1716,6 +1692,12 @@ impl GeneratedSource {
         )
     }
 
+    /// The main stream's position in 32-bit words.
+    #[cfg(test)]
+    pub(super) fn main_stream_words(&self) -> u128 {
+        self.rng.get_word_pos()
+    }
+
     /// Whether the walk is the discrete-book path, whose parents publish
     /// their quotes and first trade off the parent instant.
     #[cfg(test)]
@@ -1918,8 +1900,12 @@ impl GeneratedSource {
                 .min(MID_CEILING);
         }
         self.reopen_frontier_ns = self.clock_ns;
-        let mid = self.next_latent_mid();
-        let (aggressor, book) = self.next_side_and_book(mid);
+        // The parent's seven main-stream words, drawn after the kernel
+        // resolved so a kernel refusal draws none.
+        let innovation = [self.next_word(), self.next_word(), self.next_word()];
+        let bounce = BounceDraws::draw(|| self.next_word());
+        let mid = self.next_latent_mid(innovation);
+        let (aggressor, book) = self.next_side_and_book(mid, bounce);
         let price_ticks = placed_trade_ticks(&book, aggressor, spec.trade_bounce_ticks);
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
@@ -2239,8 +2225,6 @@ impl GeneratedSource {
     }
 
     fn begin_event(&mut self) -> Result<(), TickFault> {
-        #[cfg(test)]
-        self.draw_stages.clear();
         let (rate_mult, children_mult) = self
             .spec
             .surge
@@ -2262,7 +2246,13 @@ impl GeneratedSource {
     /// the state-conditioned sweep and the price-repeat branch.
     fn begin_legacy_event(&mut self, rate_mult: f64, children_mult: f64) -> Result<(), TickFault> {
         let spec = Arc::clone(&self.spec);
-        let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
+        // The parent's twelve main-stream words, drawn up front; each is read
+        // below at its stage, in the walk's causal order (see `draws`).
+        let draws = LegacyDraws::draw(|| self.next_word());
+        let dt_ns =
+            ((self.next_duration_ns(draws.gap, draws.state_flip) as f64 / rate_mult).round()
+                as u64)
+                .max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
         // the start of the gap (the clock has not advanced yet), then the clock
         // steps, then next_latent_mid reads the volatility multiplier at the
@@ -2296,12 +2286,8 @@ impl GeneratedSource {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
         self.reopen_frontier_ns = self.clock_ns;
-        #[cfg(test)]
-        self.draw_stages.push("latent_mid");
-        let mid = self.next_latent_mid();
-        #[cfg(test)]
-        self.draw_stages.push("side_book");
-        let (aggressor, fresh_book) = self.next_side_and_book(mid);
+        let mid = self.next_latent_mid(draws.innovation);
+        let (aggressor, fresh_book) = self.next_side_and_book(mid, draws.bounce);
         // Sweep size is conditional on the arrival state, and the two branches
         // are constructed to reproduce the declared unconditional shape:
         //
@@ -2373,17 +2359,12 @@ impl GeneratedSource {
                 (active_mean, active_single)
             }
         };
-        #[cfg(test)]
-        self.draw_stages.push("child");
         let count = {
             // A single fraction at or above one means "always exactly one
             // child" - the floor branch's quiet state. The mixture solve
-            // would divide by zero there, so it is expressed directly.
+            // would divide by zero there, so it is expressed directly; its
+            // two count words were drawn with the rest and are not read.
             let count = if state_single_frac >= 1.0 {
-                // One uniform consumed, mirroring the mixture's q-branch
-                // draw contract, so the always-one state has the same RNG
-                // stride as a taken single-child mixture draw.
-                let _always_one: f64 = self.rng.random();
                 1
             } else {
                 let mut event_shape = SweepShape::new(
@@ -2396,7 +2377,8 @@ impl GeneratedSource {
                     // 1.0 says "unused" plainly.
                     1.0,
                 );
-                let count = event_shape.next_count(&mut self.rng);
+                let count =
+                    mixture_count(&mut event_shape, draws.count_branch, draws.count_geometric);
                 self.shape.truncated += event_shape.truncated;
                 count
             };
@@ -2404,7 +2386,9 @@ impl GeneratedSource {
             count
         };
         let high_regime = legacy(&mut self.walk).bounce.high_regime;
-        let repeat_draw = count == 1 && !high_regime && self.rng.sample(spec.coins.price_repeat);
+        // The repeat word is always drawn and read only by an eligible parent,
+        // so `repeat_draw` still counts eligible parents whose coin landed.
+        let repeat_draw = count == 1 && !high_regime && coin(draws.repeat, EVENT_PRICE_REPEAT_PROB);
         let walk = legacy(&mut self.walk);
         let compatible_repeat = repeat_draw
             && walk
@@ -2434,10 +2418,8 @@ impl GeneratedSource {
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
         legacy(&mut self.walk).last_book = Some(book);
-        // The sweep's level-step gaps, the last main-stream stage of a parent
-        // since tape protocol 36; sizes are drawn from their own stream.
-        #[cfg(test)]
-        self.draw_stages.push("level_steps");
+        // The sweep's level-step gaps come from the step stream since tape
+        // protocol 37, and its sizes from the size stream since 36.
         self.emit_children(&SweepBurst {
             remaining: count,
             parent_ts_ns: self.clock_ns,
@@ -2456,8 +2438,9 @@ impl GeneratedSource {
         burst: &mut SweepBurst,
         emitted: &mut u32,
         steps: &mut LevelSteps,
+        word: &mut impl FnMut() -> u64,
     ) -> f64 {
-        if steps.steps_at(*emitted, &mut self.rng) {
+        if steps.steps_at(*emitted, word) {
             match burst.side {
                 AggressorSide::Buyer => burst.price_ticks += 1.0,
                 AggressorSide::Seller => burst.price_ticks -= 1.0,

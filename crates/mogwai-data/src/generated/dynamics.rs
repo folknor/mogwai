@@ -11,8 +11,9 @@
 
 use mogwai_protocol::AggressorSide;
 use rand::RngExt;
-use rand::distr::Bernoulli;
 use rand_chacha::ChaCha12Rng;
+
+use super::draws::coin;
 
 use super::consts::{
     BOUNCE_HIGH_FLIP_PROB, BOUNCE_HIGH_TO_LOW_PROB, BOUNCE_LOW_FLIP_PROB, BOUNCE_LOW_TO_HIGH_PROB,
@@ -96,6 +97,11 @@ impl SweepShape {
         } else {
             count as u32
         }
+    }
+
+    /// `ln(1 - 1/m)`, the geometric branch's denominator.
+    pub(super) fn ln_continue(&self) -> f64 {
+        self.ln_continue
     }
 
     /// Draws the same mixture after an arrival-side child multiplier. The
@@ -302,54 +308,24 @@ pub(super) struct BounceState {
     pub(super) drift_ticks: i64,
     pub(super) drift_dir: i64,
     pub(super) drift_hot: bool,
-    pub(super) laws: BounceLaws,
-}
-
-/// The bounce and drift coins, built once from their constant probabilities.
-/// `random_bool(p)` is `Bernoulli::new(p)` followed by one sample, so holding
-/// the constructed distributions draws exactly what the per-call form drew;
-/// it only stops re-deriving the integer threshold on every event.
-#[derive(Clone, Copy)]
-pub(super) struct BounceLaws {
-    drift_dir_flip: Bernoulli,
-    hot_drift: Bernoulli,
-    high_regime_drift: Bernoulli,
-    high_to_low: Bernoulli,
-    low_to_high: Bernoulli,
-    high_flip: Bernoulli,
-    low_flip: Bernoulli,
-}
-
-impl BounceLaws {
-    pub(super) fn new() -> Self {
-        let coin =
-            |p: f64| Bernoulli::new(p).expect("bounce probabilities are constants in [0, 1]");
-        Self {
-            drift_dir_flip: coin(DRIFT_DIR_FLIP_PROB),
-            hot_drift: coin(HOT_DRIFT_PROB),
-            high_regime_drift: coin(HIGH_REGIME_DRIFT_PROB),
-            high_to_low: coin(BOUNCE_HIGH_TO_LOW_PROB),
-            low_to_high: coin(BOUNCE_LOW_TO_HIGH_PROB),
-            high_flip: coin(BOUNCE_HIGH_FLIP_PROB),
-            low_flip: coin(BOUNCE_LOW_FLIP_PROB),
-        }
-    }
 }
 
 impl BounceState {
-    pub(super) fn next_drift(&mut self, rng: &mut ChaCha12Rng) {
+    /// The drift step from its two words. Outside the high regime both are
+    /// drawn and neither is read, and the drift state is left alone.
+    pub(super) fn next_drift(&mut self, direction_raw: u64, drift_raw: u64) {
         if !self.high_regime {
             return;
         }
-        if rng.sample(self.laws.drift_dir_flip) {
+        if coin(direction_raw, DRIFT_DIR_FLIP_PROB) {
             self.drift_dir *= -1;
         }
         let p_drift = if self.drift_hot {
-            self.laws.hot_drift
+            HOT_DRIFT_PROB
         } else {
-            self.laws.high_regime_drift
+            HIGH_REGIME_DRIFT_PROB
         };
-        if rng.sample(p_drift) {
+        if coin(drift_raw, p_drift) {
             self.drift_ticks += self.drift_dir;
             self.drift_hot = true;
         } else {
@@ -357,20 +333,22 @@ impl BounceState {
         }
     }
 
-    pub(super) fn next_side(&mut self, rng: &mut ChaCha12Rng) -> AggressorSide {
+    /// The regime transition, then the side flip at the new regime's
+    /// probability, from their two words.
+    pub(super) fn next_side(&mut self, regime_raw: u64, flip_raw: u64) -> AggressorSide {
         if self.high_regime {
-            if rng.sample(self.laws.high_to_low) {
+            if coin(regime_raw, BOUNCE_HIGH_TO_LOW_PROB) {
                 self.high_regime = false;
             }
-        } else if rng.sample(self.laws.low_to_high) {
+        } else if coin(regime_raw, BOUNCE_LOW_TO_HIGH_PROB) {
             self.high_regime = true;
         }
         let p_flip = if self.high_regime {
-            self.laws.high_flip
+            BOUNCE_HIGH_FLIP_PROB
         } else {
-            self.laws.low_flip
+            BOUNCE_LOW_FLIP_PROB
         };
-        if rng.sample(p_flip) {
+        if coin(flip_raw, p_flip) {
             self.prev_side = match self.prev_side {
                 AggressorSide::Buyer => AggressorSide::Seller,
                 AggressorSide::Seller | AggressorSide::NoAggressor => AggressorSide::Buyer,

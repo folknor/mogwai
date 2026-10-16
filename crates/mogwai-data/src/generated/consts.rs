@@ -42,11 +42,13 @@ pub(super) const ARRIVAL_QUIET_ACTIVE_RATIO: f64 = 150.0;
 /// clustering lives in the state chain, not in the marginal, so a sub-unit
 /// shape would double-count it.
 pub(super) const ARRIVAL_WEIBULL_SHAPE: f64 = 1.0;
-/// Mean-gap calibration, the successor to `ACD_RELAX_MEAN_CAL`. Re-derived by
-/// the same 10-step bisection the spec documents, driving the seed-42 realized
-/// mean parent gap of the two-million-event realism draw onto
-/// `scalars.mean_event_duration_s`; `MEAN_GAP_REL_TOL` in the test module is
-/// what keeps it honest.
+/// Mean-gap calibration, the successor to `ACD_RELAX_MEAN_CAL`. Derived by a
+/// 10-step bisection driving the seed-42 realized mean parent gap of the
+/// two-million-event realism draw onto `scalars.mean_event_duration_s`, on a
+/// tape before protocol 37; that realization no longer exists, and the value
+/// was kept rather than re-bisected. What holds it now is the gate:
+/// `MEAN_GAP_REL_TOL` in the test module, across the dwell arms' seeds, with
+/// the protocol 37 realized mean about two percent above the declared one.
 pub(super) const ARRIVAL_MEAN_CAL: f64 = 0.944;
 /// Mean of `Weibull(scale = 1, shape = ARRIVAL_WEIBULL_SHAPE)`, which the draw
 /// is divided by so the innovation carries unit mean. `gamma(1 + 1/1.0) = 1`

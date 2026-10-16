@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The two halves of a placed sweep's children that tape protocol 36 pulled
-//! apart: the level steps, which feed back into the walk and stay on the main
-//! stream as geometric gaps ([`LevelSteps`]), and the sizes, which never feed
-//! back and, for a river's fixed size law, are a pure function of the seed
-//! and a child's global index ([`SizeStream`]).
+//! apart: the level steps, which feed back into the walk and are drawn as
+//! geometric gaps ([`LevelSteps`]), and the sizes, which never feed back and,
+//! for a river's fixed size law, are a pure function of the seed and a
+//! child's global index ([`SizeStream`]). Since protocol 37 the bounce walks'
+//! gaps are SplitMix64 words addressed by child index ([`StepStream`]); the
+//! cascade's are still drawn from its main stream.
 //!
 //! The split is what lets a parent be skipped at the cost of its feedback
 //! draws alone. A skipped parent - a checkpoint extension, `advance_parent`,
@@ -42,7 +44,7 @@ pub(super) fn open_unit(raw: u64) -> f64 {
 }
 
 /// A uniform in `[0, 1)` from one raw `u64`: the top 53 bits scaled by 2^-53.
-fn half_open_unit(raw: u64) -> f64 {
+pub(super) fn half_open_unit(raw: u64) -> f64 {
     (raw >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
 }
 
@@ -74,8 +76,10 @@ pub(super) struct LevelSteps {
 
 impl LevelSteps {
     /// The steps of a sweep of `count` children at probability `p`, with the
-    /// first gap already drawn.
-    pub(super) fn new(p: f64, count: u32, rng: &mut ChaCha12Rng) -> Self {
+    /// first gap already drawn. `word` yields one raw `u64` per call and is
+    /// called only for a gap: the cascade passes its main stream, the bounce
+    /// walks their counter-based step words.
+    pub(super) fn new(p: f64, count: u32, word: &mut impl FnMut() -> u64) -> Self {
         let mut steps = Self {
             p,
             log_q: (-p).ln_1p(),
@@ -83,11 +87,11 @@ impl LevelSteps {
             cursor: 0,
             next: None,
         };
-        steps.advance(rng);
+        steps.advance(word);
         steps
     }
 
-    fn advance(&mut self, rng: &mut ChaCha12Rng) {
+    fn advance(&mut self, word: &mut impl FnMut() -> u64) {
         self.next = None;
         if self.cursor >= self.trials || self.p <= 0.0 {
             self.cursor = self.trials;
@@ -98,7 +102,7 @@ impl LevelSteps {
             self.cursor += 1;
             return;
         }
-        let gap = (open_unit(rng.random::<u64>()).ln() / self.log_q).floor();
+        let gap = (open_unit(word()).ln() / self.log_q).floor();
         let remaining = self.trials - self.cursor;
         if gap >= f64::from(remaining) {
             self.cursor = self.trials;
@@ -113,11 +117,11 @@ impl LevelSteps {
     /// it does. Asked once per child, in order. The per-child walk the
     /// reference resolver keeps; production drains instead.
     #[cfg(test)]
-    pub(super) fn steps_at(&mut self, child: u32, rng: &mut ChaCha12Rng) -> bool {
+    pub(super) fn steps_at(&mut self, child: u32, word: &mut impl FnMut() -> u64) -> bool {
         if child == 0 || self.next != Some(child - 1) {
             return false;
         }
-        self.advance(rng);
+        self.advance(word);
         true
     }
 
@@ -126,10 +130,10 @@ impl LevelSteps {
     /// every child in turn draws, in the same order - the gap `new` already
     /// drew is recorded before the next is drawn, and a step on the last
     /// trial still advances, which then draws nothing.
-    pub(super) fn drain(&mut self, rng: &mut ChaCha12Rng, out: &mut Vec<u32>) {
+    pub(super) fn drain(&mut self, word: &mut impl FnMut() -> u64, out: &mut Vec<u32>) {
         while let Some(trial) = self.next {
             out.push(trial + 1);
-            self.advance(rng);
+            self.advance(word);
         }
     }
 }
@@ -215,6 +219,56 @@ pub(super) fn resolve_sweep(
         }
     }
     unreachable!("a refused endpoint is a refused child of a monotone sweep")
+}
+
+/// The step stream's domain tag: its key is `splitmix64(seed ^ STEP_STREAM_TAG)`.
+const STEP_STREAM_TAG: u64 = 0x7374_6570_7331_3337;
+
+/// SplitMix64's increment.
+const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The bounce walks' level-step gaps, addressed by child index (tape
+/// protocol 37) and computed rather than generated: the `j`-th gap of a
+/// sweep whose first child is `c0` is SplitMix64 at counter `c0 + j` from
+/// the river's step key - `splitmix64(key + (c0 + j) * gamma)`, the finalizer
+/// adding the gamma itself, which is exactly the SplitMix64 sequence seeded
+/// at `key` evaluated at step `c0 + j + 1`. A sweep of `n` children has
+/// `n - 1` trials and draws at most one gap per trial, so its counters stay
+/// inside the `[c0, c0 + n)` range its children reserve, and no two parents
+/// of one trajectory share a counter. Only the gaps read are computed: a
+/// buffered stream positioned per parent spent most of its output on
+/// reserved words no parent read.
+///
+/// The gaps still feed back - the final level re-centres the drift and is the
+/// repeat branch's price - so every parent drains them in turn; what the
+/// stream buys is a main stream that takes the same number of draws from
+/// every parent.
+///
+/// SplitMix64 passes BigCrush over consecutive counters, which is the use
+/// here. Its keys are not independent streams, though: every key selects a
+/// rotation of one full-period sequence, so two rivers' step words coincide
+/// at some offset. Nothing reads two rivers' steps against each other.
+#[derive(Clone, Copy)]
+pub(super) struct StepStream {
+    key: u64,
+}
+
+impl StepStream {
+    pub(super) fn new(seed: u64) -> Self {
+        Self {
+            key: splitmix64(seed ^ STEP_STREAM_TAG),
+        }
+    }
+
+    /// The words of the sweep whose first child is `first`, in order.
+    pub(super) fn from(self, first: u64) -> impl FnMut() -> u64 {
+        let mut counter = first;
+        move || {
+            let word = splitmix64(self.key.wrapping_add(counter.wrapping_mul(SPLITMIX_GAMMA)));
+            counter = counter.wrapping_add(1);
+            word
+        }
+    }
 }
 
 /// One child's size draw, before quantization.
@@ -404,8 +458,11 @@ mod tests {
         for (p, count, steps) in [(0.0, 9, 0), (1.0, 9, 8), (0.3, 1, 0), (0.3, 0, 0)] {
             let mut rng = ChaCha12Rng::seed_from_u64(7);
             let untouched = rng.clone();
-            let mut level = LevelSteps::new(p, count, &mut rng);
-            let taken = (0..count).filter(|&c| level.steps_at(c, &mut rng)).count();
+            let taken = {
+                let mut word = || rng.random::<u64>();
+                let mut level = LevelSteps::new(p, count, &mut word);
+                (0..count).filter(|&c| level.steps_at(c, &mut word)).count()
+            };
             assert_eq!(taken, steps, "p {p} count {count}");
             assert_eq!(rng.get_word_pos(), untouched.get_word_pos(), "p {p}");
         }
@@ -419,10 +476,13 @@ mod tests {
             let mut rng = ChaCha12Rng::seed_from_u64(seed);
             let start = rng.get_word_pos();
             let count = 1 + (seed % 12) as u32;
-            let mut level = LevelSteps::new(0.37, count, &mut rng);
-            let stepped: Vec<u32> = (0..count)
-                .filter(|&c| level.steps_at(c, &mut rng))
-                .collect();
+            let stepped: Vec<u32> = {
+                let mut word = || rng.random::<u64>();
+                let mut level = LevelSteps::new(0.37, count, &mut word);
+                (0..count)
+                    .filter(|&c| level.steps_at(c, &mut word))
+                    .collect()
+            };
             let last_stepped = stepped.last() == Some(&(count - 1));
             let draws = if count == 1 {
                 0
@@ -443,15 +503,18 @@ mod tests {
     fn draining_steps_is_asking_every_child() {
         let walk = |p: f64, count: u32, seed: u64, drain: bool| {
             let mut rng = ChaCha12Rng::seed_from_u64(seed);
-            let mut steps = LevelSteps::new(p, count, &mut rng);
-            let stepped: Vec<u32> = if drain {
-                let mut out = Vec::new();
-                steps.drain(&mut rng, &mut out);
-                out
-            } else {
-                (0..count)
-                    .filter(|&c| steps.steps_at(c, &mut rng))
-                    .collect()
+            let stepped: Vec<u32> = {
+                let mut word = || rng.random::<u64>();
+                let mut steps = LevelSteps::new(p, count, &mut word);
+                if drain {
+                    let mut out = Vec::new();
+                    steps.drain(&mut word, &mut out);
+                    out
+                } else {
+                    (0..count)
+                        .filter(|&c| steps.steps_at(c, &mut word))
+                        .collect()
+                }
             };
             (stepped, rng.get_word_pos(), rng.random::<u64>())
         };
@@ -605,16 +668,51 @@ mod tests {
         assert!(placed > 0 && first > 0 && mid > 0 && last > 0);
     }
 
-    /// The step frequency per eligible trial is `p`, the law the coins had.
+    /// The step stream is SplitMix64 at a counter: its words are the
+    /// reference sequence's, by index, and a parent's words do not depend on
+    /// where any other parent's were read.
+    #[test]
+    fn step_words_are_splitmix_by_child_index() {
+        let stream = StepStream::new(5);
+        let key = splitmix64(5 ^ STEP_STREAM_TAG);
+        // The reference SplitMix64 generator: add gamma, then mix.
+        let mut state = key;
+        let reference: Vec<u64> = (0..64)
+            .map(|_| {
+                state = state.wrapping_add(SPLITMIX_GAMMA);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            })
+            .collect();
+        let mut from_zero = stream.from(0);
+        let run: Vec<u64> = (0..64).map(|_| from_zero()).collect();
+        assert_eq!(run, reference);
+        for first in [0_u64, 17, 40, 63] {
+            assert_eq!(
+                stream.from(first)(),
+                reference[first as usize],
+                "child {first}"
+            );
+        }
+    }
+
+    /// The step frequency per eligible trial is `p`, the law the coins had,
+    /// with the gaps read from the production step stream the way a walk
+    /// reads it: back-to-back parents, each from its own first child.
     #[test]
     fn level_steps_land_at_the_trial_probability() {
-        let mut rng = ChaCha12Rng::seed_from_u64(11);
+        let stream = StepStream::new(11);
+        let mut first_child = 0_u64;
         for p in [0.05, 0.37, 0.9] {
             let (mut trials, mut steps) = (0_u64, 0_u64);
             for _ in 0..20_000 {
-                let mut level = LevelSteps::new(p, 9, &mut rng);
-                steps += (0..9).filter(|&c| level.steps_at(c, &mut rng)).count() as u64;
+                let mut word = stream.from(first_child);
+                let mut level = LevelSteps::new(p, 9, &mut word);
+                steps += (0..9).filter(|&c| level.steps_at(c, &mut word)).count() as u64;
                 trials += 8;
+                first_child += 9;
             }
             let rate = steps as f64 / trials as f64;
             let se = (p * (1.0 - p) / trials as f64).sqrt();

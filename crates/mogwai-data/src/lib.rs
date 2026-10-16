@@ -250,7 +250,16 @@ pub use trigger::{
 /// stream as geometric gaps between steps instead of one coin per child. Every
 /// placed tape moves; a discrete-book parent's draws are untouched, but no
 /// shipped preset carries one.
-pub const TAPE_PROTOCOL_VERSION: u32 = 36;
+/// 37 gives the two bounce walks a fixed main-stream draw per parent: twelve
+/// `u64` words on the legacy walk and seven on the integrated one, every slot
+/// drawn whether its branch is taken or not, each turned into its variate
+/// without rejection (the t(4) innovation as a normal quantile over the root
+/// of `-0.5 ln(u1 u2)`, the gap as `-ln` of an open uniform, coins as a
+/// uniform below their probability). The level-step gaps leave the main
+/// stream for a stream addressed by child index. Every legacy tape moves -
+/// BTCUSDT and NVDA - and every integrated one; the cascade presets, MNQ and
+/// MES, are byte-identical.
+pub const TAPE_PROTOCOL_VERSION: u32 = 37;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
