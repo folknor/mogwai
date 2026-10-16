@@ -109,28 +109,15 @@ impl SweepShape {
     }
 }
 
-/// The children of the current parent still owed to `next_tick`. It lives in
-/// `GeneratedSource` state, not in a local, so a `CheckpointIndex` snapshot
-/// taken mid-sweep resumes mid-sweep and the chain stays byte-identical.
-#[derive(Clone)]
+/// The children of a placed parent still to be stepped. Local to the parent's
+/// resolution: a parent always resolves whole, so no snapshot can ever land
+/// mid-sweep and the sweep is never walk state.
 pub(super) struct SweepBurst {
     pub(super) remaining: u32,
     pub(super) emitted: u32,
     pub(super) parent_ts_ns: u64,
     pub(super) side: AggressorSide,
     pub(super) price_ticks: f64,
-}
-
-impl SweepBurst {
-    pub(super) fn empty() -> Self {
-        Self {
-            remaining: 0,
-            emitted: 0,
-            parent_ts_ns: 0,
-            side: AggressorSide::Buyer,
-            price_ticks: 0.0,
-        }
-    }
 }
 
 /// The two-state Markov-modulated Weibull arrival clock that replaced the ACD
@@ -315,16 +302,6 @@ pub(super) struct BounceState {
     pub(super) drift_ticks: i64,
     pub(super) drift_dir: i64,
     pub(super) drift_hot: bool,
-    /// The trade displacement in ticks, filled at construction from the
-    /// resolved `trade_displacement_ticks` seam, for which
-    /// [`TRADE_BOUNCE_HALF_WIDTH_TICKS`] is only the default - so a preset may
-    /// vary it per instrument. Read fresh by `next_price` on every event,
-    /// written once and never mutated, so the displacement is identical in
-    /// every regime for one instrument - but the storage seam for a
-    /// state-dependent displacement is already here, and making it vary is a
-    /// mutation rather than a restructuring. See the constant for why this is
-    /// not a spread.
-    pub(super) trade_bounce_ticks: f64,
     pub(super) laws: BounceLaws,
 }
 

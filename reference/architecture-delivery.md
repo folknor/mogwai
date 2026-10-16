@@ -118,9 +118,11 @@ generator arm boards a different river than one without it, and nothing mutates
 water someone is already reading. The arm arrives on the `/ws` upgrade as four
 query keys, is normalized into a `GeneratorArm` before the account is claimed,
 and enters `RiverKey` structurally beside the bundle digest. The generator
-receives it through `with_surge`, which consumes a source that has drawn
-nothing, so the window is installed before the first draw and every checkpoint
-of that river carries it.
+receives it through `with_surge`, which consumes a source and refuses one that
+has resolved or attempted any parent, so the window is installed before the
+first draw and every checkpoint of that river carries it. The window lives in
+the river's shared immutable spec and is written copy-on-write, so a clone
+taken before the surge keeps the unsurged river.
 
 That is what removed the checkpoint machinery the mutation needed. The pinned
 control boundary, its exemption from coarsening, the walk-back fence and the

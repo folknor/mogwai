@@ -16,13 +16,15 @@
 //! [`cadence_base_mean_s`] with the shipped path so no cadence input is
 //! derived twice.
 
+use std::sync::Arc;
+
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{Distribution, Exp, Gamma, Poisson, StandardNormal};
 use serde::Deserialize;
 
 use super::{
-    calendar::SessionCalendar,
+    calendar::{CompiledCalendar, SessionCalendar},
     consts::{INTRA_EVENT_STEP_NS, MAX_SESSION_GAP_NS},
     dynamics::SweepShape,
     fingerprint::{GeneratorScalars, SessionProfile},
@@ -116,6 +118,29 @@ impl CadenceWalk {
         start_ts_ns: u64,
         step_ns: u64,
     ) -> CadenceParts {
+        let calendar = calendar.map(|calendar| Arc::new(CompiledCalendar::new(calendar)));
+        Self::assemble_compiled(
+            scalars,
+            session,
+            calendar.as_ref(),
+            thin,
+            seed,
+            start_ts_ns,
+            step_ns,
+        )
+    }
+
+    /// The assembly over a calendar the generator has already compiled.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_compiled(
+        scalars: &GeneratorScalars,
+        session: &SessionProfile,
+        calendar: Option<&Arc<CompiledCalendar>>,
+        thin: f64,
+        seed: u64,
+        start_ts_ns: u64,
+        step_ns: u64,
+    ) -> CadenceParts {
         let kernel = scalars.arrival.and_then(ArrivalConfig::kernel);
         let mut rng =
             kernel.map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
@@ -126,9 +151,9 @@ impl CadenceWalk {
                 rng.as_mut().expect("kernel has cadence rng"),
             )
         });
-        let env = kernel.as_ref().map(|_| {
-            ArrivalEnv::for_profile_with_step(session, calendar, thin, start_ts_ns, step_ns)
-        });
+        let env = kernel
+            .as_ref()
+            .map(|_| ArrivalEnv::for_compiled(session, calendar, thin, start_ts_ns, step_ns));
         CadenceParts {
             kernel,
             state,
@@ -211,7 +236,7 @@ impl CadenceWalk {
     }
 }
 
-const CADENCE_STEP_NS: u64 = 1_000_000_000;
+pub(super) const CADENCE_STEP_NS: u64 = 1_000_000_000;
 const EXPECTED_COUNT_FLOOR: f64 = 0.01;
 /// The representable latent-intensity ceiling, uniform across kernel families.
 /// Public because `mogwai-lab`'s envelope simulator judges its replicate months
@@ -362,15 +387,17 @@ impl ArrivalConfig {
     }
 }
 
-/// Immutable baseline and grid phase for an integrated arrival walk.
+/// Immutable baseline and grid phase for an integrated arrival walk. Its
+/// tables are shared, so a clone - one per generator snapshot - copies a few
+/// words rather than the calendar and its transition schedule.
 #[derive(Clone)]
 pub struct ArrivalEnv {
     session: SessionModulator,
-    calendar: Option<SessionCalendar>,
+    calendar: Option<Arc<CompiledCalendar>>,
     thin: f64,
     origin_ns: u64,
     step_ns: u64,
-    weekly_calendar_transitions_ns: Vec<u64>,
+    weekly_calendar_transitions_ns: Arc<[u64]>,
 }
 
 impl ArrivalEnv {
@@ -394,14 +421,29 @@ impl ArrivalEnv {
         origin_ns: u64,
         step_ns: u64,
     ) -> Self {
+        let calendar = calendar.map(|calendar| Arc::new(CompiledCalendar::new(calendar)));
+        Self::for_compiled(profile, calendar.as_ref(), thin, origin_ns, step_ns)
+    }
+
+    /// The same environment over a calendar the generator has already
+    /// compiled, which it shares rather than compiling twice.
+    pub(super) fn for_compiled(
+        profile: &SessionProfile,
+        calendar: Option<&Arc<CompiledCalendar>>,
+        thin: f64,
+        origin_ns: u64,
+        step_ns: u64,
+    ) -> Self {
         assert!(step_ns > 0, "the cadence step must be nonzero");
         Self {
-            session: SessionModulator::new(profile, calendar),
+            session: SessionModulator::new(profile, calendar.map(|c| c.calendar())),
             calendar: calendar.cloned(),
             thin,
             origin_ns,
             step_ns,
-            weekly_calendar_transitions_ns: calendar.map_or_default(calendar_transition_offsets),
+            weekly_calendar_transitions_ns: calendar
+                .map_or_else(Vec::new, |c| calendar_transition_offsets(c))
+                .into(),
         }
     }
 
@@ -474,7 +516,7 @@ impl ArrivalEnv {
     }
 }
 
-fn calendar_transition_offsets(calendar: &SessionCalendar) -> Vec<u64> {
+fn calendar_transition_offsets(calendar: &CompiledCalendar) -> Vec<u64> {
     let mut transitions = Vec::new();
     let mut was_open = calendar.is_open(0);
     for utc_minute in 1..=10_080_u64 {

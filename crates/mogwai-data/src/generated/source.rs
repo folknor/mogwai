@@ -46,10 +46,11 @@ use crate::record::{
 use crate::{TickEvent, TickFault};
 
 use super::arrival::{
-    ArrivalEnv, ArrivalKernel, ArrivalState, CadenceWalk, PendingReopen, RuntimeModifiers,
+    ArrivalEnv, ArrivalKernel, ArrivalState, CADENCE_STEP_NS, CadenceWalk, PendingReopen,
+    RuntimeModifiers,
 };
 use super::book::{BookSnapshot, DiscreteBook, Struck};
-use super::calendar::SessionCalendar;
+use super::calendar::{CompiledCalendar, SessionCalendar};
 use super::cascade::{
     CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
 };
@@ -80,16 +81,111 @@ use super::session::SessionModulator;
 /// it.
 pub const MAX_PARENT_RECORDS: usize = CHILD_CAP as usize + 2;
 
+/// Everything about a river that is fixed once it is built: the config, the
+/// record scale, the compiled calendar and session tables, the cascade tables
+/// and the integrated environment, the samplers and the size grid. Held in
+/// one `Arc`, so the lead and every checkpoint share it and a snapshot copies
+/// only the walk's own state.
+#[derive(Clone)]
+struct RiverSpec {
+    scalars: GeneratorScalars,
+    scale: RecordScale,
+    calendar: Option<Arc<CompiledCalendar>>,
+    session: SessionModulator,
+    // The activity cascade's tables (tape protocol 32), present on a
+    // `Cascade` or `CascadeBook` walk.
+    cascade: Option<CascadeTables>,
+    // The integrated kernel and its environment, present on an `Integrated`
+    // walk.
+    arrival_kernel: Option<ArrivalKernel>,
+    arrival_env: Option<ArrivalEnv>,
+    /// The trade displacement in ticks, from the resolved
+    /// `trade_displacement_ticks` seam, for which
+    /// `TRADE_BOUNCE_HALF_WIDTH_TICKS` is only the default - so a preset may
+    /// vary it per instrument. Fixed for the river's life, so the
+    /// displacement is identical in every regime for one instrument; a
+    /// state-dependent displacement would move it into the walk state. See
+    /// the constant for why this is not a spread.
+    trade_bounce_ticks: f64,
+    duration_dist: Weibull<f64>,
+    normal: Normal<f64>,
+    chi_squared: ChiSquared<f64>,
+    size_dist: LogNormal<f64>,
+    prices: PriceGrid,
+    sizes: SizeQuantizer,
+    /// The configured top-of-book sizes and the size increment as quantity
+    /// mantissas at the river's scale, converted exactly once at build.
+    top_bid_units: u64,
+    top_ask_units: u64,
+    min_units: u64,
+    coins: ChildCoins,
+    tick_f64: f64,
+    surge: Option<SurgeWindow>,
+}
+
+/// The walk's mode and the mutable state only that mode carries. Which mode a
+/// river walks is fixed by its config - the cascade, then an arrival kernel,
+/// then the fingerprint-fitted legacy clock - so the variant never changes
+/// after construction, and parent resolution dispatches on it once per parent.
+#[derive(Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one walk per source, held inline; boxing would add an allocation to every snapshot clone to save bytes no collection multiplies"
+)]
+enum Walk {
+    Legacy(LegacyWalk),
+    Integrated(IntegratedWalk),
+    Cascade(CascadeState),
+    CascadeBook(BookWalk),
+}
+
+/// The fingerprint-fitted walk: the Markov arrival clock, the bounce/drift
+/// process, and the prior parent's book and final price the repeat branch
+/// re-prices from.
+#[derive(Clone)]
+struct LegacyWalk {
+    arrival: ArrivalClock,
+    arrival_override: Option<bool>,
+    bounce: BounceState,
+    last_event_price_ticks: Option<f64>,
+    last_book: Option<PublishedBook>,
+}
+
+/// The integrated-kernel walk: the kernel's latent state, its own cadence
+/// stream, and the bounce/drift process placing the book. No repeat branch,
+/// so no prior book or price.
+#[derive(Clone)]
+struct IntegratedWalk {
+    state: ArrivalState,
+    cadence_rng: ChaCha12Rng,
+    bounce: BounceState,
+}
+
+/// The discrete-book walk (see the `book` module): the cascade owns the clock
+/// and the external move, the book everything the touch does. Its rng
+/// streams are its own, derived from the seed under domain tags, so book
+/// parameters leave the cascade realization untouched.
+#[derive(Clone)]
+struct BookWalk {
+    cascade: CascadeState,
+    book: DiscreteBook,
+    // The four-value snapshot last published on the wire, the deduplication
+    // state: a quote whose four values equal it is suppressed with its
+    // instant still reserved.
+    last_published: Option<BookSnapshot>,
+}
+
 /// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
 /// generator is a path-dependent walk whose entire future is a pure function of
 /// its current state, so a clone taken at a parent boundary, advanced,
-/// reproduces the records after it byte-for-byte. Every field is `Clone`,
-/// including the `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped
-/// `Clone`, which is why the generator holds `ChaCha12Rng` directly).
+/// reproduces the records after it byte-for-byte. The immutable half is one
+/// shared `RiverSpec`; what a clone copies is the walk state below, including
+/// the `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped `Clone`,
+/// which is why the generator holds `ChaCha12Rng` directly).
 #[derive(Clone)]
 pub struct GeneratedSource {
-    scalars: Arc<GeneratorScalars>,
-    scale: Arc<RecordScale>,
+    spec: Arc<RiverSpec>,
+    walk: Walk,
     rng: ChaCha12Rng,
     /// The last instant the walk has reserved: after a parent resolves, the
     /// end of its reserved span - its last child on the placed paths, its
@@ -98,26 +194,9 @@ pub struct GeneratedSource {
     /// taken. At a parent boundary the two coincide in the sense the
     /// checkpoint partition needs - every consumed record is at or before it.
     pub(super) clock_ns: u64,
-    arrival: ArrivalClock,
-    arrival_override: Option<bool>,
-    arrival_kernel: Option<ArrivalKernel>,
-    arrival_state: Option<ArrivalState>,
-    arrival_env: Option<ArrivalEnv>,
-    cadence_rng: Option<ChaCha12Rng>,
-    // The activity cascade (tape protocol 32), present when the scalars carry
-    // `cascade`. The tables are immutable and shared with every checkpoint;
-    // the state is the walk's own and clones with it.
-    cascade: Option<Arc<CascadeTables>>,
-    cascade_state: Option<CascadeState>,
-    // The discrete book (see the `book` module), present when the
-    // scalars carry `book` beside `cascade`. Its rng streams are its own,
-    // derived from the seed under domain tags, so book parameters leave the
-    // cascade realization untouched.
-    book: Option<DiscreteBook>,
-    // The four-value snapshot last published on the wire, the deduplication
-    // state: a quote whose four values equal it is suppressed with its
-    // instant still reserved.
-    last_published: Option<BookSnapshot>,
+    /// Whether any parent has been resolved or attempted. Sticky, so a source
+    /// that has drawn can never read as fresh; `with_surge` refuses one.
+    resolved_any: bool,
     /// The resolved parent's records, in emission order, and how many a
     /// reader has taken. Reused across parents, so its capacity is the
     /// high-water parent footprint and never more than `MAX_PARENT_RECORDS`.
@@ -128,30 +207,10 @@ pub struct GeneratedSource {
     plan_trades: u32,
     fault: Option<TickFault>,
     pub(super) vol: GarchVol,
-    session: SessionModulator,
-    // `pub(super)` for the same reason as `vol` and `clock_ns`: the sibling test
-    // module reads the trade-displacement state directly to pin that it never
-    // varies, which is the diagnosis that gives the dynamic-displacement work
-    // something to move against.
-    pub(super) bounce: BounceState,
-    duration_dist: Weibull<f64>,
-    normal: Normal<f64>,
-    chi_squared: ChiSquared<f64>,
-    size_dist: LogNormal<f64>,
     // Read only by the test that pins the sampler's median; the walk reads
-    // the quantizer derived from it below.
+    // the quantizer derived from it.
     #[cfg(test)]
     pub(super) size_median: f64,
-    prices: PriceGrid,
-    sizes: SizeQuantizer,
-    /// The configured top-of-book sizes and the size increment as quantity
-    /// mantissas at the river's scale, converted exactly once at build.
-    top_bid_units: u64,
-    top_ask_units: u64,
-    min_units: u64,
-    coins: ChildCoins,
-    calendar: Option<Arc<SessionCalendar>>,
-    tick_f64: f64,
     regime: RegimeState,
     // The upper bound of the last instant span an armed `ReopenGap` was tested
     // against. It is not `clock_ns`: children advance the clock past their
@@ -161,11 +220,9 @@ pub struct GeneratedSource {
     // contiguous by construction rather than by every clock mutation
     // remembering to be included.
     reopen_frontier_ns: u64,
+    /// The declared sweep law and the truncation counters the realism gate
+    /// reads; each path keeps the accounting it always kept.
     pub(super) shape: SweepShape,
-    pub(super) burst: SweepBurst,
-    last_event_price_ticks: Option<f64>,
-    last_book: Option<PublishedBook>,
-    surge: Option<SurgeWindow>,
     // The observation-only volatility trace (the generator successor spec
     // 3.3): populated per parent event when enabled, consuming no draws
     // and changing nothing about the walk, which the byte-identity test
@@ -384,20 +441,37 @@ fn configured_units(
 impl GeneratedSource {
     #[cfg(test)]
     pub(super) fn shares_immutable_config_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.scalars, &other.scalars)
-            && Arc::ptr_eq(&self.scale, &other.scale)
-            && match (&self.calendar, &other.calendar) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
+        Arc::ptr_eq(&self.spec, &other.spec)
+    }
+
+    /// The trade displacement the river was built with.
+    #[cfg(test)]
+    pub(super) fn trade_bounce_ticks(&self) -> f64 {
+        self.spec.trade_bounce_ticks
+    }
+
+    /// The bounce/drift state, on the walks that carry one.
+    #[cfg(test)]
+    pub(super) fn bounce(&self) -> &BounceState {
+        match &self.walk {
+            Walk::Legacy(walk) => &walk.bounce,
+            Walk::Integrated(walk) => &walk.bounce,
+            Walk::Cascade(_) | Walk::CascadeBook(_) => {
+                panic!("the cascade walks carry no bounce state")
             }
+        }
     }
 
     /// Install a flow surge on a source that has not drawn yet, consuming and
     /// returning it so it reads as part of construction.
     ///
-    /// Taking `self` by value is the whole guarantee. A surge is part of a
-    /// river's identity, so it has to be present before the first draw: a
+    /// Taking `self` by value makes it read as construction, and the assert
+    /// is what enforces it: a source that has resolved, or even attempted, a
+    /// parent - reading one quote resolves its whole parent - is refused.
+    /// The window is written through `Arc::make_mut`, so a spec already
+    /// shared with a clone is copied, never mutated under that clone. A
+    /// surge is part of a river's identity, so it has to be present before
+    /// the first draw: a
     /// generator that acquired one part-way through its walk would produce a
     /// sequence no from-origin replay could reproduce, and every checkpoint
     /// taken before the arm would resume onto different water. That was the
@@ -414,21 +488,23 @@ impl GeneratedSource {
     /// exogenous rather than a promise to whoever asked.
     #[must_use]
     pub fn with_surge(
-        self,
+        mut self,
         start_ns: u64,
         duration_ms: u64,
         rate_mult: f64,
         children_mult: f64,
     ) -> Self {
-        Self {
-            surge: Some(SurgeWindow {
-                start_ns,
-                end_ns: start_ns.saturating_add(duration_ms.saturating_mul(1_000_000)),
-                rate_mult,
-                children_mult,
-            }),
-            ..self
-        }
+        assert!(
+            !self.resolved_any && self.fault.is_none(),
+            "with_surge applies to a source that has drawn nothing"
+        );
+        Arc::make_mut(&mut self.spec).surge = Some(SurgeWindow {
+            start_ns,
+            end_ns: start_ns.saturating_add(duration_ms.saturating_mul(1_000_000)),
+            rate_mult,
+            children_mult,
+        });
+        self
     }
 
     #[must_use]
@@ -643,11 +719,14 @@ impl GeneratedSource {
                 .validate()
                 .map_err(GeneratedSourceError::Calendar)?;
         }
+        // Compiled once, after validation, and shared by the spec, the
+        // cascade tables and the integrated environment alike.
+        let calendar = calendar.map(|calendar| Arc::new(CompiledCalendar::new(&calendar)));
         let cascade = match (&scalars.cascade, &calendar) {
-            (Some(config), Some(calendar)) => Some(Arc::new(
+            (Some(config), Some(calendar)) => Some(
                 CascadeTables::new(config, calendar, scalars.mean_event_duration_s)
                     .map_err(GeneratedSourceError::Scalar)?,
-            )),
+            ),
             (Some(_), None) => {
                 return Err(GeneratedSourceError::Scalar(ScalarError::detailed(
                     "cascade",
@@ -701,13 +780,14 @@ impl GeneratedSource {
         // which the literal moves; `start_ts` is the tape anchor that RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
-        let cadence = CadenceWalk::assemble(
+        let cadence = CadenceWalk::assemble_compiled(
             &scalars,
             session,
             calendar.as_ref(),
             regime.arrival_thin,
             seed,
             start_ts,
+            CADENCE_STEP_NS,
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         let tick_f64 = decimal_to_f64(scalars.modal_tick);
@@ -718,73 +798,108 @@ impl GeneratedSource {
             min_units,
             lot_exponent(size_median),
         );
-        let mut this = Self {
-            tick_f64,
-            coins,
+        // Every realization opens on the Buyer side regardless of seed:
+        // `prev_side` seeds to Buyer and the low regime flips it only at
+        // BOUNCE_LOW_FLIP_PROB (0.02), so a fresh stream prints a long Buyer run
+        // before the first flip. This seed-independent opening bias is
+        // deliberate and left as-is: it is a start-of-stream transient (a real
+        // bounce process is equally free to open either way), it is fully
+        // deterministic, and re-seeding the side would consume an extra RNG
+        // draw for zero fidelity gain.
+        let bounce = || BounceState {
+            prev_side: AggressorSide::Buyer,
+            high_regime: false,
+            drift_ticks: 0,
+            drift_dir: 1,
+            drift_hot: false,
+            laws: BounceLaws::new(),
+        };
+        let mut rng = ChaCha12Rng::seed_from_u64(seed);
+        // The walk's mode, in `begin_event`'s old dispatch order. The
+        // cascade's components start from their stationary law, which costs
+        // main-stream draws only on a cascade source: a calendar-less source
+        // takes exactly the draws it always did. The discrete book takes no
+        // main-stream draw: its streams are derived from the seed under their
+        // own domain tags, so a book preset's cascade realization is
+        // byte-identical to the same preset without a book. The book opens
+        // around the start-price anchor at the first phase row's knobs.
+        let walk = match (&cascade, &scalars.book, cadence.kernel) {
+            (Some(tables), book, _) => {
+                let state = CascadeState::new(tables, &mut rng, start_ts);
+                match book {
+                    Some(config) => {
+                        let anchor_ticks = decimal_to_f64(scalars.start_price) / tick_f64;
+                        Walk::CascadeBook(BookWalk {
+                            cascade: state,
+                            book: DiscreteBook::new(seed, anchor_ticks, config.knobs_at(0)),
+                            last_published: None,
+                        })
+                    }
+                    None => Walk::Cascade(state),
+                }
+            }
+            (None, _, Some(_)) => Walk::Integrated(IntegratedWalk {
+                state: cadence.state.expect("a kernel assembles its state"),
+                cadence_rng: cadence.rng.expect("a kernel assembles its cadence rng"),
+                bounce: bounce(),
+            }),
+            (None, _, None) => Walk::Legacy(LegacyWalk {
+                arrival: ArrivalClock {
+                    active_mean_s,
+                    quiet_mean_s: active_mean_s * quiet_active_ratio,
+                    quiet_to_active: switch_rate * (1.0 - quiet_fraction),
+                    active_to_quiet: switch_rate * quiet_fraction,
+                    quiet: false,
+                    last_quiet: false,
+                },
+                arrival_override: None,
+                bounce: bounce(),
+                last_event_price_ticks: None,
+                last_book: None,
+            }),
+        };
+        let spec = RiverSpec {
+            session: SessionModulator::new(
+                session,
+                calendar.as_ref().map(|calendar| calendar.calendar()),
+            ),
+            scalars,
+            scale,
+            calendar,
+            cascade,
+            arrival_kernel: cadence.kernel,
+            arrival_env: cadence.env,
+            trade_bounce_ticks,
+            duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
+            normal: Normal::new(0.0, 1.0).expect("valid normal"),
+            chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
+            size_dist,
             prices: PriceGrid { tick_mantissa },
             sizes,
             top_bid_units,
             top_ask_units,
             min_units,
-            scalars: Arc::new(scalars),
-            scale: Arc::new(scale),
-            rng: ChaCha12Rng::seed_from_u64(seed),
+            coins,
+            tick_f64,
+            surge: None,
+        };
+        Ok(Self {
+            spec: Arc::new(spec),
+            walk,
+            rng,
             clock_ns: start_ts,
-            arrival: ArrivalClock {
-                active_mean_s,
-                quiet_mean_s: active_mean_s * quiet_active_ratio,
-                quiet_to_active: switch_rate * (1.0 - quiet_fraction),
-                active_to_quiet: switch_rate * quiet_fraction,
-                quiet: false,
-                last_quiet: false,
-            },
-            arrival_override: None,
-            arrival_kernel: cadence.kernel,
-            arrival_state: cadence.state,
-            arrival_env: cadence.env,
-            cadence_rng: cadence.rng,
-            cascade,
-            cascade_state: None,
-            book: None,
-            last_published: None,
+            resolved_any: false,
             plan: Vec::new(),
             cursor: 0,
             plan_parent_ts: start_ts,
             plan_trades: 0,
             fault: None,
             vol,
-            session: SessionModulator::new(session, calendar.as_ref()),
-            bounce: BounceState {
-                // Every realization opens on the Buyer side regardless of seed:
-                // `prev_side` seeds to Buyer and the low regime flips it only at
-                // BOUNCE_LOW_FLIP_PROB (0.02), so a fresh stream prints a long
-                // Buyer run before the first flip. This seed-independent opening
-                // bias is deliberate and left as-is: it is a start-of-stream
-                // transient (a real bounce process is equally free to open either
-                // way), it is fully deterministic, and re-seeding the side would
-                // consume an extra RNG draw for zero fidelity gain.
-                prev_side: AggressorSide::Buyer,
-                high_regime: false,
-                drift_ticks: 0,
-                drift_dir: 1,
-                drift_hot: false,
-                trade_bounce_ticks,
-                laws: BounceLaws::new(),
-            },
-            duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
-            normal: Normal::new(0.0, 1.0).expect("valid normal"),
-            chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
-            size_dist,
             #[cfg(test)]
             size_median,
-            calendar: calendar.map(Arc::new),
             regime,
             reopen_frontier_ns: start_ts,
             shape,
-            burst: SweepBurst::empty(),
-            last_event_price_ticks: None,
-            last_book: None,
-            surge: None,
             vol_trace_enabled: false,
             vol_trace: None,
             #[cfg(test)]
@@ -797,24 +912,7 @@ impl GeneratedSource {
             reader_emitted: 0,
             #[cfg(test)]
             draw_stages: Vec::new(),
-        };
-        // The cascade's components start from their stationary law, which
-        // costs draws only on a cascade source: a calendar-less source takes
-        // exactly the draws it always did.
-        if let Some(tables) = this.cascade.clone() {
-            this.cascade_state = Some(CascadeState::new(&tables, &mut this.rng, start_ts));
-        }
-        // The discrete book takes no main-stream draw: its streams are
-        // derived from the seed under their own domain tags, so a book
-        // preset's cascade realization is byte-identical to the same preset
-        // without a book. The book opens around the start-price anchor at
-        // the first phase row's knobs.
-        if let Some(config) = this.scalars.book.clone() {
-            let anchor_ticks = decimal_to_f64(this.scalars.start_price) / this.tick_f64;
-            let knobs = config.knobs_at(0);
-            this.book = Some(DiscreteBook::new(seed, anchor_ticks, knobs));
-        }
-        Ok(this)
+        })
     }
 
     /// The last instant the walk has reserved; see the field. A fresh source
@@ -827,21 +925,25 @@ impl GeneratedSource {
 
     #[cfg(test)]
     pub(super) fn arrival_mult_for_test(&self, clock_ns: u64) -> f64 {
-        self.session.arrival_mult(clock_ns)
+        self.spec.session.arrival_mult(clock_ns)
     }
 
     #[cfg(test)]
     pub(super) fn vol_mult_for_test(&self, clock_ns: u64) -> f64 {
-        self.session.vol_mult(clock_ns)
+        self.spec.session.vol_mult(clock_ns)
     }
 
     /// Force one arrival state for the committed tick-composition measurement.
     /// `None` restores the natural Markov chain. This is hidden from generated
     /// API documentation and is public only because Cargo examples compile as
-    /// external crates; it is not a venue configuration seam.
+    /// external crates; it is not a venue configuration seam. Only the legacy
+    /// walk has a Markov arrival state to force; on every other walk this
+    /// changes nothing, as it always has.
     #[doc(hidden)]
     pub fn set_arrival_quiet_for_measurement(&mut self, quiet: Option<bool>) {
-        self.arrival_override = quiet;
+        if let Walk::Legacy(walk) = &mut self.walk {
+            walk.arrival_override = quiet;
+        }
     }
 
     /// The active-state mean gap this source was built with, in seconds.
@@ -858,7 +960,10 @@ impl GeneratedSource {
     /// public seam nobody asked for.
     #[cfg(test)]
     pub(super) fn active_mean_s(&self) -> f64 {
-        self.arrival.active_mean_s
+        match &self.walk {
+            Walk::Legacy(walk) => walk.arrival.active_mean_s,
+            _ => panic!("only the legacy walk has a Markov arrival clock"),
+        }
     }
 
     /// One `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap. rand_distr samples it as
@@ -872,36 +977,39 @@ impl GeneratedSource {
             let u: f64 = self.rng.sample(OpenClosed01);
             -u.ln()
         } else {
-            self.duration_dist.sample(&mut self.rng)
+            self.spec.duration_dist.sample(&mut self.rng)
         }
     }
 
     fn next_duration_ns(&mut self) -> u64 {
-        if let Some(quiet) = self.arrival_override {
-            self.arrival.quiet = quiet;
+        let walk = legacy(&mut self.walk);
+        if let Some(quiet) = walk.arrival_override {
+            walk.arrival.quiet = quiet;
         }
         #[cfg(test)]
         self.draw_stages.push("gap");
         let raw_eps = self.draw_unit_weibull();
-        let state_mean = if self.arrival.quiet {
-            self.arrival.quiet_mean_s
+        let arrival = &legacy(&mut self.walk).arrival;
+        let state_mean = if arrival.quiet {
+            arrival.quiet_mean_s
         } else {
-            self.arrival.active_mean_s
+            arrival.active_mean_s
         };
         let duration_s = (state_mean * raw_eps / ARRIVAL_WEIBULL_MEAN).max(0.000_000_001);
-        let flip_probability = if self.arrival.quiet {
-            self.arrival.quiet_to_active
+        let flip_probability = if arrival.quiet {
+            arrival.quiet_to_active
         } else {
-            self.arrival.active_to_quiet
+            arrival.active_to_quiet
         };
         #[cfg(test)]
         self.draw_stages.push("flip");
-        self.arrival
-            .advance_after_gap(self.rng.random_bool(flip_probability));
-        if let Some(quiet) = self.arrival_override {
-            self.arrival.quiet = quiet;
+        let flips = self.rng.random_bool(flip_probability);
+        let walk = legacy(&mut self.walk);
+        walk.arrival.advance_after_gap(flips);
+        if let Some(quiet) = walk.arrival_override {
+            walk.arrival.quiet = quiet;
         }
-        let arr_mult = self.session.arrival_mult(self.clock_ns);
+        let arr_mult = self.spec.session.arrival_mult(self.clock_ns);
         if arr_mult >= LOW_INTENSITY_ARR_MULT {
             // Open-market path: the multiplier sampled at the instant the gap
             // opens stretches the whole draw. The trailing `.min` is a pure
@@ -981,7 +1089,7 @@ impl GeneratedSource {
             // underflows to 0.0, in which case `budget_s / rate` is +inf, the
             // residual branch below never fires, and the walk runs to the cap
             // (the venue is closed harder than f64 can express).
-            let rate = self.session.arrival_mult(pos_ns) / self.regime.arrival_thin;
+            let rate = self.spec.session.arrival_mult(pos_ns) / self.regime.arrival_thin;
             let to_boundary_ns = NS_PER_HOUR - (pos_ns % NS_PER_HOUR);
             let need_ns = (budget_s / rate) * 1_000_000_000.0;
             if need_ns <= to_boundary_ns as f64 {
@@ -1013,7 +1121,8 @@ impl GeneratedSource {
         // Drawn raw then standardized in two named steps - numerically the
         // identical sequence `draw_standardized_innovation` performs - so the
         // observation-only trace can carry both without a second draw.
-        let innovation_raw = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
+        let innovation_raw =
+            draw_student_t(&mut self.rng, &self.spec.normal, &self.spec.chi_squared);
         let innovation = innovation_raw / STUDENT_T_UNIT_SCALE;
         // The base process is regime-independent by construction. `step` applies
         // the GARCH-state rail and the feedback rail, neither of which takes a
@@ -1033,7 +1142,7 @@ impl GeneratedSource {
         // both neutral values being 1.0; do not restructure either into the other
         // (a future regime that set both vol_mult and an edge spike would want the
         // add re-examined - today the match is exclusive so only one is non-unit).
-        let session_vol_mult = self.session.vol_mult(self.clock_ns);
+        let session_vol_mult = self.spec.session.vol_mult(self.clock_ns);
         let regime_vol_mult = self.regime.vol_mult(self.clock_ns);
         let vol_mult = session_vol_mult * regime_vol_mult;
         // Realized ceiling: absolute, and deliberately not scaled by anything.
@@ -1049,7 +1158,7 @@ impl GeneratedSource {
         let pre_realized = base_return * vol_mult;
         let return_n = pre_realized.clamp(-REALIZED_RETURN_CEILING, REALIZED_RETURN_CEILING);
         self.vol.mid = (self.vol.mid * return_n.exp())
-            .max(self.tick_f64)
+            .max(self.spec.tick_f64)
             .min(MID_CEILING);
         if self.vol_trace_enabled {
             self.vol_trace = Some(VolTrace {
@@ -1085,35 +1194,45 @@ impl GeneratedSource {
         self.vol_trace.take()
     }
 
+    /// The bounce side and drift step, then the book placed on the drifted
+    /// mid. The legacy and integrated walks only: the cascade draws its own
+    /// side and places on the mid exactly.
     fn next_side_and_book(&mut self, mid: f64) -> (AggressorSide, PublishedBook) {
-        let side = self.bounce.next_side(&mut self.rng);
-        self.bounce.next_drift(&mut self.rng);
-        let drifted_mid_ticks = mid / self.tick_f64 + self.bounce.drift_ticks as f64;
+        let bounce = bounce_mut(&mut self.walk);
+        let side = bounce.next_side(&mut self.rng);
+        bounce.next_drift(&mut self.rng);
+        let drifted_mid_ticks = mid / self.spec.tick_f64 + bounce.drift_ticks as f64;
         let book = place_book(
             drifted_mid_ticks,
-            &self.scalars.quoted_width,
-            &self.scalars.top_sizes,
+            &self.spec.scalars.quoted_width,
+            &self.spec.scalars.top_sizes,
         );
         (side, book)
     }
 
     fn draw_size(&mut self) -> SizeDraw {
-        let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
-        let lot_snap = self.rng.sample(self.coins.size_snap);
+        let base = self
+            .spec
+            .size_dist
+            .sample(&mut self.rng)
+            .max(f64::MIN_POSITIVE);
+        let lot_snap = self.rng.sample(self.spec.coins.size_snap);
         SizeDraw { base, lot_snap }
     }
 
     #[cfg(test)]
     pub(super) fn next_size(&mut self) -> Decimal {
         let draw = self.draw_size();
-        self.scale
-            .size(self.sizes.quantize(draw.base, draw.lot_snap))
+        self.spec
+            .scale
+            .size(self.spec.sizes.quantize(draw.base, draw.lot_snap))
     }
 
     /// A price coordinate in ticks as a record mantissa, or the terminal
     /// fault that refuses it.
     fn price(&self, ticks: f64) -> Result<i64, TickFault> {
-        self.prices
+        self.spec
+            .prices
             .mantissa(ticks)
             .ok_or(TickFault::PriceUnrepresentable {
                 clock_ns: self.clock_ns,
@@ -1121,7 +1240,8 @@ impl GeneratedSource {
     }
 
     fn book_price(&self, ticks: i64) -> Result<i64, TickFault> {
-        self.prices
+        self.spec
+            .prices
             .mantissa_of_ticks(ticks)
             .ok_or(TickFault::PriceUnrepresentable {
                 clock_ns: self.clock_ns,
@@ -1132,7 +1252,7 @@ impl GeneratedSource {
     /// mantissa, saturating at the quantity ceiling.
     fn book_units(&self, units: u64) -> u64 {
         units
-            .checked_mul(self.min_units)
+            .checked_mul(self.spec.min_units)
             .map_or(SIZE_UNITS_CEILING, |mantissa| {
                 mantissa.min(SIZE_UNITS_CEILING)
             })
@@ -1144,24 +1264,61 @@ impl GeneratedSource {
             ts: self.clock_ns,
             bid_px: self.price(book.bid_ticks)?,
             ask_px: self.price(book.ask_ticks)?,
-            bid_qty: self.top_bid_units,
-            ask_qty: self.top_ask_units,
+            bid_qty: self.spec.top_bid_units,
+            ask_qty: self.spec.top_ask_units,
         }))
     }
 
-    /// Step every child of the burst just begun and append its trade records.
-    fn emit_children(&mut self) -> Result<(), TickFault> {
-        while self.burst.remaining > 0 {
-            let draw = self.step_child();
+    /// Step every child of the sweep just begun and append its trade records.
+    /// The sweep is the parent's own: it starts and ends inside this call,
+    /// because a parent always resolves whole.
+    fn emit_children(&mut self, mut burst: SweepBurst) -> Result<(), TickFault> {
+        while burst.remaining > 0 {
+            let draw = self.step_child(&mut burst);
             let record = Record::Trade(TradeRec {
                 ts: self.clock_ns,
                 px: self.price(draw.price_ticks)?,
-                qty: self.sizes.quantize(draw.size.base, draw.size.lot_snap),
-                side: self.burst.side,
+                qty: self.spec.sizes.quantize(draw.size.base, draw.size.lot_snap),
+                side: burst.side,
             });
             self.plan.push(record);
         }
         Ok(())
+    }
+}
+
+/// The legacy walk's own state. Called only on paths `begin_event` has
+/// already dispatched to the legacy walk.
+fn legacy(walk: &mut Walk) -> &mut LegacyWalk {
+    match walk {
+        Walk::Legacy(walk) => walk,
+        _ => unreachable!("a legacy step on a non-legacy walk"),
+    }
+}
+
+fn book_walk(walk: &mut Walk) -> &mut BookWalk {
+    match walk {
+        Walk::CascadeBook(walk) => walk,
+        _ => unreachable!("a book step on a walk without a discrete book"),
+    }
+}
+
+fn book_mut(walk: &mut Walk) -> &mut DiscreteBook {
+    &mut book_walk(walk).book
+}
+
+fn last_published_mut(walk: &mut Walk) -> &mut Option<BookSnapshot> {
+    &mut book_walk(walk).last_published
+}
+
+/// The bounce/drift state of the walks that place a drifted book.
+fn bounce_mut(walk: &mut Walk) -> &mut BounceState {
+    match walk {
+        Walk::Legacy(walk) => &mut walk.bounce,
+        Walk::Integrated(walk) => &mut walk.bounce,
+        Walk::Cascade(_) | Walk::CascadeBook(_) => {
+            unreachable!("the cascade walks carry no bounce state")
+        }
     }
 }
 
@@ -1172,6 +1329,17 @@ impl GeneratedSource {
 #[cfg(test)]
 pub(super) fn integral_lot(latent_size_median: f64) -> f64 {
     10_f64.powf(latent_size_median.log10().floor()).max(1.0)
+}
+
+/// A placed parent's opening trade level: the book mid displaced by the
+/// trade bounce toward the aggressor, rounded to the grid, floored at one tick.
+fn placed_trade_ticks(book: &PublishedBook, aggressor: AggressorSide, bounce_ticks: f64) -> f64 {
+    match aggressor {
+        AggressorSide::Buyer => (book_mid_ticks(book) + bounce_ticks).round(),
+        AggressorSide::Seller => (book_mid_ticks(book) - bounce_ticks).round(),
+        AggressorSide::NoAggressor => unreachable!("a placed parent's side is native"),
+    }
+    .max(1.0)
 }
 
 pub(super) fn repeat_is_compatible(
@@ -1188,7 +1356,7 @@ pub(super) fn repeat_is_compatible(
 
 impl RiverSource for GeneratedSource {
     fn scale(&self) -> &RecordScale {
-        &self.scale
+        &self.spec.scale
     }
 
     fn next_record(&mut self) -> Option<Record> {
@@ -1295,7 +1463,7 @@ impl GeneratedSource {
     /// reads records.
     pub fn next_tick(&mut self) -> Option<TickEvent> {
         let record = self.next_record()?;
-        Some(self.scale.event(&record))
+        Some(self.spec.scale.event(&record))
     }
 
     /// Resolve the next whole parent into the plan. On success the plan holds
@@ -1304,6 +1472,7 @@ impl GeneratedSource {
     /// a failed parent publishes nothing - neither emit nor skip can observe a
     /// prefix of it. A latched fault is terminal: no later call draws again.
     fn resolve_parent(&mut self) -> Result<(), TickFault> {
+        self.resolved_any = true;
         if let Some(fault) = self.fault {
             return Err(fault);
         }
@@ -1380,20 +1549,20 @@ impl GeneratedSource {
     #[cfg(test)]
     pub(crate) fn advance_parent_with_arrival_latent(&mut self) -> (ParentSummary, u64) {
         assert!(
-            self.arrival_kernel.is_some(),
+            matches!(self.walk, Walk::Integrated(_)),
             "arrival transcript requires an integrated kernel"
         );
         let summary = self
             .advance_parent()
             .expect("arrival transcript requires a non-refusing walk");
+        let Walk::Integrated(walk) = &self.walk else {
+            unreachable!("the walk's mode never changes")
+        };
         let latent_x = self
+            .spec
             .arrival_kernel
             .expect("integrated branch has kernel")
-            .latent_x(
-                self.arrival_state
-                    .as_ref()
-                    .expect("integrated branch has state"),
-            )
+            .latent_x(&walk.state)
             .to_bits();
         (summary, latent_x)
     }
@@ -1401,9 +1570,9 @@ impl GeneratedSource {
     #[cfg(test)]
     pub(super) fn diagnostic_place_book(&self) -> PublishedBook {
         place_book(
-            self.vol.mid / self.tick_f64 + self.bounce.drift_ticks as f64,
-            &self.scalars.quoted_width,
-            &self.scalars.top_sizes,
+            self.vol.mid / self.spec.tick_f64 + self.bounce().drift_ticks as f64,
+            &self.spec.scalars.quoted_width,
+            &self.spec.scalars.top_sizes,
         )
     }
 
@@ -1412,7 +1581,8 @@ impl GeneratedSource {
         rate_mult: f64,
         children_mult: f64,
     ) -> Result<(), TickFault> {
-        let kernel = self.arrival_kernel.expect("integrated branch has kernel");
+        let spec = Arc::clone(&self.spec);
+        let kernel = spec.arrival_kernel.expect("integrated branch has kernel");
         // The kernel tests the crossing against its own walk start, which is the
         // clock after the previous burst's children stepped it past their
         // parent. An arm inside that intra-burst span is still owed, so it is
@@ -1428,15 +1598,16 @@ impl GeneratedSource {
                     at_ts_ns: at_ts_ns.max(self.clock_ns.saturating_add(1)),
                     shift_ns,
                 });
+        let Walk::Integrated(walk) = &mut self.walk else {
+            unreachable!("an integrated step on a non-integrated walk")
+        };
         let draw = kernel
             .next_parent(
-                self.arrival_state
-                    .as_mut()
-                    .expect("integrated branch has state"),
+                &mut walk.state,
                 self.clock_ns,
-                super::arrival::cadence_base_mean_s(&self.scalars),
+                super::arrival::cadence_base_mean_s(&spec.scalars),
                 &self.shape,
-                self.arrival_env
+                spec.arrival_env
                     .as_ref()
                     .expect("integrated branch has environment"),
                 RuntimeModifiers {
@@ -1444,9 +1615,7 @@ impl GeneratedSource {
                     children_mult,
                     pending_reopen,
                 },
-                self.cadence_rng
-                    .as_mut()
-                    .expect("integrated branch has cadence rng"),
+                &mut walk.cadence_rng,
             )
             .map_err(TickFault::Arrival)?;
         self.clock_ns = draw.parent_ts_ns;
@@ -1456,34 +1625,23 @@ impl GeneratedSource {
                 .take_reopen_crossed(self.reopen_frontier_ns, draw.parent_ts_ns)
                 .expect("arrival kernel and regime disagree about reopen crossing");
             self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
-                .max(self.tick_f64)
+                .max(spec.tick_f64)
                 .min(MID_CEILING);
         }
         self.reopen_frontier_ns = self.clock_ns;
         let mid = self.next_latent_mid();
         let (aggressor, book) = self.next_side_and_book(mid);
-        let price_ticks = match aggressor {
-            AggressorSide::Buyer => {
-                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::Seller => {
-                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
-        }
-        .max(1.0);
+        let price_ticks = placed_trade_ticks(&book, aggressor, spec.trade_bounce_ticks);
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
-        self.last_book = Some(book);
-        self.burst = SweepBurst {
+        self.emit_children(SweepBurst {
             remaining: draw.child_count,
             emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
-        };
-        self.emit_children()
+        })
     }
 
     /// Draw the next cascade parent and apply everything external to it: the
@@ -1496,8 +1654,15 @@ impl GeneratedSource {
         &mut self,
         rate_mult: f64,
     ) -> Result<(super::cascade::CascadeParent, f64), TickFault> {
-        let tables = Arc::clone(self.cascade.as_ref().expect("cascade branch has tables"));
-        let mut state = self.cascade_state.take().expect("cascade branch has state");
+        let spec = Arc::clone(&self.spec);
+        let tables = spec.cascade.as_ref().expect("cascade branch has tables");
+        let state = match &mut self.walk {
+            Walk::Cascade(state) => state,
+            Walk::CascadeBook(walk) => &mut walk.cascade,
+            Walk::Legacy(_) | Walk::Integrated(_) => {
+                unreachable!("a cascade step on a non-cascade walk")
+            }
+        };
         if !state.has_parent() {
             // A filled bucket owes at least one parent by construction, so
             // one fill is one parent.
@@ -1507,15 +1672,14 @@ impl GeneratedSource {
                 vol_mult: self.regime.vol_mult(self.clock_ns),
             };
             if let Err(CascadeRefusal::ClockExhausted) =
-                state.fill_next_bucket(&tables, &mut self.rng, self.clock_ns, modifiers)
+                state.fill_next_bucket(tables, &mut self.rng, self.clock_ns, modifiers)
             {
-                self.cascade_state = Some(state);
                 return Err(TickFault::CascadeClockExhausted {
                     clock_ns: self.clock_ns,
                 });
             }
         }
-        let parent = state.draw_parent(&tables, &mut self.rng, self.clock_ns);
+        let parent = state.draw_parent(tables, &mut self.rng, self.clock_ns);
         self.clock_ns = parent.ts_ns;
         let mut log_move = parent.log_move;
         // An armed `ReopenGap` is the unscheduled jump on top of the
@@ -1528,7 +1692,7 @@ impl GeneratedSource {
         {
             self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
             log_move += reopen.gap_frac;
-            if let Some(calendar) = &self.calendar
+            if let Some(calendar) = &spec.calendar
                 && !calendar.is_open(self.clock_ns)
             {
                 self.clock_ns = calendar.next_open_ns(self.clock_ns);
@@ -1536,7 +1700,6 @@ impl GeneratedSource {
             state.reset_bucket(self.clock_ns);
         }
         self.reopen_frontier_ns = self.clock_ns;
-        self.cascade_state = Some(state);
         Ok((parent, log_move))
     }
 
@@ -1553,10 +1716,11 @@ impl GeneratedSource {
         // ticks, converted to a log move at the current mid and added to
         // the cascade's diffusive move, jump and gap. The variance it adds
         // over a minute is fitted out of `event_log_sigma` in the preset.
-        let impact_log = parent.impact_ticks * self.tick_f64 / mid_before.max(self.tick_f64);
+        let tick_f64 = self.spec.tick_f64;
+        let impact_log = parent.impact_ticks * tick_f64 / mid_before.max(tick_f64);
         log_move = (log_move + impact_log).clamp(-MAX_EVENT_LOG_MOVE, MAX_EVENT_LOG_MOVE);
         self.vol.mid = (self.vol.mid * log_move.exp())
-            .max(self.tick_f64)
+            .max(tick_f64)
             .min(MID_CEILING);
         if self.vol_trace_enabled {
             // The observation-only record, in the cascade's terms: there is
@@ -1586,21 +1750,12 @@ impl GeneratedSource {
             });
         }
         let book = place_book(
-            self.vol.mid / self.tick_f64,
-            &self.scalars.quoted_width,
-            &self.scalars.top_sizes,
+            self.vol.mid / tick_f64,
+            &self.spec.scalars.quoted_width,
+            &self.spec.scalars.top_sizes,
         );
         let aggressor = parent.side;
-        let price_ticks = match aggressor {
-            AggressorSide::Buyer => {
-                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::Seller => {
-                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::NoAggressor => unreachable!("the cascade only draws buyer or seller"),
-        }
-        .max(1.0);
+        let price_ticks = placed_trade_ticks(&book, aggressor, self.spec.trade_bounce_ticks);
         let count = if children_mult == 1.0 {
             self.shape.next_count(&mut self.rng)
         } else {
@@ -1609,15 +1764,13 @@ impl GeneratedSource {
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
-        self.last_book = Some(book);
-        self.burst = SweepBurst {
+        self.emit_children(SweepBurst {
             remaining: count,
             emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
-        };
-        self.emit_children()
+        })
     }
 
     /// One parent on the discrete-book path (see the `book` module).
@@ -1636,7 +1789,7 @@ impl GeneratedSource {
         // applied here - the book's anchor impact replaces it (step 5).
         let ext = log_move.clamp(-MAX_EVENT_LOG_MOVE, MAX_EVENT_LOG_MOVE);
         self.vol.mid = (self.vol.mid * ext.exp())
-            .max(self.tick_f64)
+            .max(self.spec.tick_f64)
             .min(MID_CEILING);
         self.resolve_book_parent(parent.side, children_mult)?;
         if self.vol_trace_enabled {
@@ -1683,15 +1836,16 @@ impl GeneratedSource {
         side: AggressorSide,
         children_mult: f64,
     ) -> Result<(), TickFault> {
-        let config = Arc::clone(&self.scalars);
-        let config = config.book.as_ref().expect("book path has a config");
+        let spec = Arc::clone(&self.spec);
+        let tick_f64 = spec.tick_f64;
+        let config = spec.scalars.book.as_ref().expect("book path has a config");
         // The phase row is the law in effect at this minute of session. A
         // parent outside any session would silently take row zero's law, so
         // absence is an invariant failure rather than an implicit phase:
         // the book requires the cascade, the cascade requires a calendar
         // with an envelope, and the envelope schedules parents only inside
         // open windows.
-        let (_day, minute) = self
+        let (_day, minute) = spec
             .calendar
             .as_ref()
             .expect("the book path requires a calendar")
@@ -1712,8 +1866,8 @@ impl GeneratedSource {
         // accepted for signature parity with the placed path and unused.
         let _ = children_mult;
 
-        let anchor_ext = self.vol.mid / self.tick_f64;
-        let book = self.book.as_mut().expect("book path has a book");
+        let anchor_ext = self.vol.mid / tick_f64;
+        let book = book_mut(&mut self.walk);
         book.project(anchor_ext, knobs);
         // The replacement-queue renewal, at the ruled placement: after
         // the parent's projection, before its pre-trade book is
@@ -1728,12 +1882,12 @@ impl GeneratedSource {
 
         // Step 5's anchor half, applied to the latent mid, then the spread
         // relaxes and the book projects against the moved anchor (steps 5-6).
-        let impact_log = impact_ticks * self.tick_f64 / self.vol.mid.max(self.tick_f64);
+        let impact_log = impact_ticks * tick_f64 / self.vol.mid.max(tick_f64);
         self.vol.mid = (self.vol.mid * impact_log.exp())
-            .max(self.tick_f64)
+            .max(tick_f64)
             .min(MID_CEILING);
-        let anchor_moved = self.vol.mid / self.tick_f64;
-        let book = self.book.as_mut().expect("book path has a book");
+        let anchor_moved = self.vol.mid / tick_f64;
+        let book = book_mut(&mut self.walk);
         book.relax(anchor_moved, &config.depth_ratios, knobs);
         book.project(anchor_moved, knobs);
         let post = book.snapshot();
@@ -1782,7 +1936,7 @@ impl GeneratedSource {
     /// with no prior snapshot, always publishes. Updates the dedup state
     /// whenever a quote is emitted.
     fn publish_quote(&mut self, snap: &BookSnapshot, ts: u64) -> Result<(), TickFault> {
-        if self.last_published == Some(*snap) {
+        if last_published_mut(&mut self.walk).as_ref() == Some(snap) {
             return Ok(());
         }
         let record = Record::Quote(QuoteRec {
@@ -1792,7 +1946,7 @@ impl GeneratedSource {
             bid_qty: self.book_units(snap.bid_units),
             ask_qty: self.book_units(snap.ask_units),
         });
-        self.last_published = Some(*snap);
+        *last_published_mut(&mut self.walk) = Some(*snap);
         self.plan.push(record);
         Ok(())
     }
@@ -1801,21 +1955,26 @@ impl GeneratedSource {
         #[cfg(test)]
         self.draw_stages.clear();
         let (rate_mult, children_mult) = self
+            .spec
             .surge
             .as_ref()
             .filter(|window| (window.start_ns..window.end_ns).contains(&self.clock_ns))
             .map_or((1.0, 1.0), |window| {
                 (window.rate_mult, window.children_mult)
             });
-        if self.cascade.is_some() {
-            if self.book.is_some() {
-                return self.begin_cascade_book_event(rate_mult, children_mult);
-            }
-            return self.begin_cascade_event(rate_mult, children_mult);
+        match self.walk {
+            Walk::Legacy(_) => self.begin_legacy_event(rate_mult, children_mult),
+            Walk::Integrated(_) => self.begin_integrated_event(rate_mult, children_mult),
+            Walk::Cascade(_) => self.begin_cascade_event(rate_mult, children_mult),
+            Walk::CascadeBook(_) => self.begin_cascade_book_event(rate_mult, children_mult),
         }
-        if self.arrival_kernel.is_some() {
-            return self.begin_integrated_event(rate_mult, children_mult);
-        }
+    }
+
+    /// One parent on the fingerprint-fitted walk: the Markov gap, the
+    /// calendar and reopen clock steps, the GARCH mid, the bounce-placed book,
+    /// the state-conditioned sweep and the price-repeat branch.
+    fn begin_legacy_event(&mut self, rate_mult: f64, children_mult: f64) -> Result<(), TickFault> {
+        let spec = Arc::clone(&self.spec);
         let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
         // the start of the gap (the clock has not advanced yet), then the clock
@@ -1828,7 +1987,7 @@ impl GeneratedSource {
         // Calendar closure is part of the clock step. Crossing consumers must
         // see its post-jump frontier, otherwise an arm inside the skipped span
         // is stranded forever once the frontier advances past it.
-        if let Some(calendar) = &self.calendar
+        if let Some(calendar) = &spec.calendar
             && !calendar.is_open(self.clock_ns)
         {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
@@ -1839,12 +1998,12 @@ impl GeneratedSource {
         {
             self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
             self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
-                .max(self.tick_f64)
+                .max(spec.tick_f64)
                 .min(MID_CEILING);
         }
         // An unscheduled halt can itself end inside the next scheduled close.
         // The calendar remains authoritative over whether a tick may print.
-        if let Some(calendar) = &self.calendar
+        if let Some(calendar) = &spec.calendar
             && !calendar.is_open(self.clock_ns)
         {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
@@ -1885,41 +2044,43 @@ impl GeneratedSource {
         // fraction collapsed - the July MNQ fit failure. The floor-aware
         // solve re-derives both active parameters from the unconditional
         // targets at the current effective mean, preserving them exactly.
-        let floor_branch = self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0;
+        let scalars = &spec.scalars;
+        let last_quiet = legacy(&mut self.walk).arrival.last_quiet;
+        let floor_branch = scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0;
         let (state_mean, state_single_frac) = if !floor_branch {
-            let state_children_mult = if self.arrival.last_quiet {
+            let state_children_mult = if last_quiet {
                 ARRIVAL_QUIET_CHILDREN_MULT
             } else {
                 ARRIVAL_ACTIVE_CHILDREN_MULT
             };
-            let single = if self.arrival.last_quiet {
-                self.scalars.children_single_frac
+            let single = if last_quiet {
+                scalars.children_single_frac
             } else {
-                ((self.scalars.children_single_frac
+                ((scalars.children_single_frac
                     - ARRIVAL_QUIET_FRACTION
-                        / (self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT))
+                        / (scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT))
                     / (1.0 - ARRIVAL_QUIET_FRACTION))
                     .max(0.0)
             };
             (
-                self.scalars.children_mean * children_mult * state_children_mult,
+                scalars.children_mean * children_mult * state_children_mult,
                 single,
             )
         } else {
-            let effective_mean = self.scalars.children_mean * children_mult;
+            let effective_mean = scalars.children_mean * children_mult;
             let quiet_eff = effective_mean * ARRIVAL_QUIET_CHILDREN_MULT;
             let quiet_mean = quiet_eff.max(1.0);
             let quiet_single = if quiet_eff <= 1.0 {
                 1.0
             } else {
-                self.scalars.children_single_frac.max(1.0 / quiet_eff)
+                scalars.children_single_frac.max(1.0 / quiet_eff)
             };
-            if self.arrival.last_quiet {
+            if last_quiet {
                 (quiet_mean, quiet_single)
             } else {
                 let active_mean = (effective_mean - ARRIVAL_QUIET_FRACTION * quiet_mean)
                     / (1.0 - ARRIVAL_QUIET_FRACTION);
-                let active_single = (self.scalars.children_single_frac
+                let active_single = (scalars.children_single_frac
                     - ARRIVAL_QUIET_FRACTION * quiet_single)
                     / (1.0 - ARRIVAL_QUIET_FRACTION);
                 (active_mean, active_single)
@@ -1955,100 +2116,103 @@ impl GeneratedSource {
             self.shape.drawn += 1;
             count
         };
-        let repeat_draw =
-            count == 1 && !self.bounce.high_regime && self.rng.sample(self.coins.price_repeat);
+        let high_regime = legacy(&mut self.walk).bounce.high_regime;
+        let repeat_draw = count == 1 && !high_regime && self.rng.sample(spec.coins.price_repeat);
+        let walk = legacy(&mut self.walk);
         let compatible_repeat = repeat_draw
-            && self
+            && walk
                 .last_event_price_ticks
-                .zip(self.last_book.as_ref())
+                .zip(walk.last_book.as_ref())
                 .is_some_and(|(price, frozen_book)| {
                     repeat_is_compatible(price, frozen_book, aggressor)
                 });
+        let (book, price_ticks) = if compatible_repeat {
+            (
+                walk.last_book
+                    .clone()
+                    .expect("compatible repeat has a prior book"),
+                walk.last_event_price_ticks
+                    .expect("compatible repeat has a prior price"),
+            )
+        } else {
+            let price_ticks = placed_trade_ticks(&fresh_book, aggressor, spec.trade_bounce_ticks);
+            (fresh_book, price_ticks)
+        };
         #[cfg(test)]
         {
             self.repeat_draws += u64::from(repeat_draw);
             self.rejected_repeat_draws += u64::from(repeat_draw && !compatible_repeat);
         }
-        let book = if compatible_repeat {
-            self.last_book
-                .clone()
-                .expect("compatible repeat has a prior book")
-        } else {
-            fresh_book
-        };
-        let normal_price_ticks = match aggressor {
-            AggressorSide::Buyer => {
-                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::Seller => {
-                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
-            }
-            AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
-        }
-        .max(1.0);
-        let price_ticks = if compatible_repeat {
-            self.last_event_price_ticks
-                .expect("compatible repeat has a prior price")
-        } else {
-            normal_price_ticks
-        };
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
-        self.last_book = Some(book);
-        self.burst = SweepBurst {
+        legacy(&mut self.walk).last_book = Some(book);
+        self.emit_children(SweepBurst {
             remaining: count,
             emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
-        };
-        self.emit_children()
+        })
     }
 
-    fn step_child(&mut self) -> ChildDraw {
+    /// One child of a placed sweep: the level step, the instant, the size.
+    fn step_child(&mut self, burst: &mut SweepBurst) -> ChildDraw {
         // The bounce regime never steps on the cascade path, so its low
         // multiplier would pin the level step at a third of the fitted
         // probability for good; the cascade takes the solved probability as
         // it is (tape protocol 33). A real multi-print parent on CME is a
         // multi-level parent nine times in ten, because a trade summary is
         // one print per level.
-        let level_step = if self.cascade.is_some() {
-            self.coins.level_step_cascade
-        } else if self.bounce.high_regime {
-            self.coins.level_step_high
-        } else {
-            self.coins.level_step_low
+        let coins = &self.spec.coins;
+        let level_step = match &self.walk {
+            Walk::Cascade(_) => coins.level_step_cascade,
+            Walk::Legacy(LegacyWalk { bounce, .. })
+            | Walk::Integrated(IntegratedWalk { bounce, .. }) => {
+                if bounce.high_regime {
+                    coins.level_step_high
+                } else {
+                    coins.level_step_low
+                }
+            }
+            Walk::CascadeBook(_) => unreachable!("the discrete book places no sweep"),
         };
-        if self.burst.emitted > 0 && self.rng.sample(level_step) {
-            match self.burst.side {
-                AggressorSide::Buyer => self.burst.price_ticks += 1.0,
-                AggressorSide::Seller => self.burst.price_ticks -= 1.0,
+        if burst.emitted > 0 && self.rng.sample(level_step) {
+            match burst.side {
+                AggressorSide::Buyer => burst.price_ticks += 1.0,
+                AggressorSide::Seller => burst.price_ticks -= 1.0,
                 AggressorSide::NoAggressor => unreachable!("parent side is native"),
             }
         }
-        self.burst.price_ticks = self.burst.price_ticks.max(1.0);
-        self.clock_ns = self
-            .burst
+        burst.price_ticks = burst.price_ticks.max(1.0);
+        self.clock_ns = burst
             .parent_ts_ns
-            .saturating_add(u64::from(self.burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
+            .saturating_add(u64::from(burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
         let draw = ChildDraw {
             size: self.draw_size(),
-            price_ticks: self.burst.price_ticks,
+            price_ticks: burst.price_ticks,
         };
-        self.burst.remaining -= 1;
-        self.burst.emitted += 1;
-        if self.burst.remaining == 0 {
-            // End of the sweep: remember where it finished (the repeat branch
-            // in `begin_event` re-prices from here) and re-center the bounce
-            // drift on the residual between the last printed level and the
-            // latent mid. `BounceState::next_drift` still takes its per-event
-            // step, but it no longer accumulates across events - see the field
-            // comment on `drift_ticks`.
-            self.last_event_price_ticks = Some(self.burst.price_ticks);
-            self.bounce.drift_ticks = (DRIFT_RECENTER_FRAC
-                * (self.burst.price_ticks - self.vol.mid / self.tick_f64))
+        burst.remaining -= 1;
+        burst.emitted += 1;
+        if burst.remaining == 0 {
+            // End of the sweep. The legacy walk remembers where it finished
+            // (its repeat branch re-prices from here), and both bounce walks
+            // re-center the drift on the residual between the last printed
+            // level and the latent mid. `BounceState::next_drift` still takes
+            // its per-event step, but it no longer accumulates across events -
+            // see the field comment on `drift_ticks`. The cascade reads
+            // neither, so it keeps neither.
+            let recentred = (DRIFT_RECENTER_FRAC
+                * (burst.price_ticks - self.vol.mid / self.spec.tick_f64))
                 .round() as i64;
+            match &mut self.walk {
+                Walk::Legacy(walk) => {
+                    walk.last_event_price_ticks = Some(burst.price_ticks);
+                    walk.bounce.drift_ticks = recentred;
+                }
+                Walk::Integrated(walk) => walk.bounce.drift_ticks = recentred,
+                Walk::Cascade(_) | Walk::CascadeBook(_) => {}
+            }
         }
         draw
     }

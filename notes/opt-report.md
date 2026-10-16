@@ -5,8 +5,8 @@ This merges two independent reports (`opt-report-1.md` and
 idea, the entry carries the union of their detail and says so. Where only
 one did, the entry names its source. The code claims are the reports'
 own, not re-verified, unless an entry says otherwise. What has been
-actioned is recorded under "Status" at the end; the large rewrites
-(priorities 1 to 6) have not been started.
+actioned is recorded under "Status" at the end, which is the place to
+read which priorities have landed.
 
 The classification on each entry:
 
@@ -517,12 +517,38 @@ measured for speed; the debug-slow tests below have not been re-timed.
 - A per-state sweep-shape cache (local change 2): `begin_event`
   re-solves per event on purpose, and the code records a measurement
   showing no gain.
-- O(1) calendar `is_open` / `next_open_ns` (local change 1):
-  `SessionCalendar` has public fields, so a cache inside it could go
-  stale silently. Belongs with priority 3's `RiverSpec`.
-- The `CheckpointIndex` doc claim that a clone copies only mutable state
-  is still false: `ArrivalEnv` still clones its calendar and transition
-  vector. Also priority 3.
+### Priority 3, landed byte-preserving
+
+`GeneratedSource` is now one `Arc<RiverSpec>` (config, record scale,
+compiled calendar, session and cascade tables, integrated environment,
+samplers, size grid, surge window) plus a `Walk` enum, `Legacy |
+Integrated | Cascade | CascadeBook`, each variant holding only the state
+its path reads. Dead writes went with the split: the cascade no longer
+keeps bounce state, a prior book or a prior price, and the integrated
+walk keeps no prior book or price. The sweep is parent-local.
+`SweepShape` stays whole on the source, so each path keeps its own
+truncation accounting.
+
+- Local change 1's remainder: `CompiledCalendar` (`generated/calendar.rs`)
+  answers `is_open`, `session_position` and `next_open_ns` by a
+  per-UTC-minute-of-week table, filled by calling `SessionCalendar`'s own
+  methods. `SessionCalendar` stays the public input, so there is no
+  stale-cache risk. The cascade's per-second calendar questions read it.
+  Pinned by `a_compiled_calendar_answers_every_instant_as_the_calendar_does`
+  (bite-checked).
+- `ArrivalEnv` shares the compiled calendar and its transition schedule,
+  so the `CheckpointIndex` doc's sharing claim is now true and reworded
+  to name what a snapshot still copies.
+- `with_surge` documented a before-the-first-draw guarantee it did not
+  enforce. It now asserts on a sticky `resolved_any` flag and writes the
+  spec copy-on-write. Pinned by `a_surge_is_refused_once_the_walk_has_drawn`
+  (bite-checked) and `a_surge_never_reaches_a_clone_taken_before_it`.
+- Not done, deliberately: compressing the snapshot's `ChaCha12Rng` to key
+  plus word position (about a megabyte per river at the cap), and moving
+  the few fixed scalars inside `ArrivalClock`, `BounceState`, `SweepShape`
+  and `RegimeState` into the spec (a few words each).
+- Not measured: this should move seek, history and checkpoint costs on the
+  calendar presets, not the BTCUSDT walls below.
 
 ### Test changes
 
@@ -539,14 +565,21 @@ Each carries an ignore reason beginning `debug-slow:`, so
 debug. `brokkr check --gate` sets `include_ignored`, so the gate still
 runs and times out on these until they are fixed or skip-listed.
 
-| Test | File | Wall |
-|---|---|---|
-| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 42.0 s |
-| `session_edge_spike_lifts_realized_clamp` | `crates/mogwai-data/src/generated/tests.rs` | 33.5 s |
-| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s |
-| `session_edge_spike_localizes` | `crates/mogwai-data/src/generated/tests.rs` | 16.8 s |
-| `one_walk_serves_every_probe_on_a_symbol` | `crates/mogwai-venue/src/fills.rs` | 34.8 s |
-| `sweep_pass_walks_only_the_new_span` | `crates/mogwai-venue/src/fills.rs` | 21.0 s |
+| Test | File | Wall | After P1+P2 (tape 35) |
+|---|---|---|---|
+| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 42.0 s | 38.3 s |
+| `session_edge_spike_lifts_realized_clamp` | `crates/mogwai-data/src/generated/tests.rs` | 33.5 s | 27.3 s |
+| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.5 s |
+| `session_edge_spike_localizes` | `crates/mogwai-data/src/generated/tests.rs` | 16.8 s | 13.8 s |
+| `one_walk_serves_every_probe_on_a_symbol` | `crates/mogwai-venue/src/fills.rs` | 34.8 s | 35.8 s |
+| `sweep_pass_walks_only_the_new_span` | `crates/mogwai-venue/src/fills.rs` | 21.0 s | 21.5 s |
+
+The re-timing (2026-10-16, one test alone, dev build) says priorities 1 and 2
+did not move these walls much: they are dominated by draws, not by
+materialization. The venue pair walks a day of BTCUSDT from the origin to
+reach `TEST_ORIGIN`, and that reach now resolves every child's draws just as
+before. Priority 4 (counter-addressed sizes off the serial stream, geometric
+level steps) is the lever that reaches them.
 
 `realism` has a measured floor: its 2M parents' draws alone take 22.5 s
 through `advance_parent`, so no materialization fix brings it under the
@@ -554,22 +587,6 @@ watchdog. Its lag-50 autocorrelations need one continuous series, so it
 cannot be split the way the dwell arms were. Options are a split into
 shorter multi-seed arms after measuring their margins, a release sweep
 inside the gate, or priority 4.
-
-### Failing under the gate, not timing out
-
-Both bind a loopback listener, so only `brokkr check --gate` runs them, and
-both fail an assertion rather than the watchdog. They fail identically on
-the 2026-10-16 committed tree, before the record rewrite, so the rewrite did
-not cause them.
-
-| Test | File | Observed |
-|---|---|---|
-| `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline` | `crates/mogwai-cli/tests/completion.rs` | serves about 1.968 s of a declared 2 s, below the 1.98 s `boat_skew_floor` |
-| `a_short_accelerated_run_is_not_over_before_it_is_ready` | `crates/mogwai-cli/tests/completion.rs` | fails in the same gate run; not yet examined alone |
-
-The shortfall is about 32 ms on every run, and `elapsed_ns` counts from the
-boat's placement, so the likely cause is a slower placement (the warmup
-reach) in an unoptimized dev build. Not yet confirmed.
 
 ### Failing under the gate, not timing out
 

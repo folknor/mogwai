@@ -30,9 +30,12 @@ use super::source::GeneratedSource;
 /// spacing, so the index's memory is bounded by `MAX_CHECKPOINTS` generator
 /// clones regardless of how long an accelerated session runs. 4096 keeps
 /// coarsening rare (the first only after roughly `4096 * k` records) while
-/// capping worst-case mutable-state memory. Immutable generator scalars, the
-/// record scale and the session calendar are shared by the lead and every
-/// snapshot.
+/// capping worst-case mutable-state memory. The generator's `RiverSpec` - its
+/// config, record scale, compiled calendar, session and cascade tables,
+/// integrated environment, samplers and size grid - is one `Arc` shared by the
+/// lead and every snapshot. A snapshot copies the walk state, plus a few
+/// fixed scalars that ride inside small state structs (the arrival means, the
+/// bounce coins, the sweep law, the regime modifiers).
 pub(super) const MAX_CHECKPOINTS: usize = 4096;
 
 /// One retained walk state at a parent boundary, and the cumulative number of

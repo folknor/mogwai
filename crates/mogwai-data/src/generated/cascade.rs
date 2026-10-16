@@ -82,7 +82,9 @@ use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, Normal, Poisson};
 use serde::Deserialize;
 
-use super::calendar::SessionCalendar;
+use std::sync::Arc;
+
+use super::calendar::CompiledCalendar;
 use super::consts::INTRA_EVENT_STEP_NS;
 use super::dynamics::draw_student_t;
 use super::fingerprint::ScalarError;
@@ -387,7 +389,10 @@ pub(super) enum CascadeRefusal {
 #[derive(Clone)]
 pub(super) struct CascadeTables {
     config: CascadeConfig,
-    calendar: SessionCalendar,
+    /// The generator's own compiled calendar, shared: the walk asks it
+    /// whether a second is open, where the next open is and which session
+    /// minute it falls in, every second.
+    calendar: Arc<CompiledCalendar>,
     /// Per minute of session: the envelope's mean arrival shape, normalised
     /// to mean one over the calendar's open week minutes with the weekday
     /// weight applied.
@@ -427,10 +432,11 @@ struct OneSecondSteps {
 impl CascadeTables {
     pub(super) fn new(
         config: &CascadeConfig,
-        calendar: &SessionCalendar,
+        compiled: &Arc<CompiledCalendar>,
         mean_event_duration_s: f64,
     ) -> Result<Self, ScalarError> {
         config.validate()?;
+        let calendar = compiled.calendar();
         let Some(envelope) = calendar.envelope.as_ref() else {
             return Err(ScalarError::detailed(
                 "cascade",
@@ -500,7 +506,7 @@ impl CascadeTables {
         };
         Ok(Self {
             config: config.clone(),
-            calendar: calendar.clone(),
+            calendar: Arc::clone(compiled),
             arrival,
             texture_s,
             sigma_shape,
@@ -1003,8 +1009,22 @@ fn poisson(rng: &mut ChaCha12Rng, lambda: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::calendar::{SessionEnvelope, WeeklyWindow};
+    use crate::generated::calendar::{SessionCalendar, SessionEnvelope, WeeklyWindow};
     use rand::SeedableRng;
+
+    /// The tables over a calendar compiled for the purpose, as the
+    /// generator compiles its own.
+    fn build_tables(
+        config: &CascadeConfig,
+        calendar: &SessionCalendar,
+        mean_event_duration_s: f64,
+    ) -> Result<CascadeTables, ScalarError> {
+        CascadeTables::new(
+            config,
+            &Arc::new(CompiledCalendar::new(calendar)),
+            mean_event_duration_s,
+        )
+    }
 
     pub(crate) fn config() -> CascadeConfig {
         CascadeConfig {
@@ -1068,7 +1088,7 @@ mod tests {
     fn a_cascade_without_an_envelope_is_refused() {
         let mut calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         calendar.envelope = None;
-        let Err(error) = CascadeTables::new(&config(), &calendar, 0.08) else {
+        let Err(error) = build_tables(&config(), &calendar, 0.08) else {
             panic!("a cascade without an envelope was accepted");
         };
         assert_eq!(error.field, "cascade");
@@ -1079,8 +1099,7 @@ mod tests {
     fn mismatched_or_unnormalised_components_are_refused() {
         let mut bad = config();
         bad.texture_weights.pop();
-        let Err(error) =
-            CascadeTables::new(&bad, &calendar(vec![1.0; 1_380], vec![1.0; 1_380]), 0.08)
+        let Err(error) = build_tables(&bad, &calendar(vec![1.0; 1_380], vec![1.0; 1_380]), 0.08)
         else {
             panic!("mismatched components were accepted");
         };
@@ -1097,7 +1116,7 @@ mod tests {
     fn the_lifted_envelope_has_mean_one_over_open_minutes() {
         // A flat median envelope lifts to a flat mean envelope, which then
         // normalises to exactly one at every minute.
-        let tables = CascadeTables::new(
+        let tables = build_tables(
             &config(),
             &calendar(vec![1.0; 1_380], vec![1.0; 1_380]),
             0.08,
@@ -1111,8 +1130,7 @@ mod tests {
         for v in volume.iter_mut().skip(690) {
             *v = 1.5;
         }
-        let tables =
-            CascadeTables::new(&config(), &calendar(volume, vec![1.0; 1_380]), 0.08).unwrap();
+        let tables = build_tables(&config(), &calendar(volume, vec![1.0; 1_380]), 0.08).unwrap();
         let mean: f64 = tables.arrival.iter().sum::<f64>() / tables.arrival.len() as f64;
         assert!((mean - 1.0).abs() < 1e-9, "{mean}");
         // The quiet half is lifted more than the busy half.
@@ -1127,7 +1145,7 @@ mod tests {
         config.gap_log_sd = 0.0;
         config.gap_log_clamp_sd = 1.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
-        let tables = CascadeTables::new(&config, &calendar, 0.08).unwrap();
+        let tables = build_tables(&config, &calendar, 0.08).unwrap();
         let mut rng = ChaCha12Rng::seed_from_u64(7);
         // Thursday 1970-01-01 is local day 4. Start ten seconds before the
         // Thursday 16:00 close so parents certainly land before it (a
@@ -1178,7 +1196,7 @@ mod tests {
     /// Walk parents from `start` until `end`, returning them in order.
     fn walk(config: &CascadeConfig, seed: u64, start: u64, end: u64) -> Vec<CascadeParent> {
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
-        let tables = CascadeTables::new(config, &calendar, 0.08).unwrap();
+        let tables = build_tables(config, &calendar, 0.08).unwrap();
         let mut rng = ChaCha12Rng::seed_from_u64(seed);
         let mut state = CascadeState::new(&tables, &mut rng, start);
         let modifiers = SecondModifiers {
@@ -1355,7 +1373,7 @@ mod tests {
         config.level_log_sd = 0.0;
         config.sigma_level_log_sd = 0.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
-        let tables = CascadeTables::new(&config, &calendar, 0.08).unwrap();
+        let tables = build_tables(&config, &calendar, 0.08).unwrap();
         let mut rng = ChaCha12Rng::seed_from_u64(3);
         let start = 1_020 * NS_PER_MINUTE;
         let end = start + 600 * NS_PER_MINUTE;

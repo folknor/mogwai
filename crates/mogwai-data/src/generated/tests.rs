@@ -88,6 +88,43 @@ fn clones_share_immutable_config_and_emitted_symbol_storage() {
     assert!(std::sync::Arc::ptr_eq(&left.symbol, &right.symbol));
 }
 
+/// A surge is construction: one installed after the walk has resolved a
+/// parent - here by reading only that parent's opening quote - would give a
+/// river no from-origin replay reproduces, so it is refused.
+#[test]
+#[should_panic(expected = "with_surge applies to a source that has drawn nothing")]
+fn a_surge_is_refused_once_the_walk_has_drawn() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut source = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    let _ = crate::RiverSource::next_record(&mut source);
+    drop(source.with_surge(1_000, 60_000, 2.0, 1.5));
+}
+
+/// A surge installed on a fresh source that a clone already shares writes a
+/// spec of its own, so the clone keeps the realization it was taken from.
+#[test]
+fn a_surge_never_reaches_a_clone_taken_before_it() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let source = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    let mut plain = source.clone();
+    let mut surged = source.with_surge(1_000, 600_000, 10.0, 4.0);
+    assert!(!surged.shares_immutable_config_with(&plain));
+    let mut reference =
+        GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);
+    let mut diverged = false;
+    let next = |source: &mut GeneratedSource| {
+        crate::RiverSource::next_record(source).expect("infinite tape")
+    };
+    for _ in 0..2_000 {
+        let left = next(&mut plain);
+        assert_eq!(left, next(&mut reference));
+        diverged |= left != next(&mut surged);
+    }
+    assert!(diverged, "the surge never moved the surged river");
+}
+
 /// An integrated source whose origin sits at `origin_ns`, for building arrival
 /// refusals. `next_parent` computes `limit = from_ns + MAX_SESSION_GAP_NS`
 /// saturating, so an origin at or near `u64::MAX` leaves the budget walk with
@@ -5030,12 +5067,11 @@ fn the_trade_displacement_never_varies() {
         let mut saw_high_regime = false;
         for _ in 0..20_000 {
             src.next_tick().expect("infinite tape");
-            saw_high_regime |= src.bounce.high_regime;
+            saw_high_regime |= src.bounce().high_regime;
             assert!(
-                (src.bounce.trade_bounce_ticks - TRADE_BOUNCE_HALF_WIDTH_TICKS).abs()
-                    < f64::EPSILON,
+                (src.trade_bounce_ticks() - TRADE_BOUNCE_HALF_WIDTH_TICKS).abs() < f64::EPSILON,
                 "{symbol}: displacement moved to {} from {TRADE_BOUNCE_HALF_WIDTH_TICKS}",
-                src.bounce.trade_bounce_ticks
+                src.trade_bounce_ticks()
             );
         }
         // Without this the assertion above could pass on a tape that never left

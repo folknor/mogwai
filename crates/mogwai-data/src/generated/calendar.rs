@@ -253,6 +253,137 @@ impl SessionCalendar {
     }
 }
 
+/// One UTC minute of the week, as the calendar answers it.
+#[derive(Debug, Clone, Copy)]
+struct MinuteCell {
+    open: bool,
+    /// Whole minutes from this one to the next open minute start, or
+    /// `NEVER_OPENS`. Read only while closed.
+    until_open: u16,
+    /// The session position as `(weekday, minute of session)`, or `None`.
+    position: Option<(u8, u32)>,
+}
+
+const NEVER_OPENS: u16 = u16::MAX;
+
+/// A [`SessionCalendar`] frozen into one row per UTC minute of the
+/// week, so the walk's calendar questions are a table lookup rather than a
+/// scan over windows (`is_open`) or over up to a week of minutes
+/// (`next_open_ns`).
+///
+/// Every answer the calendar gives depends on the instant only through
+/// `local_week_minute`, which floors to the minute before shifting by a
+/// whole-minute offset, so it is a function of the UTC minute modulo a week.
+/// The table is therefore filled by asking the calendar's own methods at
+/// each minute start - never a second implementation of the local-week
+/// arithmetic - and a lookup returns what the calendar would have answered
+/// at any instant, bit for bit
+/// (`a_compiled_calendar_answers_every_instant_as_the_calendar_does` pins
+/// it). Openness and session position are independent columns because the
+/// calendar keeps them independent: a closed minute can carry a position, and
+/// an open one past the envelope's length carries none.
+///
+/// `SessionCalendar` stays the public, mutable input value; this is a copy
+/// compiled from it once, so no later edit to a calendar's public fields can
+/// leave a cache stale.
+#[derive(Debug)]
+pub(crate) struct CompiledCalendar {
+    calendar: SessionCalendar,
+    minutes: Box<[MinuteCell]>,
+}
+
+impl CompiledCalendar {
+    /// Compile a calendar the caller has validated. The table answers what
+    /// the calendar's methods answer, so compiling adds no refusal of its own
+    /// and validation stays where each caller already performs it. An
+    /// unvalidated calendar is no safer here than in its own methods: an
+    /// envelope opening past the end of the day underflows
+    /// `session_position`, which compilation calls.
+    pub(crate) fn new(calendar: &SessionCalendar) -> Self {
+        let week = MINUTES_PER_WEEK as usize;
+        let mut minutes: Vec<MinuteCell> = (0..week as u64)
+            .map(|minute| {
+                let clock_ns = minute * NS_PER_MINUTE;
+                MinuteCell {
+                    open: calendar.is_open(clock_ns),
+                    until_open: NEVER_OPENS,
+                    position: calendar
+                        .session_position(clock_ns)
+                        .map(|(day, minute)| (day as u8, minute as u32)),
+                }
+            })
+            .collect();
+        // Minutes to the next open minute start, strictly after each minute
+        // and at most a week on (the scan's own `1..=MINUTES_PER_WEEK`): two
+        // backward passes, so the second sees, from late in the week, the
+        // earliest opening of the next. An index at or below the minute being
+        // filled is one the walk reaches by wrapping.
+        let mut next_open: Option<usize> = None;
+        for _ in 0..2 {
+            for index in (0..week).rev() {
+                if let Some(open_at) = next_open {
+                    let distance = if open_at > index {
+                        open_at - index
+                    } else {
+                        open_at + week - index
+                    };
+                    minutes[index].until_open = distance as u16;
+                }
+                if minutes[index].open {
+                    next_open = Some(index);
+                }
+            }
+        }
+        Self {
+            calendar: calendar.clone(),
+            minutes: minutes.into_boxed_slice(),
+        }
+    }
+
+    fn cell(&self, clock_ns: u64) -> MinuteCell {
+        self.minutes[((clock_ns / NS_PER_MINUTE) % MINUTES_PER_WEEK as u64) as usize]
+    }
+
+    /// The calendar this was compiled from.
+    #[must_use]
+    pub(crate) fn calendar(&self) -> &SessionCalendar {
+        &self.calendar
+    }
+
+    /// [`SessionCalendar::is_open`], by lookup.
+    #[must_use]
+    pub(crate) fn is_open(&self, clock_ns: u64) -> bool {
+        self.cell(clock_ns).open
+    }
+
+    /// [`SessionCalendar::session_position`], by lookup.
+    #[must_use]
+    pub(crate) fn session_position(&self, clock_ns: u64) -> Option<(usize, usize)> {
+        self.cell(clock_ns)
+            .position
+            .map(|(day, minute)| (usize::from(day), minute as usize))
+    }
+
+    /// [`SessionCalendar::next_open_ns`], by lookup. An open instant is
+    /// returned unchanged; a closed one floors to its minute before adding
+    /// the distance, exactly as the scan built its candidates, so the
+    /// subminute remainder is dropped the same way and saturation lands on
+    /// the same `u64::MAX` sentinel.
+    #[must_use]
+    pub(crate) fn next_open_ns(&self, clock_ns: u64) -> u64 {
+        let cell = self.cell(clock_ns);
+        if cell.open {
+            return clock_ns;
+        }
+        if cell.until_open == NEVER_OPENS {
+            return u64::MAX;
+        }
+        (clock_ns / NS_PER_MINUTE)
+            .saturating_add(u64::from(cell.until_open))
+            .saturating_mul(NS_PER_MINUTE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +537,74 @@ mod tests {
         // crossing rather than walking minutes and filtering. Without this the
         // instant list above is satisfied by either implementation.
         assert_eq!(candidates, 10);
+    }
+
+    /// The compiled table against the calendar's own scans, at every minute
+    /// start of a week and at both subminute edges of each, under offsets at
+    /// both validation extremes, a wrapping window, a single open minute, an
+    /// envelope that disagrees with the windows about which minutes exist,
+    /// and instants far enough out that `next_open_ns` saturates.
+    #[test]
+    fn a_compiled_calendar_answers_every_instant_as_the_calendar_does() {
+        let window = |start_minute, end_minute| WeeklyWindow {
+            start_minute,
+            end_minute,
+        };
+        let mut wrapping = enveloped(900);
+        wrapping.utc_offset_minutes = -720;
+        wrapping.open_windows = vec![window(9_000, 1_200), window(3_000, 4_500)];
+        let mut single = calendar();
+        single.utc_offset_minutes = 840;
+        single.open_windows = vec![window(5_000, 5_001)];
+        single.settlement_minute_of_day = None;
+        let mut disagreeing = enveloped(1_440);
+        disagreeing.utc_offset_minutes = -300;
+        disagreeing.open_windows = vec![window(1_000, 2_000), window(6_000, 8_000)];
+        for value in [calendar(), enveloped(1_380), wrapping, single, disagreeing] {
+            value.validate().unwrap();
+            let compiled = CompiledCalendar::new(&value);
+            let week_ns = MINUTES_PER_WEEK as u64 * NS_PER_MINUTE;
+            let far = u64::MAX - 2 * week_ns;
+            for base in [0, 53 * week_ns, far, u64::MAX - week_ns] {
+                for minute in 0..MINUTES_PER_WEEK as u64 {
+                    let start = base / NS_PER_MINUTE * NS_PER_MINUTE + minute * NS_PER_MINUTE;
+                    for clock_ns in [start, start + 1, start + NS_PER_MINUTE - 1] {
+                        assert_eq!(
+                            compiled.is_open(clock_ns),
+                            value.is_open(clock_ns),
+                            "is_open at {clock_ns}"
+                        );
+                        assert_eq!(
+                            compiled.session_position(clock_ns),
+                            value.session_position(clock_ns),
+                            "session_position at {clock_ns}"
+                        );
+                    }
+                    // The reference scan is up to a week of minutes per
+                    // closed instant, so it is asked on a stride plus every
+                    // minute beside an open/closed edge, where an off-by-one
+                    // in the distance would show.
+                    let near_edge = [start.saturating_sub(NS_PER_MINUTE), start + NS_PER_MINUTE]
+                        .iter()
+                        .any(|&other| value.is_open(other) != value.is_open(start));
+                    if minute % 37 == 0 || near_edge {
+                        for clock_ns in [start, start + NS_PER_MINUTE - 1] {
+                            assert_eq!(
+                                compiled.next_open_ns(clock_ns),
+                                value.next_open_ns(clock_ns),
+                                "next_open_ns at {clock_ns}"
+                            );
+                        }
+                    }
+                }
+            }
+            for clock_ns in [u64::MAX, u64::MAX - 1, u64::MAX - NS_PER_MINUTE] {
+                assert_eq!(compiled.is_open(clock_ns), value.is_open(clock_ns));
+                assert_eq!(
+                    compiled.next_open_ns(clock_ns),
+                    value.next_open_ns(clock_ns)
+                );
+            }
+        }
     }
 }
