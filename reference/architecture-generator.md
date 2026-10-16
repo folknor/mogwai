@@ -292,7 +292,12 @@ A resolution that fails installs nothing, so a faulted parent publishes no
 prefix. `ParentSource::next_parent` hands a parent-aware reader the whole
 parent - its instant, its records, its trade count and its volatility trace -
 because quotes are not a parent boundary on every path: the discrete book can
-publish two for one parent, or suppress both.
+publish two for one parent, or suppress both. `next_parent_unsized` is the same
+read for a reader that measures no quantity: the generator skips the size
+draws, and the view it returns exposes only a quantity-free projection of the
+records, so an undrawn placeholder size cannot be read as a size. Sizes ride
+their own child-indexed stream that every sized read seeks, so skipping them
+leaves every later read exactly as it would have been.
 
 The checkpoint chain snapshots at parent boundaries only, at the first
 boundary at least `k` records after the last snapshot, so consecutive

@@ -184,12 +184,50 @@ pub struct SessionBounds {
 /// segment name, which every caller here would have to ignore. The mapping
 /// below is the whole difference.
 pub fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionBounds> {
-    crate::session::session_segment_at(ts, i32::from(offset_minutes)).map(|seg| SessionBounds {
-        session_start_ns: seg.session_start_ns,
-        session_end_ns: seg.session_end_ns,
-        segment_origin_ns: seg.segment_origin_ns,
-        segment_end_ns: seg.segment_end_ns,
-    })
+    crate::session::session_segment_at(ts, i32::from(offset_minutes)).map(SessionBounds::from)
+}
+
+impl From<crate::session::SessionSegment> for SessionBounds {
+    fn from(seg: crate::session::SessionSegment) -> Self {
+        Self {
+            session_start_ns: seg.session_start_ns,
+            session_end_ns: seg.session_end_ns,
+            segment_origin_ns: seg.segment_origin_ns,
+            segment_end_ns: seg.segment_end_ns,
+        }
+    }
+}
+
+/// `round(ask - bid) / tick` in whole ticks, as `Decimal` division and its
+/// banker's rounding would give it, in integers: both prices and the tick are
+/// mantissas at one scale. `u64::MAX` where the `Decimal` path's conversion
+/// fails, which is a negative or unrepresentable width.
+fn width_ticks(bid: i64, ask: i64, tick: i64) -> u64 {
+    debug_assert!(tick > 0);
+    let diff = i128::from(ask) - i128::from(bid);
+    let tick = i128::from(tick);
+    let quotient = diff.div_euclid(tick);
+    let twice_rem = 2 * diff.rem_euclid(tick);
+    let rounded = match twice_rem.cmp(&tick) {
+        std::cmp::Ordering::Less => quotient,
+        std::cmp::Ordering::Greater => quotient + 1,
+        std::cmp::Ordering::Equal => quotient + (quotient & 1),
+    };
+    u64::try_from(rounded).unwrap_or(u64::MAX)
+}
+
+/// Integer-keyed counts rendered into the string-keyed histogram the summary
+/// serializes. Two keys rendering to one string add together, so the result
+/// is what counting by the string all along would have produced.
+fn render_counts<K>(
+    counts: std::collections::HashMap<K, u64>,
+    render: impl Fn(K) -> String,
+) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    for (key, count) in counts {
+        *out.entry(render(key)).or_insert(0) += count;
+    }
+    out
 }
 
 pub fn utc_hour_of(ts: u64) -> usize {
@@ -280,13 +318,163 @@ fn open_throughout(calendar: Option<&mogwai_data::SessionCalendar>, t1: u64, t2:
     true
 }
 
+/// Per-minute trade-price ranges in integer ticks over the minutes carrying at
+/// least one trade with its own timestamp in `[start, end)` - every such
+/// trade, sided or not, booked or not, in a session or not. The successor
+/// spec 3.3 convention, which the observed side shares; the summary and the
+/// protocol 12b control both read it from here.
+///
+/// The arithmetic is the summary's own and is kept literally: low and high
+/// each go through `price_f64`, the float difference is divided by the float
+/// tick, then rounded and floored at zero. An exact integer division is a
+/// different computation.
+pub struct MinuteRangeAcc {
+    start: u64,
+    end: u64,
+    tick_f: f64,
+    /// (minute index, low, high mantissas) of the minute being accumulated.
+    state: Option<(u64, i64, i64)>,
+    hist: std::collections::BTreeMap<u64, u64>,
+}
+
+/// A finished [`MinuteRangeAcc`].
+pub struct MinuteRanges {
+    pub hist: std::collections::BTreeMap<u64, u64>,
+    pub max_ticks: u64,
+    /// The second largest range observed, not the second distinct value: a
+    /// repeated maximum is its own second maximum.
+    pub second_max_ticks: u64,
+}
+
+impl MinuteRangeAcc {
+    #[must_use]
+    pub fn new(start: u64, end: u64, tick_f: f64) -> Self {
+        Self {
+            start,
+            end,
+            tick_f,
+            state: None,
+            hist: Default::default(),
+        }
+    }
+
+    /// One trade at its own timestamp; outside `[start, end)` it is ignored.
+    /// Trades arrive in time order.
+    pub fn push_trade(&mut self, ts: u64, price: i64, scale: &RecordScale) {
+        if ts < self.start || ts >= self.end {
+            return;
+        }
+        let minute = ts / NS_PER_MINUTE;
+        match &mut self.state {
+            Some((current, lo, hi)) if *current == minute => {
+                *lo = (*lo).min(price);
+                *hi = (*hi).max(price);
+            }
+            _ => {
+                self.flush(scale);
+                self.state = Some((minute, price, price));
+            }
+        }
+    }
+
+    fn flush(&mut self, scale: &RecordScale) {
+        if let Some((_minute, lo, hi)) = self.state.take() {
+            let (lo, hi) = (scale.price_f64(lo), scale.price_f64(hi));
+            let range_ticks = ((hi - lo) / self.tick_f).round().max(0.0) as u64;
+            *self.hist.entry(range_ticks).or_insert(0) += 1;
+        }
+    }
+
+    /// Flush the last minute and read the two largest ranges.
+    #[must_use]
+    pub fn finish(mut self, scale: &RecordScale) -> MinuteRanges {
+        self.flush(scale);
+        let mut max_ticks = 0;
+        let mut second_max_ticks = 0;
+        let mut ranges = self.hist.iter().rev();
+        if let Some((&largest, &count)) = ranges.next() {
+            max_ticks = largest;
+            second_max_ticks = if count >= 2 {
+                largest
+            } else {
+                ranges.next().map_or(0, |(&next, _)| next)
+            };
+        }
+        MinuteRanges {
+            hist: self.hist,
+            max_ticks,
+            second_max_ticks,
+        }
+    }
+}
+
+/// A per-minute map written through the minute last written. A write to
+/// another minute merges the held one into the map first, so a revisited
+/// minute combines with what it held rather than replacing it, and the map
+/// comes out exactly as writing every update straight into it would leave it.
+struct MinuteMap<V> {
+    map: std::collections::BTreeMap<u64, V>,
+    current: Option<(u64, V)>,
+    merge: fn(&mut V, V),
+}
+
+impl<V: Copy> MinuteMap<V> {
+    fn new(merge: fn(&mut V, V)) -> Self {
+        Self {
+            map: std::collections::BTreeMap::new(),
+            current: None,
+            merge,
+        }
+    }
+
+    /// Merge `value` into `minute`'s, or start it there.
+    fn update(&mut self, minute: u64, value: V) {
+        match &mut self.current {
+            Some((held, current)) if *held == minute => (self.merge)(current, value),
+            _ => {
+                self.flush();
+                self.current = Some((minute, value));
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some((minute, value)) = self.current.take() {
+            match self.map.get_mut(&minute) {
+                Some(held) => (self.merge)(held, value),
+                None => {
+                    self.map.insert(minute, value);
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> std::collections::BTreeMap<u64, V> {
+        self.flush();
+        self.map
+    }
+}
+
 fn decimal_key(d: Decimal) -> String {
     d.normalize().to_string()
 }
 
-fn displacement_key(d_ticks: f64) -> String {
-    let bin = (d_ticks / DISPLACEMENT_BIN_TICKS).floor() * DISPLACEMENT_BIN_TICKS;
-    format!("{bin:.2}")
+/// A displacement's bin, as the bits of its floored lower edge.
+fn displacement_bin(d_ticks: f64) -> u64 {
+    ((d_ticks / DISPLACEMENT_BIN_TICKS).floor() * DISPLACEMENT_BIN_TICKS).to_bits()
+}
+
+/// A bin's serialized key.
+fn displacement_key(bin: u64) -> String {
+    format!("{:.2}", f64::from_bits(bin))
+}
+
+/// The per-parent histograms `summarize` counts by integer key.
+struct ParentCounts<'a> {
+    bid_sizes: &'a mut std::collections::HashMap<u64, u64>,
+    ask_sizes: &'a mut std::collections::HashMap<u64, u64>,
+    buyer: &'a mut std::collections::HashMap<u64, u64>,
+    seller: &'a mut std::collections::HashMap<u64, u64>,
 }
 
 /// One parent being folded: the book in force at its first trade and what its
@@ -303,7 +491,9 @@ struct OpenParent {
     first_price: i64,
     first_side: AggressorSide,
     rows: u64,
-    levels: Vec<i64>,
+    /// Distinct trade prices so far; the prices themselves are in the
+    /// walk's reused `levels` buffer.
+    level_count: u64,
 }
 
 /// Fold the river into the summary, one whole parent at a time.
@@ -353,10 +543,7 @@ pub fn summarize(
         minute_range_ticks_hist: Default::default(),
         minute_range_max_ticks: 0,
         minute_range_second_max_ticks: 0,
-        horizon_vol: SUMMARY_VOL_HORIZONS_S
-            .iter()
-            .map(|h| (h.to_string(), MomentAcc::default()))
-            .collect(),
+        horizon_vol: Default::default(),
         session_cells: Vec::new(),
         top_minutes: Vec::new(),
         first_book_mid: None,
@@ -367,8 +554,29 @@ pub fn summarize(
     // Protocol-11 session-cell state. Sessions exist only under a calendar;
     // the offset is the calendar's own, and the in-session structure is the
     // fixed CME shape (see session_segment_at).
-    let cal_offset = calendar.map(|c| c.utc_offset_minutes);
+    let mut segments =
+        calendar.map(|c| crate::session::SegmentCursor::new(i32::from(c.utc_offset_minutes)));
     let mut sessions: std::collections::BTreeMap<u64, GeneratedSessionCells> = Default::default();
+    // The tick as a price mantissa, for integer quote widths; `None` keeps
+    // the `Decimal` division for a tick the price scale cannot hold.
+    let tick_mantissa = scale.price_mantissa(tick).filter(|m| *m > 0);
+    // Histograms counted by integer key and rendered to their serialized
+    // string keys once, at the end: sizes by quantity mantissa,
+    // displacements by the floored bin's bits.
+    let mut size_counts: std::collections::HashMap<u64, u64> = Default::default();
+    let mut bid_size_counts: std::collections::HashMap<u64, u64> = Default::default();
+    let mut ask_size_counts: std::collections::HashMap<u64, u64> = Default::default();
+    let mut buyer_displacement_counts: std::collections::HashMap<u64, u64> = Default::default();
+    let mut seller_displacement_counts: std::collections::HashMap<u64, u64> = Default::default();
+    // Moments per fixed horizon, in `SUMMARY_VOL_HORIZONS_S` order, keyed to
+    // the serialized horizon names at the end.
+    let mut horizon_moments: Vec<MomentAcc> = SUMMARY_VOL_HORIZONS_S
+        .iter()
+        .map(|_| MomentAcc::default())
+        .collect();
+    // The distinct trade levels of the parent being folded, reused across
+    // parents.
+    let mut levels: Vec<i64> = Vec::new();
     // Adjacent-parent valid-mid chain, keyed by segment origin so a segment
     // transition breaks it without extra bookkeeping (spec 4.1).
     let mut prev_vol_parent: Option<(u64, f64)> = None;
@@ -384,9 +592,15 @@ pub fn summarize(
     let mut seg_state: Option<(SessionBounds, HorizonState, Option<f64>)> = None;
     // Worst-minute detail: minute index -> (low, high, trade_count) on the
     // exact price grid as record mantissas, plus parents by first-child
-    // minute (spec 4.7).
-    let mut minute_detail: std::collections::BTreeMap<u64, (i64, i64, u64)> = Default::default();
-    let mut minute_parents: std::collections::BTreeMap<u64, u64> = Default::default();
+    // minute (spec 4.7). Each is fronted by the minute being written, merged
+    // in when another minute is written; trades and parents arrive in time
+    // order, so that is nearly every write.
+    let mut minute_detail = MinuteMap::<(i64, i64, u64)>::new(|held, (lo, hi, count)| {
+        held.0 = held.0.min(lo);
+        held.1 = held.1.max(hi);
+        held.2 += count;
+    });
+    let mut minute_parents = MinuteMap::<u64>::new(|held, count| *held += count);
 
     // Advance the active segment's boundaries up to `until_ts` - exclusive
     // during the walk (a boundary equal to an event timestamp waits for a
@@ -469,28 +683,15 @@ pub fn summarize(
     // (mid, width_ticks, bid_sz mantissa, ask_sz mantissa) of the last quote.
     let mut pending_quote: Option<(f64, u64, u64, u64)> = None;
     let mut prev_parent: Option<(u64, f64)> = None; // (first_ts, quote_mid)
-    // (minute index, low, high mantissas) of the in-window minute being
-    // accumulated.
-    let mut minute_state: Option<(u64, i64, i64)> = None;
-
-    fn flush_minute(
-        acc: &mut SummaryAcc,
-        state: &mut Option<(u64, i64, i64)>,
-        scale: &RecordScale,
-        tick_f: f64,
-    ) {
-        if let Some((_minute, lo, hi)) = state.take() {
-            let (lo, hi) = (scale.price_f64(lo), scale.price_f64(hi));
-            let range_ticks = ((hi - lo) / tick_f).round().max(0.0) as u64;
-            *acc.minute_range_ticks_hist.entry(range_ticks).or_insert(0) += 1;
-        }
-    }
+    let mut minute_ranges = MinuteRangeAcc::new(start, end, tick_f);
 
     let finalize = |acc: &mut SummaryAcc,
                     prev: &mut Option<(u64, f64)>,
                     sessions: &mut std::collections::BTreeMap<u64, GeneratedSessionCells>,
                     prev_vol: &mut Option<(u64, f64)>,
-                    minute_parents: &mut std::collections::BTreeMap<u64, u64>,
+                    minute_parents: &mut MinuteMap<u64>,
+                    segments: &mut Option<crate::session::SegmentCursor>,
+                    counts: &mut ParentCounts<'_>,
                     parent: OpenParent| {
         if parent.first_ts < start || parent.first_ts >= end {
             return;
@@ -499,8 +700,8 @@ pub fn summarize(
         // adjacent valid-mid robust-scale chain within the segment (spec 4.1;
         // the chain key is the segment origin, so a segment transition breaks
         // it and an out-of-segment predecessor never contributes).
-        if let Some(offset) = cal_offset
-            && let Some(seg) = session_segment_at(parent.first_ts, offset)
+        if let Some(cursor) = segments
+            && let Some(seg) = cursor.at(parent.first_ts).map(SessionBounds::from)
         {
             let hour = utc_hour_of(parent.first_ts);
             let cell = sessions.entry(seg.session_start_ns).or_insert_with(|| {
@@ -517,37 +718,27 @@ pub fn summarize(
                 *prev_vol = Some((seg.segment_origin_ns, parent.quote_mid));
             }
         }
-        *minute_parents
-            .entry(parent.first_ts / 60_000_000_000)
-            .or_insert(0) += 1;
+        minute_parents.update(parent.first_ts / 60_000_000_000, 1);
         acc.parents += 1;
         acc.sided_rows += parent.rows;
         if parent.rows == 1 {
             acc.single_parents += 1;
         }
-        acc.level_count_sum += parent.levels.len() as u64;
+        acc.level_count_sum += parent.level_count;
         *acc.width_ticks_histogram
             .entry(parent.width_ticks)
             .or_insert(0) += 1;
-        *acc.bid_size_histogram
-            .entry(decimal_key(scale.size(parent.bid_sz)))
-            .or_insert(0) += 1;
-        *acc.ask_size_histogram
-            .entry(decimal_key(scale.size(parent.ask_sz)))
-            .or_insert(0) += 1;
+        *counts.bid_sizes.entry(parent.bid_sz).or_insert(0) += 1;
+        *counts.ask_sizes.entry(parent.ask_sz).or_insert(0) += 1;
         if parent.quote_mid.is_finite() && tick_f.is_finite() {
             let first = scale.price_f64(parent.first_price);
             let raw = (first - parent.quote_mid) / tick_f;
             match parent.first_side {
                 AggressorSide::Buyer => {
-                    *acc.buyer_displacement_hist
-                        .entry(displacement_key(raw))
-                        .or_insert(0) += 1;
+                    *counts.buyer.entry(displacement_bin(raw)).or_insert(0) += 1;
                 }
                 AggressorSide::Seller => {
-                    *acc.seller_displacement_hist
-                        .entry(displacement_key(-raw))
-                        .or_insert(0) += 1;
+                    *counts.seller.entry(displacement_bin(-raw)).or_insert(0) += 1;
                 }
                 AggressorSide::NoAggressor => {}
             }
@@ -591,9 +782,11 @@ pub fn summarize(
                     // Protocol-11 segment horizon state: settle the outgoing
                     // segment's remaining boundaries before switching, then
                     // advance the active one strictly past-boundary (rule 6).
-                    if let Some(offset) = cal_offset
-                        && let Some(seg) = session_segment_at(ts, offset)
-                    {
+                    let quote_seg = segments
+                        .as_mut()
+                        .and_then(|cursor| cursor.at(ts))
+                        .map(SessionBounds::from);
+                    if let Some(seg) = quote_seg {
                         let switch = match &seg_state {
                             Some((current, _, _)) => *current != seg,
                             None => true,
@@ -632,13 +825,16 @@ pub fn summarize(
                         }
                     }
                     let mid = (scale.price_f64(q.bid_px) + scale.price_f64(q.ask_px)) / 2.0;
-                    let (bid_px, ask_px) = (scale.price(q.bid_px), scale.price(q.ask_px));
-                    let width = ((ask_px - bid_px) / tick)
-                        .round()
-                        .try_into()
-                        .unwrap_or(u64::MAX);
+                    let width = match tick_mantissa {
+                        Some(tick) => width_ticks(q.bid_px, q.ask_px, tick),
+                        None => ((scale.price(q.ask_px) - scale.price(q.bid_px)) / tick)
+                            .round()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                    };
                     pending_quote = Some((mid, width, q.bid_qty, q.ask_qty));
                     if ts >= start && acc.first_book_mid.is_none() {
+                        let (bid_px, ask_px) = (scale.price(q.bid_px), scale.price(q.ask_px));
                         acc.first_book_mid = Some(decimal_key((bid_px + ask_px) / Decimal::TWO));
                     }
                     // The fixed-horizon as-of state advances on quotes only: the
@@ -648,7 +844,9 @@ pub fn summarize(
                         asof_start = last_mid;
                         asof_start_frozen = true;
                     }
-                    for (h_ns, next_k, prev_boundary_mid) in &mut horizon_state {
+                    for ((h_ns, next_k, prev_boundary_mid), moments) in
+                        horizon_state.iter_mut().zip(&mut horizon_moments)
+                    {
                         let horizon = *h_ns;
                         loop {
                             let boundary = start.saturating_add(*next_k * horizon);
@@ -662,10 +860,7 @@ pub fn summarize(
                                 && cur > 0.0
                                 && open_throughout(calendar, window_start, boundary)
                             {
-                                let key = (horizon / 1_000_000_000).to_string();
-                                if let Some(m) = acc.horizon_vol.get_mut(&key) {
-                                    m.push((cur / prev).ln());
-                                }
+                                moments.push((cur / prev).ln());
                             }
                             *prev_boundary_mid = last_mid;
                             *next_k += 1;
@@ -675,51 +870,27 @@ pub fn summarize(
                     // Segment-local as-of: only a quote inside the active
                     // segment feeds it - never one from closed time or another
                     // segment (rule 1's independence).
-                    if let Some(offset) = cal_offset
-                        && let Some((current, _, seg_mid)) = &mut seg_state
-                        && session_segment_at(ts, offset).as_ref() == Some(current)
+                    if let Some((current, _, seg_mid)) = &mut seg_state
+                        && quote_seg.as_ref() == Some(current)
                     {
                         *seg_mid = Some(mid);
                     }
                 }
                 Record::Trade(t) => {
+                    minute_ranges.push_trade(t.ts, t.px, &scale);
                     if t.ts >= start && t.ts < end {
-                        *acc.size_histogram
-                            .entry(decimal_key(scale.size(t.qty)))
-                            .or_insert(0) += 1;
-                        let minute = t.ts / 60_000_000_000;
-                        let price = t.px;
-                        match &mut minute_state {
-                            Some((current, lo, hi)) if *current == minute => {
-                                *lo = (*lo).min(price);
-                                *hi = (*hi).max(price);
-                            }
-                            _ => {
-                                flush_minute(&mut acc, &mut minute_state, &scale, tick_f);
-                                minute_state = Some((minute, price, price));
-                            }
-                        }
+                        *size_counts.entry(t.qty).or_insert(0) += 1;
                         // Protocol-11 worst-minute detail on the exact grid: the
                         // records serialize decimal prices and an exact integer
                         // tick range, where the legacy histogram rounds in f64.
-                        minute_detail
-                            .entry(minute)
-                            .and_modify(|(lo, hi, count)| {
-                                if t.px < *lo {
-                                    *lo = t.px;
-                                }
-                                if t.px > *hi {
-                                    *hi = t.px;
-                                }
-                                *count += 1;
-                            })
-                            .or_insert((t.px, t.px, 1));
+                        minute_detail.update(t.ts / 60_000_000_000, (t.px, t.px, 1));
                     }
                     match &mut open {
                         Some(parent) => {
                             parent.rows += 1;
-                            if !parent.levels.contains(&t.px) {
-                                parent.levels.push(t.px);
+                            if !levels.contains(&t.px) {
+                                levels.push(t.px);
+                                parent.level_count += 1;
                             }
                         }
                         None if !seen_trade => {
@@ -727,6 +898,8 @@ pub fn summarize(
                             // last quote at or before it, in this parent or an
                             // earlier one. None before the walk's first quote.
                             if let Some((mid, width, bid_sz, ask_sz)) = pending_quote {
+                                levels.clear();
+                                levels.push(t.px);
                                 open = Some(OpenParent {
                                     quote_mid: mid,
                                     width_ticks: width,
@@ -736,7 +909,7 @@ pub fn summarize(
                                     first_price: t.px,
                                     first_side: t.side,
                                     rows: 1,
-                                    levels: vec![t.px],
+                                    level_count: 1,
                                 });
                             }
                         }
@@ -753,6 +926,13 @@ pub fn summarize(
                 &mut sessions,
                 &mut prev_vol_parent,
                 &mut minute_parents,
+                &mut segments,
+                &mut ParentCounts {
+                    bid_sizes: &mut bid_size_counts,
+                    ask_sizes: &mut ask_size_counts,
+                    buyer: &mut buyer_displacement_counts,
+                    seller: &mut seller_displacement_counts,
+                },
                 parent,
             );
         }
@@ -783,7 +963,9 @@ pub fn summarize(
     if !asof_start_frozen {
         asof_start = last_mid;
     }
-    for (h_ns, next_k, prev_boundary_mid) in &mut horizon_state {
+    for ((h_ns, next_k, prev_boundary_mid), moments) in
+        horizon_state.iter_mut().zip(&mut horizon_moments)
+    {
         let horizon = *h_ns;
         loop {
             let boundary = start.saturating_add(*next_k * horizon);
@@ -797,32 +979,33 @@ pub fn summarize(
                 && cur > 0.0
                 && open_throughout(calendar, window_start, boundary)
             {
-                let key = (horizon / 1_000_000_000).to_string();
-                if let Some(m) = acc.horizon_vol.get_mut(&key) {
-                    m.push((cur / prev).ln());
-                }
+                moments.push((cur / prev).ln());
             }
             *prev_boundary_mid = last_mid;
             *next_k += 1;
         }
     }
-    flush_minute(&mut acc, &mut minute_state, &scale, tick_f);
-    // The two largest minute ranges observed (not distinct values): a
-    // repeated maximum is its own second maximum.
-    let mut ranges = acc.minute_range_ticks_hist.iter().rev();
-    if let Some((&largest, &count)) = ranges.next() {
-        acc.minute_range_max_ticks = largest;
-        acc.minute_range_second_max_ticks = if count >= 2 {
-            largest
-        } else {
-            ranges.next().map_or(0, |(&next, _)| next)
-        };
-    }
+    acc.horizon_vol = SUMMARY_VOL_HORIZONS_S
+        .iter()
+        .map(ToString::to_string)
+        .zip(horizon_moments)
+        .collect();
+    let size_key = |qty: u64| decimal_key(scale.size(qty));
+    acc.size_histogram = render_counts(size_counts, size_key);
+    acc.bid_size_histogram = render_counts(bid_size_counts, size_key);
+    acc.ask_size_histogram = render_counts(ask_size_counts, size_key);
+    acc.buyer_displacement_hist = render_counts(buyer_displacement_counts, displacement_key);
+    acc.seller_displacement_hist = render_counts(seller_displacement_counts, displacement_key);
+    let ranges = minute_ranges.finish(&scale);
+    acc.minute_range_ticks_hist = ranges.hist;
+    acc.minute_range_max_ticks = ranges.max_ticks;
+    acc.minute_range_second_max_ticks = ranges.second_max_ticks;
     let minute_detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> = minute_detail
+        .finish()
         .into_iter()
         .map(|(minute, (lo, hi, count))| (minute, (scale.price(lo), scale.price(hi), count)))
         .collect();
-    acc.top_minutes = rank_top_minutes(&minute_detail, &minute_parents, tick);
+    acc.top_minutes = rank_top_minutes(&minute_detail, &minute_parents.finish(), tick);
     acc.session_cells = sessions.into_values().collect();
     acc
 }
@@ -850,8 +1033,15 @@ pub fn rank_top_minutes(
             (range, minute)
         })
         .collect();
-    minute_records.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    minute_records.truncate(TOP_MINUTE_RECORDS);
+    // Every range above was validated before any is dropped. Minutes are
+    // distinct, so the order is total and the selected set is unambiguous
+    // even through ties at the cut.
+    let order = |a: &(u64, u64), b: &(u64, u64)| b.0.cmp(&a.0).then(a.1.cmp(&b.1));
+    if minute_records.len() > TOP_MINUTE_RECORDS {
+        minute_records.select_nth_unstable_by(TOP_MINUTE_RECORDS, order);
+        minute_records.truncate(TOP_MINUTE_RECORDS);
+    }
+    minute_records.sort_unstable_by(order);
     minute_records
         .into_iter()
         .map(|(range_ticks, minute)| {
@@ -904,6 +1094,98 @@ mod tests {
             qty,
             side: AggressorSide::Buyer,
         })
+    }
+
+    /// The integer width is the `Decimal` division and banker's rounding it
+    /// replaced, for every width up to 40 ticks in both directions on ticks
+    /// of one to seven mantissa units - odd ticks give exact half-tick ties,
+    /// both parities of quotient included - and for an inverted book.
+    #[test]
+    fn integer_quote_widths_round_as_the_decimal_path_did() {
+        let scale = RecordScale::new(mogwai_protocol::Symbol::from("X"), 2, 0).expect("scale");
+        for tick_units in 1_i64..=7 {
+            let tick = scale.price(tick_units);
+            for bid in [0_i64, 1, 2_300_000] {
+                for spread in -40 * tick_units..=40 * tick_units {
+                    let ask = bid + spread;
+                    let want: u64 = ((scale.price(ask) - scale.price(bid)) / tick)
+                        .round()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    assert_eq!(
+                        width_ticks(bid, ask, tick_units),
+                        want,
+                        "bid {bid} ask {ask} tick {tick_units}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Top-minute selection keeps exactly the first 32 of the full sort
+    /// (range descending, then minute ascending) at every size around the
+    /// cut and through a tie that straddles it, and still refuses an off-grid
+    /// range that would not have been selected.
+    #[test]
+    fn top_minutes_select_what_a_full_sort_keeps() {
+        let tick = Decimal::new(25, 2);
+        let full_sort = |detail: &std::collections::BTreeMap<u64, (Decimal, Decimal, u64)>| {
+            let mut rows: Vec<(u64, u64)> = detail
+                .iter()
+                .map(|(&m, &(lo, hi, _))| (((hi - lo) / tick).try_into().expect("ticks"), m))
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            rows.truncate(TOP_MINUTE_RECORDS);
+            rows
+        };
+        let ranges: Vec<i64> = (0..80).map(|i| (i * 37) % 11).collect();
+        for len in [0, 31, 32, 33, 80] {
+            let detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> = ranges[..len]
+                .iter()
+                .enumerate()
+                .map(|(i, &r)| {
+                    let lo = Decimal::new(23_000, 0);
+                    (
+                        1_000 + 7 * i as u64 % 97,
+                        (lo, lo + tick * Decimal::from(r), 1),
+                    )
+                })
+                .collect();
+            let got: Vec<(u64, u64)> = rank_top_minutes(&detail, &Default::default(), tick)
+                .iter()
+                .map(|rec| (rec.range_ticks, rec.minute_start_ns / 60_000_000_000))
+                .collect();
+            assert_eq!(got, full_sort(&detail), "{len} minutes");
+        }
+        let mut off_grid: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> = (0..40)
+            .map(|m| (m, (Decimal::ZERO, tick * Decimal::from(50), 1)))
+            .collect();
+        off_grid.insert(99, (Decimal::ZERO, Decimal::new(1, 2), 1));
+        let refused =
+            std::panic::catch_unwind(|| rank_top_minutes(&off_grid, &Default::default(), tick));
+        assert!(
+            refused.is_err(),
+            "an unselected off-grid minute must still refuse"
+        );
+    }
+
+    /// A minute written again after another merges into what it held.
+    #[test]
+    fn a_minute_map_merges_a_revisited_minute() {
+        let mut map = MinuteMap::<(i64, i64, u64)>::new(|held, (lo, hi, n)| {
+            held.0 = held.0.min(lo);
+            held.1 = held.1.max(hi);
+            held.2 += n;
+        });
+        map.update(5, (10, 10, 1));
+        map.update(5, (12, 12, 1));
+        map.update(6, (3, 3, 1));
+        map.update(5, (8, 8, 1));
+        map.update(6, (9, 9, 1));
+        let done = map.finish();
+        assert_eq!(done[&5], (8, 12, 3));
+        assert_eq!(done[&6], (3, 9, 2));
+        assert_eq!(done.len(), 2);
     }
 
     /// Parent statistics follow the source's divisions, and the per-record

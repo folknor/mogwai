@@ -12,17 +12,20 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
+use mogwai_data::{ParentSource, RecordScale, RiverSource, UnsizedParentView, UnsizedRecord};
 use mogwai_venue::source::InstrumentProfile;
+use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
 use crate::aggregate::RefusalRec;
 use crate::aggregate::context::ObsContext;
 use crate::error::{LabError, LabResult};
 use crate::fit::walk::{
-    OverrideValue, Overrides, parse_duration, profile_from_config, run_summary_walk,
-    scratch_config_text,
+    OverrideValue, Overrides, parse_duration, profile_from_config, scratch_config_text,
 };
-use crate::measure12a::generated::GeneratedAcc;
+use crate::measure12a::SessionAcc;
+use crate::measure12a::generated::{GeneratedAcc, SessionFrame, tick_units};
+use crate::summary::{MinuteRangeAcc, MinuteRanges};
 
 /// The 12b section 7 and 16 seed sets, verbatim. Pairwise disjoint from every
 /// other 12b seed set, and in particular from CONFIRMATION_SEEDS = 1..8: the
@@ -212,16 +215,92 @@ pub fn normalizer_drift(
     Ok((old_n / open) / (new_n / open))
 }
 
-/// One control walk's two passes over one tape. The two passes exist because
-/// `GeneratedAcc` and `summary::summarize` each own their own tick loop and
-/// teeing them would need a new source adapter this brick may not add; the
-/// generator is deterministic in profile, seed and start, so the second pass
-/// replays the first byte for byte.
+/// One control walk: the per-session blocks 1 to 3 and the minute ranges the
+/// gates read, both measured off one unsized walk of the tape.
+///
+/// This was two full passes - `GeneratedAcc` with its forensics and the
+/// whole `summary::summarize` - replaying one tape twice for the handful of
+/// fields the gates consume. [`ControlAcc`] measures exactly those fields
+/// through the same session frame and the same minute-range accumulator the
+/// two full measurements use.
 pub struct ControlWalk {
     pub seed: u64,
     pub ctx: ObsContext,
-    pub summary: Value,
+    pub minute_ranges: MinuteRanges,
     pub cost_s: f64,
+}
+
+/// The protocol 12b control's measurement: the generated side's session
+/// blocks 1 to 3 through [`SessionFrame`], without forensics or a trace, and
+/// the summary's per-minute trade ranges through [`MinuteRangeAcc`]. The two
+/// selections stay independent, as they are in the full measurements: the
+/// frame measures what falls in the lab's session frame and emits complete
+/// sessions only, while a minute range takes every trade whose own timestamp
+/// lies in `[start, end)`. No quantity is read, so a walk reads unsized.
+pub struct ControlAcc {
+    frame: SessionFrame<()>,
+    minutes: MinuteRangeAcc,
+}
+
+impl ControlAcc {
+    /// The same window, offset and tick conventions as [`GeneratedAcc::new`]
+    /// for the frame and as `summarize` for the minute ranges.
+    #[must_use]
+    pub fn new(seed: u64, start: u64, end: u64, offset: i32, tick: Decimal) -> Self {
+        let (tick_nanos, _) = tick_units(tick);
+        Self {
+            frame: SessionFrame::new(
+                seed,
+                start,
+                end,
+                offset,
+                tick_nanos,
+                crate::subcontract::COUNT_WINDOWS_S,
+                SessionAcc::close_blocks_1_to_3,
+                (),
+            ),
+            minutes: MinuteRangeAcc::new(start, end, f64::try_from(tick).unwrap_or(f64::NAN)),
+        }
+    }
+
+    /// One whole parent, read unsized at `scale`.
+    pub fn push_parent(
+        &mut self,
+        scale: &RecordScale,
+        view: &UnsizedParentView<'_>,
+    ) -> LabResult<()> {
+        for record in view.records() {
+            if let UnsizedRecord::Trade { ts, px, .. } = record {
+                self.minutes.push_trade(ts, px, scale);
+            }
+        }
+        self.frame.push_parent(scale, view)
+    }
+
+    /// Drive the accumulator over `source`, stopping before the first parent
+    /// whose first record is at or past the window's end, exactly where both
+    /// full measurements stop. A walk a fault cut short refuses.
+    pub fn walk(&mut self, source: &mut dyn ParentSource) -> LabResult<()> {
+        let scale = source.scale().clone();
+        while let Some(view) = source.next_parent_unsized() {
+            if view.first_ts() >= self.frame.end() {
+                return Ok(());
+            }
+            self.push_parent(&scale, &view)?;
+        }
+        match source.fault() {
+            Some(fault) => Err(LabError::refusal(format!(
+                "the generator faulted before the measured window's end: {fault:?}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The emitted complete sessions and the finished minute ranges.
+    pub fn finish(self, scale: &RecordScale) -> LabResult<(Vec<Value>, MinuteRanges)> {
+        let (sessions, ()) = self.frame.finish()?;
+        Ok((sessions, self.minutes.finish(scale)))
+    }
 }
 
 /// The exposure contract, parsed from `binding.generated` of the 12a artifact.
@@ -250,23 +329,14 @@ impl GeneratedBinding {
                 .to_string(),
         })
     }
-    /// `window_length_ns` as the duration string `run_summary_walk` takes,
-    /// `"<n>s"`, refusing a length that is not a whole number of seconds.
-    pub fn length_arg(&self) -> LabResult<String> {
-        if !self.window_length_ns.is_multiple_of(1_000_000_000) {
-            return Err(LabError::refusal(
-                "window length is not a whole number of seconds",
-            ));
-        }
-        Ok(format!("{}s", self.window_length_ns / 1_000_000_000))
-    }
 }
 
-/// One seed, one curve, both passes. `curve` is `None` for the shipped curve
+/// One seed, one curve, one walk. `curve` is `None` for the shipped curve
 /// (the ratio measurement) and `Some(new_curve)` for the corrected one (the
 /// judgement). The exposure is 12b section 8, read from the 12a binding rather
-/// than restated: MNQ, no divergence, regime neutral, vol trace on, the walk
-/// starting at `window_start - burn_in` and the half-open measured window.
+/// than restated, and resolved by [`control_exposure`] exactly as
+/// [`control_generated_pass`] resolves it - except that this walk carries no
+/// vol trace, since nothing it measures reads one.
 pub fn control_walk(
     scratch_dir: &Path,
     binding: &GeneratedBinding,
@@ -274,56 +344,77 @@ pub fn control_walk(
     seed: u64,
 ) -> LabResult<ControlWalk> {
     let started = Instant::now();
-    let generated = control_generated_pass(scratch_dir, binding, curve, seed)?;
-    let per_session = generated["per_session"]
-        .as_array()
-        .ok_or_else(|| LabError::refusal("generated walk has no per_session"))?
-        .clone();
-    let mut overrides = Overrides::new();
-    if let Some(c) = curve {
-        overrides.insert(
-            "session.intensity_hour".to_string(),
-            OverrideValue::Floats(c.to_vec()),
-        );
-    }
-    let summary = run_summary_walk(
-        scratch_dir,
-        &overrides,
-        seed as i64,
-        binding.window_start_ns as i64,
-        &binding.length_arg()?,
-        &binding.burn_in,
-    )?;
+    let exposure = control_exposure(scratch_dir, binding, curve, seed)?;
+    let mut source = exposure.source;
+    let mut acc = ControlAcc::new(
+        seed,
+        exposure.start,
+        exposure.end,
+        exposure.offset,
+        exposure.profile.scalars.modal_tick,
+    );
+    acc.walk(&mut source)?;
+    let (per_session, minute_ranges) = acc.finish(source.scale())?;
     Ok(ControlWalk {
         seed,
         ctx: ObsContext::new(per_session),
-        summary,
+        minute_ranges,
         cost_s: started.elapsed().as_secs_f64(),
     })
 }
 
-/// The `GeneratedAcc` half of a control walk, on its own, returning
-/// `GeneratedAcc::finish`'s record verbatim. Separate from [`control_walk`] for
-/// one reason beyond tidiness: it is the side the spec's section 2.7 equality
-/// pin compares against `mogwai_cli::measure::run_final_walk`, and that pin
-/// already costs a month-long walk on each side - running the `summarize` pass
-/// too would double a cost the pin has no use for.
-///
-/// This is the second copy of the 12b section 8 exposure contract (the first is
-/// `run_final_walk`, which lives in `mogwai-cli` and is therefore unreachable
-/// from this crate). Every element is matched deliberately: the MNQ profile
-/// resolved through the shipped MNQ preset, with
-/// `calendar.utc_offset_minutes` as the accumulator's hour offset,
-/// `scalars.modal_tick` as its tick size, the vol trace enabled before the
-/// loop, the walk starting at `window_start - burn_in` and the half-open
-/// measured window. The scratch `[instrument.override]` curve is the only
-/// intended difference, and it applies to the corrected-curve pass alone.
+/// The full generated-side measurement of a control exposure, returning
+/// `GeneratedAcc::finish`'s record verbatim: every block, the forensics and
+/// the vol trace. The control itself reads a fraction of this through
+/// [`control_walk`]; this is the side the spec's section 2.7 equality pin
+/// compares against `mogwai_cli::measure::run_final_walk`.
 pub fn control_generated_pass(
     scratch_dir: &Path,
     binding: &GeneratedBinding,
     curve: Option<&[f64; 24]>,
     seed: u64,
 ) -> LabResult<Value> {
+    let exposure = control_exposure(scratch_dir, binding, curve, seed)?;
+    let mut source = exposure.source;
+    source.enable_vol_trace();
+    let mut acc = GeneratedAcc::new(
+        seed,
+        exposure.start,
+        exposure.end,
+        exposure.offset,
+        exposure.profile.scalars.modal_tick,
+    );
+    acc.walk(&mut source)?;
+    acc.finish()
+}
+
+/// One resolved control exposure: the profile, the generator at the walk
+/// start, the measured window and the accumulator's hour offset.
+struct ControlExposure {
+    profile: InstrumentProfile,
+    source: mogwai_data::GeneratedSource,
+    start: u64,
+    end: u64,
+    offset: i32,
+}
+
+/// The 12b section 8 exposure contract, resolved once for both control
+/// measurements.
+///
+/// This is the second copy of that contract (the first is `run_final_walk`,
+/// which lives in `mogwai-cli` and is therefore unreachable from this crate).
+/// Every element is matched deliberately: the MNQ profile resolved through
+/// the shipped MNQ preset, with `calendar.utc_offset_minutes` as the
+/// accumulator's hour offset, `scalars.modal_tick` as its tick size, the walk
+/// starting at `window_start - burn_in` and the half-open measured window. The
+/// scratch `[instrument.override]` curve is the only intended difference, and
+/// it applies to the corrected-curve walk alone.
+fn control_exposure(
+    scratch_dir: &Path,
+    binding: &GeneratedBinding,
+    curve: Option<&[f64; 24]>,
+    seed: u64,
+) -> LabResult<ControlExposure> {
     let mut overrides = Overrides::new();
     if let Some(c) = curve {
         overrides.insert(
@@ -356,7 +447,8 @@ pub fn control_generated_pass(
     let walk_start = start
         .checked_sub(burn_in_ns)
         .ok_or_else(|| LabError::refusal("the burn-in underflows the start"))?;
-    let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+    let offset = i32::from(calendar.utc_offset_minutes);
+    let source = mogwai_data::GeneratedSource::try_new_with_session_profile(
         profile.scalars.clone(),
         seed,
         walk_start,
@@ -367,16 +459,13 @@ pub fn control_generated_pass(
         profile.calendar.clone(),
     )
     .map_err(|e| LabError::refusal(format!("building the generator: {e:?}")))?;
-    source.enable_vol_trace();
-    let mut acc = GeneratedAcc::new(
-        seed,
+    Ok(ControlExposure {
+        profile,
+        source,
         start,
         end,
-        i32::from(calendar.utc_offset_minutes),
-        profile.scalars.modal_tick,
-    );
-    acc.walk(&mut source)?;
-    acc.finish()
+        offset,
+    })
 }
 
 /// MNQ as `mogwai_cli::measure::run_final_walk` resolves it: the shipped preset.
@@ -567,21 +656,28 @@ pub fn gate_b4(envelope: &Value, tests: &[ControlWalk]) -> LabResult<GateRec> {
     let mut passed = true;
     let mut refs = Vec::new();
     for t in tests {
-        let hist: BTreeMap<i64, i64> =
-            serde_json::from_value(t.summary["minute_range_ticks_hist"].clone())?;
-        let p99 = nearest_rank_of(&hist, 0.99)?;
-        let q999 = nearest_rank_of(&hist, 0.999)?;
-        // A summary that did not serialize its per-seed maximum is a recorded
-        // refusal, not a NaN that quietly compares false.
-        let Some(mx) = t.summary["minute_range_max_ticks"].as_f64() else {
+        let mut hist: BTreeMap<i64, i64> = BTreeMap::new();
+        for (&ticks, &count) in &t.minute_ranges.hist {
+            hist.insert(
+                i64::try_from(ticks).map_err(|_| LabError::refusal("a minute range overflows"))?,
+                i64::try_from(count).map_err(|_| LabError::refusal("a minute count overflows"))?,
+            );
+        }
+        // A walk with no in-window trade has no ranks to read; that is a
+        // recorded refusal, not a maximum of zero that quietly passes.
+        if hist.is_empty() {
             passed = false;
             refs.push(RefusalRec::new(
                 "B4",
                 format!("seed {}", t.seed),
-                "the summary carries no minute_range_max_ticks",
+                "the walk printed no trade inside the window",
             ));
             continue;
-        };
+        }
+        let p99 = nearest_rank_of(&hist, 0.99)?;
+        let q999 = nearest_rank_of(&hist, 0.999)?;
+        #[expect(clippy::cast_precision_loss, reason = "a range in ticks stays small")]
+        let mx = t.minute_ranges.max_ticks as f64;
         let ok = p99 as f64 + SLACK >= lo
             && p99 as f64 <= hi + SLACK
             && q999 as f64 <= p999 + SLACK
@@ -638,21 +734,6 @@ mod tests {
         assert_eq!(recentred_curve(&a, &ratios), recentred_curve(&b, &ratios));
     }
 
-    #[test]
-    fn the_binding_renders_its_window_length_as_whole_seconds() {
-        let whole = GeneratedBinding {
-            window_start_ns: 0,
-            window_length_ns: 2_674_800_000_000_000,
-            burn_in: "3d".into(),
-        };
-        assert_eq!(whole.length_arg().unwrap(), "2674800s");
-        let partial = GeneratedBinding {
-            window_length_ns: 1,
-            ..whole
-        };
-        assert!(partial.length_arg().is_err());
-    }
-
     /// The committed observed side, reused as the base for the synthetic
     /// generated contexts below: a control test that judges hand-rolled block
     /// records proves nothing about the shapes a real walk produces.
@@ -667,21 +748,32 @@ mod tests {
         )
     }
 
-    fn walk_from(ctx: ObsContext, summary: Value) -> ControlWalk {
+    fn walk_from(ctx: ObsContext, minute_ranges: MinuteRanges) -> ControlWalk {
         ControlWalk {
             seed: 305,
             ctx,
-            summary,
+            minute_ranges,
             cost_s: 0.0,
         }
     }
 
-    /// A summary whose nearest-rank 0.99 and 0.999 land exactly on the two
-    /// requested tick counts: 1000 minutes total, so rank 990 is the single
-    /// `p99` entry and rank 999 falls inside the ten-wide `p999` tail.
-    fn summary_at(p99: i64, p999: i64, max: i64) -> Value {
-        let hist = BTreeMap::from([(1_i64, 989_i64), (p99, 1), (p999, 10)]);
-        json!({"minute_range_ticks_hist": hist, "minute_range_max_ticks": max})
+    fn no_ranges() -> MinuteRanges {
+        MinuteRanges {
+            hist: BTreeMap::new(),
+            max_ticks: 0,
+            second_max_ticks: 0,
+        }
+    }
+
+    /// Minute ranges whose nearest-rank 0.99 and 0.999 land exactly on the
+    /// two requested tick counts: 1000 minutes total, so rank 990 is the
+    /// single `p99` entry and rank 999 falls inside the ten-wide `p999` tail.
+    fn summary_at(p99: u64, p999: u64, max: u64) -> MinuteRanges {
+        MinuteRanges {
+            hist: BTreeMap::from([(1, 989), (p99, 1), (p999, 10)]),
+            max_ticks: max,
+            second_max_ticks: 0,
+        }
     }
 
     fn envelope_fixture() -> Value {
@@ -720,7 +812,7 @@ mod tests {
         let hours = gate_hours(&profile).unwrap();
         let tests = [walk_from(
             ObsContext::new(obs.per_session().to_vec()),
-            Value::Null,
+            no_ranges(),
         )];
         for gate in [gate_b6, gate_b7] {
             let rec = gate(&obs, &tests, &hours).unwrap();
@@ -744,7 +836,7 @@ mod tests {
         for rec in &mut holed {
             rec["block2"].as_object_mut().unwrap().remove("9");
         }
-        let holed = [walk_from(ObsContext::new(holed), Value::Null)];
+        let holed = [walk_from(ObsContext::new(holed), no_ranges())];
         for gate in [gate_b6, gate_b7] {
             let rec = gate(&obs, &holed, &hours).unwrap();
             assert!(!rec.passed, "{} passed vacuously", rec.name);
@@ -756,19 +848,14 @@ mod tests {
         for rec in &mut no_b3 {
             rec["block3"] = json!({});
         }
-        let no_b3 = [walk_from(ObsContext::new(no_b3), Value::Null)];
+        let no_b3 = [walk_from(ObsContext::new(no_b3), no_ranges())];
         let rec = gate_b3(&obs, &no_b3, &hours).unwrap();
         assert!(!rec.passed);
         assert!(!rec.refusals.is_empty());
 
-        // B4: a summary that serialized no per-seed maximum.
-        let mut summary = summary_at(220, 300, 400);
-        summary
-            .as_object_mut()
-            .unwrap()
-            .remove("minute_range_max_ticks");
-        let no_max = [walk_from(ObsContext::new(Vec::new()), summary)];
-        let rec = gate_b4(&envelope_fixture(), &no_max).unwrap();
+        // B4: a walk that printed no trade inside the window.
+        let no_trades = [walk_from(ObsContext::new(Vec::new()), no_ranges())];
+        let rec = gate_b4(&envelope_fixture(), &no_trades).unwrap();
         assert!(!rec.passed);
         assert!(!rec.refusals.is_empty());
 
@@ -778,7 +865,7 @@ mod tests {
         for rec in &mut empty {
             rec["block1_hist"] = json!([]);
         }
-        let empty = [walk_from(ObsContext::new(empty), Value::Null)];
+        let empty = [walk_from(ObsContext::new(empty), no_ranges())];
         let rec = gate_b2(&obs, &empty, &hours).unwrap();
         assert!(!rec.passed);
         assert!(!rec.refusals.is_empty());
@@ -809,36 +896,28 @@ mod tests {
         assert!(!gate_b4(&env, &above).unwrap().passed);
     }
 
-    /// Section 2.5's determinism claim: the two accumulator passes drive one
-    /// generator over one tape, so they agree on how many parents they saw.
-    /// Run at one day, which is short relative to the artifact run's month but
-    /// is not a round number chosen for comfort: it is the shortest window that
-    /// measures anything here, and shortening it does not weaken the pin, it
-    /// empties it.
+    /// The production control path end to end on a real generated day: the
+    /// shipped profile resolved through the preset, the unsized walk, and
+    /// complete-session emission. For this seed and window it must emit
+    /// exactly the one session the window spans and carry parent mass in
+    /// exactly the calendar-exposed hours - compared as sets, because equal
+    /// counts can hide one missing hour and one stray. It is an integration
+    /// claim; numerical agreement with the full measurements is pinned on
+    /// crafted streams in `measure12a::tests`, where expected values are
+    /// written down independently.
     ///
-    /// `window_start_ns` is 2026-06-30T22:00:00Z, which is an MNQ session open,
-    /// and the accumulator's `per_session` records are emitted per completed
-    /// session. So a window that ends mid-session yields no records at all.
-    /// Measured, at this start: 1 h, 6 h and 12 h each give zero hours and zero
-    /// parents; 24 h gives 23 hours (hour 21 is the unexposed one) and
-    /// 1,455,942 parents. The cliff is the session boundary, not a gradient.
+    /// This replaced a pin that two passes over one tape agreed on their parent
+    /// count. One walk cannot disagree with itself, so that pin had no content
+    /// left once the control stopped walking twice.
     ///
-    /// The sibling `arrival_control_refuses_a_tree_that_changed_during_the_run`
-    /// argues for a one-hour window, and that argument does not transfer: it
-    /// pins step ordering and needs only that the run reach its gates, whereas
-    /// this pin's content is that two passes agree over the tape they walked.
-    ///
-    /// Its cost is proportional to the parents the pinned day carries, and the
-    /// cascade's day count is heavy-tailed: over seeds 300 to 316 at tape
-    /// protocol 36 it runs from about half a million to well over two
-    /// million, and seed 301's day sits at that set's median. It was under
-    /// the per-test watchdog only while the realization gave it a light day,
-    /// so choosing a lighter seed would be choosing a workload, not a pin; it
-    /// is ignored instead, and the gate that includes ignored tests still
-    /// runs it.
+    /// One day is the shortest window that measures anything:
+    /// `window_start_ns` is 2026-06-30T22:00:00Z, an MNQ session open, and
+    /// sessions are emitted only once complete, so a window ending mid-session
+    /// yields no records at all. Seed 301's day sits at the median of the
+    /// cascade's heavy-tailed day counts over seeds 300 to 316; choosing a
+    /// lighter seed would be choosing a workload, not a pin.
     #[test]
-    #[ignore = "debug-slow: two full passes over one MNQ session day; a median-count day exceeds the per-test watchdog in a dev build"]
-    fn the_control_walk_pair_replays_one_tape() {
+    fn the_control_walk_covers_every_exposed_hour_of_its_session() {
         let binding = GeneratedBinding {
             window_start_ns: 1_782_856_800_000_000_000,
             window_length_ns: 86_400_000_000_000,
@@ -851,48 +930,49 @@ mod tests {
         // directory, on the panic path included.
         let scratch = crate::storage::unit_test_scratch("arrival-control-walk");
         let walk = control_walk(scratch.path(), &binding, None, 301).unwrap();
-        let by_hour = hourly_mean_parents(&walk.ctx);
-        // The coverage assertion, not just a nonzero total: a shortened window
-        // that still catches one busy hour would satisfy `parents > 0` and
-        // quietly reduce this from an agreement-over-the-tape pin to an
-        // agreement-over-one-hour pin. The expected count is derived from the
-        // preset rather than written down, so a legitimate MNQ calendar change
-        // fails at `gate_hours_excludes_the_unexposed_hour`, which owns that
-        // fact, instead of failing here behind a message about window length.
-        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
-        let exposed = gate_hours(&profile).unwrap().len();
-        let covered = by_hour.values().filter(|r| r.parents > 0).count();
-        assert_eq!(
-            covered, exposed,
-            "the walk must cover every exposed hour; a window that does not is \
-             a different and weaker pin"
-        );
-        let acc_parents: i64 = by_hour.values().map(|r| r.parents).sum();
-        assert!(acc_parents > 0, "the walk produced no parents");
-        // Compared against the summary's session cells, not its top-level
-        // parent count. Both passes measure under the lab's session frame,
-        // which carves a 15:15 Chicago halt the exchange does not have and
-        // the venue's MNQ calendar stopped carving at tape protocol 31; the
-        // cells and `GeneratedAcc` both drop a parent that opens in that
-        // hole, while the top-level count is the whole tape and now runs
-        // ahead by exactly those parents.
-        let cell_parents: i64 = walk.summary["session_cells"]
-            .as_array()
-            .expect("session cells")
+        let dates: Vec<&str> = walk
+            .ctx
+            .per_session()
             .iter()
-            .flat_map(|cell| {
-                cell["parent_count_by_hour"]
-                    .as_array()
-                    .expect("a 24-hour cell")
-                    .iter()
-                    .map(|count| count.as_i64().expect("a parent count"))
-                    .collect::<Vec<_>>()
-            })
-            .sum();
-        assert_eq!(
-            acc_parents, cell_parents,
-            "the two passes disagree about the tape they walked"
+            .map(|s| s["session_date"].as_str().expect("a session date"))
+            .collect();
+        assert_eq!(dates, ["2026-07-01"], "the window spans one session");
+        // The expected set is derived from the preset rather than written
+        // down, so a legitimate MNQ calendar change fails at
+        // `gate_hours_excludes_the_unexposed_hour`, which owns that fact.
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
+        let exposed = gate_hours(&profile).unwrap();
+        let covered: Vec<i64> = hourly_mean_parents(&walk.ctx)
+            .values()
+            .filter(|r| r.parents > 0)
+            .map(|r| r.hour)
+            .collect();
+        assert_eq!(covered, exposed, "parent mass outside the exposed hours");
+        assert!(
+            walk.minute_ranges.max_ticks > 0,
+            "the walk measured no minute range"
         );
+    }
+
+    /// The corrected-curve walk cannot run against the shipped preset: its
+    /// calendar carries an activity envelope, which replaces the hourly session
+    /// curves, and profile resolution refuses the re-centred override as inert.
+    /// Pinned so the day the owner rules on what the control re-centres under
+    /// an envelope, this fails and says so, rather than `docs/cli.md`'s note
+    /// going stale.
+    #[test]
+    fn the_corrected_curve_is_refused_under_the_shipped_envelope() {
+        let binding = GeneratedBinding {
+            window_start_ns: 1_782_856_800_000_000_000,
+            window_length_ns: 86_400_000_000_000,
+            burn_in: "0s".into(),
+        };
+        let scratch = crate::storage::unit_test_scratch("arrival-control-envelope");
+        let curve = [1.0 / 24.0; 24];
+        let Err(refused) = control_walk(scratch.path(), &binding, Some(&curve), 305) else {
+            panic!("the corrected curve resolved under an envelope-bearing preset");
+        };
+        assert!(refused.to_string().contains("inert"), "{refused}");
     }
 
     #[test]

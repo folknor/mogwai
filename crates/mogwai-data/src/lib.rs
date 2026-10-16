@@ -81,7 +81,8 @@ pub use generated::{
 pub use mogwai_protocol::MarketRegime;
 pub use record::{
     EventView, MAX_RECORD_DP, MemoryParents, MemoryRiver, ParentSource, ParentView, Pushback,
-    QuoteRec, Record, RecordScale, RiverSource, Round, ScaleError, TradeRec, record_from_event,
+    QuoteRec, Record, RecordScale, RiverSource, Round, ScaleError, TradeRec, UnsizedParentView,
+    UnsizedRecord, record_from_event,
 };
 pub use trigger::{
     BookState, FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk,

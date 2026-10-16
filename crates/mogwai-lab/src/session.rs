@@ -390,6 +390,49 @@ pub fn session_segment_at(ts_ns: u64, offset_minutes: i32) -> Option<SessionSegm
     }
 }
 
+/// [`session_segment_at`] under one fixed offset, remembering the last
+/// segment it resolved. A walk reads in time order and stays in one segment
+/// for hours, so almost every query is answered by the remembered one.
+///
+/// Exact: `session_segment_at` returns the segment whose `[origin, end)`
+/// contains its input and depends on the input through that membership
+/// alone, so a query inside the remembered interval has the same answer,
+/// whichever direction it came from. A query outside it recomputes from the
+/// query itself.
+/// Only a `Some` is remembered. Where `to_utc` saturates, the interval can
+/// stop containing the instant that produced it (an end clipped to zero
+/// contains nothing), which only forces a miss.
+/// `segment_cursor_answers_what_the_function_answers` pins it.
+#[derive(Clone, Debug)]
+pub struct SegmentCursor {
+    offset_minutes: i32,
+    last: Option<SessionSegment>,
+}
+
+impl SegmentCursor {
+    #[must_use]
+    pub fn new(offset_minutes: i32) -> Self {
+        Self {
+            offset_minutes,
+            last: None,
+        }
+    }
+
+    pub fn at(&mut self, ts_ns: u64) -> Option<SessionSegment> {
+        if let Some(seg) = self.last
+            && seg.segment_origin_ns <= ts_ns
+            && ts_ns < seg.segment_end_ns
+        {
+            return Some(seg);
+        }
+        let seg = session_segment_at(ts_ns, self.offset_minutes);
+        if seg.is_some() {
+            self.last = seg;
+        }
+        seg
+    }
+}
+
 /// Howard Hinnant's `civil_from_days`: proleptic-Gregorian (year, month, day)
 /// from a day count since the 1970-01-01 epoch. Avoids a `chrono` dependency
 /// for the one thing this crate needs a calendar for.
@@ -620,6 +663,55 @@ impl MinuteFieldsCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cursor answers every query exactly as the function does: at every
+    /// open, halt, reopen, close and midnight instant and one nanosecond
+    /// either side, over a fortnight, under several offsets; at both ends of
+    /// the `u64` range, where `to_utc` saturates; walked forward, backward
+    /// and in a scrambled order, so a hit after a backward step is checked.
+    #[test]
+    fn segment_cursor_answers_what_the_function_answers() {
+        let day0 = 20_600_i128;
+        for offset in [-360, -300, 0, 60] {
+            let mut instants: Vec<u64> = vec![0, 1, 2, u64::MAX - 1, u64::MAX];
+            for day in day0..day0 + 14 {
+                for minute in [
+                    0,
+                    i128::from(HALT_START_LOCAL_MIN),
+                    i128::from(HALT_END_LOCAL_MIN),
+                    i128::from(SESSION_CLOSE_LOCAL_MIN),
+                    i128::from(SESSION_OPEN_LOCAL_MIN),
+                    i128::from(SESSION_OPEN_LOCAL_MIN) + 1,
+                ] {
+                    let ns =
+                        day * NS_PER_DAY + minute * NS_PER_MIN - i128::from(offset) * NS_PER_MIN;
+                    for delta in [-1, 0, 1] {
+                        instants.push(u64::try_from(ns + delta).expect("a 2026 instant"));
+                    }
+                }
+            }
+            instants.sort_unstable();
+            let mut scrambled = instants.clone();
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            for i in (1..scrambled.len()).rev() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                scrambled.swap(i, (state >> 33) as usize % (i + 1));
+            }
+            let backward: Vec<u64> = instants.iter().rev().copied().collect();
+            for order in [&instants, &backward, &scrambled] {
+                let mut cursor = SegmentCursor::new(offset);
+                for &ts in order {
+                    assert_eq!(
+                        cursor.at(ts),
+                        session_segment_at(ts, offset),
+                        "offset {offset} at {ts}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn format_trade_date_matches_known_dates() {

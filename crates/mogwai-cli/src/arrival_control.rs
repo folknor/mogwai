@@ -782,11 +782,12 @@ mod tests {
             Seams {
                 read_b5: false,
                 run_b1: false,
-                // One hour, no burn-in. Eight walks of two passes each run
-                // here, so the window is an order shorter than the lab's
-                // one-day `the_control_walk_pair_replays_one_tape` pin: this
-                // is a pin about step ordering, and the shortest window that
-                // still produces real block records serves it exactly as well.
+                // One hour, no burn-in. Eight walks run here, so the window is
+                // an order shorter than the lab's one-day
+                // `the_control_walk_covers_every_exposed_hour_of_its_session`
+                // pin: this is a pin about step ordering, and the shortest
+                // window that still produces real block records serves it
+                // exactly as well.
                 window: Some((3_600_000_000_000, "0s".to_string())),
                 mid_run: Some(Box::new(move || {
                     std::fs::write(&planted, b"dirty\n").expect("planting the probe");

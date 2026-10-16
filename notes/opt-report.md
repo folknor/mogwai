@@ -1,638 +1,579 @@
-# GeneratedSource throughput: consolidated optimization report
+# Generated-walk throughput: consolidated optimization report
 
-This merges two independent reports (`opt-report-1.md` and
-`opt-report-2.md`) into one prioritized list. Where both raised the same
-idea, the entry carries the union of their detail and says so. Where only
-one did, the entry names its source. The code claims are the reports'
-own, not re-verified, unless an entry says otherwise. What has been
-actioned is recorded under "Status" at the end, which is the place to
-read which priorities have landed.
+Two independent source-reading reports (report A and report B, received
+2026-10-16) on the three workloads that still bound the slow tests, merged
+into one prioritized list of hypothetical wins. Where both raised the same
+idea, the entry carries the union of their detail and says so; where only
+one did, it names its source. Every finding is recorded as the reports
+stated it. None was run or benchmarked by either report: every cost figure
+is an estimate from reading the code, and every claim is to be investigated
+before it is acted on. Where the two disagree, both positions are kept.
 
-The classification on each entry:
+Below the new list, the open work this report already carried is retained:
+the two rewrites from the earlier round that have not been started, the
+items deliberately declined, and the state of the slow and failing tests.
+The earlier round's landed work (priorities 1 to 4 of that round, tape
+protocols 35 and 36, and its local changes) is in the git history and is
+no longer described here.
 
-- Byte-preserving: tape bytes stay identical, the existing oracle and
-  goldens stay green unchanged.
-- Byte-moving: tape bytes change. Under the correctness contract this
-  owes a `TAPE_PROTOCOL_VERSION` bump, a re-bless of the affected goldens
-  (including `protocol9_tape_oracle`), and a re-run of the realism gates
-  and fit tolerances. Report 1 described the oracle as write-once and
-  asked for a ruling to retire it; the 2026-08-09 contract already makes
-  exact-equality gates re-blessable, so how the oracle test itself is
-  worded is worth checking before the first byte-moving change, in case
-  its own prose is stricter than the contract.
+## The three workloads
 
-## What the benchmark exercises (report 1)
+- The legacy main stream. `realism`, `session_edge_spike_lifts_realized_clamp`
+  and `session_edge_spike_localizes` (`crates/mogwai-data/src/generated/tests.rs`)
+  walk one fingerprint-fitted river (`xbtusd_anchor`: no arrival kernel, no
+  cascade, no book, no calendar) through `next_tick`. Both reports confirm
+  the legacy walk. Correction (both reports): `windowed_latent_returns`
+  stops after `draw` parents, not ticks, so each session-edge walk is one
+  million parents, about 9.5 million records (8.5M trades, 1M quotes).
+  `session_edge_spike_lifts_realized_clamp` measures two such realizations
+  plus a small determinism comparison. Priority 2 took the readers off
+  these walks; what is left is parent resolution.
+- The bare GARCH recursion. `shipped_garch_rails_sit_above_the_clean_tail`
+  runs `measure_uncapped_tail`: 8 seeds of 2,000,000 dependent updates, one
+  after another on one thread.
+- The doubled MNQ day. Resolved by priority 1 below: the control now walks
+  its day once.
 
-- The BTCUSDT preset has no arrival kernel, cascade, book or calendar, so
-  `protocol9_tape_oracle` measures only the legacy `begin_event` path: a
-  Weibull gap with a two-state Markov switch, a GARCH Student-t mid, the
-  bounce/drift process, a geometric sweep, and one child at a time
-  through `step_child`. NVDA also uses the legacy path; MNQ and MES take
-  the cascade path. No shipped preset activates the discrete book.
-- From the fitted scalars (0.1615 s mean gap, 8.49 children per parent)
-  a 6-hour stream is about 134k parents, 1.14M trades and 134k quotes.
-  Trades are roughly 85% of records; three streams are about 3.9M
-  records.
+Where the time goes, report B's estimates (release, per unit):
 
-## Where the time goes (both reports agree)
+- Legacy generator about 400 to 500 ns per parent, of which size
+  decoration is about 40% (17 size-stream u64, 8.5 AS 241 quantiles and 8.5
+  exp per parent).
+- `realism`'s `measure` about 200 ns or more per trade, about 4x the
+  generator: a `TradeTick` with two Decimals and an `Arc` clone, a Decimal
+  divide and `fract` for the off-grid check, two `decimal_to_f64`,
+  `is_round_lot` recomputing `powf(log10(median))` every call, a SipHash
+  `HashSet` insert, and two `owed_children()` calls each rescanning the
+  rest of the plan.
+- MNQ cascade walk about 250 to 350 ns per parent per pass, at about 1.16
+  children per parent. `summarize` about 1 us per parent (a Decimal turned
+  into a `String` key for a `BTreeMap<String, u64>` per trade, another map
+  entry for the minute detail, two i128 civil-time segment lookups and a
+  Decimal width per quote, two more Decimal-to-String keys, a `format!`
+  displacement key, a heap `Vec` for levels and another segment lookup per
+  parent). `GeneratedAcc` about 0.5 us per parent (two i128 segment lookups
+  per print, four to six `BTreeMap` operations per parent). On those
+  figures the two generator passes are about a quarter of the test.
+- Bare GARCH about 25 to 35 ns per step.
 
-The stochastic model is cheap; the record representation is expensive.
+Report B's headline: for the legacy and MNQ workloads the wall is probably
+mostly the readers, not the generator, with measurement code at 3 to 5 times
+the walk per parent in release. Report A's: substantial avoidable work
+remains before the irreducible recursions are the whole story - control runs
+two overly broad measurements, session-edge decorates sizes it never reads,
+parent advancement expands records it discards, and rail sizing serializes
+independent seeds. There is no lock or channel handoff in these hot loops
+(report A); the serialization is stochastic dependency plus unrelated work
+done through one mutable source.
 
-Per trade, the model costs one Bernoulli for the level step, one
-lognormal (a ziggurat normal plus an exp), one Bernoulli for the lot
-snap, and about ten flops.
+## Priority 1. One walk for the control run, measuring only what control consumes (landed)
 
-Per trade, the representation costs:
+Landed 2026-10-16 (uncommitted at the time of writing), report A's endpoint,
+sparred with codex to consensus. Exact for the tape.
 
-- Two binary-to-decimal conversions (`Decimal::from_f64` for price and
-  size), an iterative 96-bit loop over the binary exponent of around 60
-  iterations for a size near 0.0027.
-- Two `round_dp` rescales.
-- An atomic increment and decrement on the shared `Arc<str>` symbol.
-- A `TickEvent` of roughly 90 bytes moved through `Option`.
-- In the oracle harness, a `format!` allocation plus four Decimal
-  `Display` calls per record.
-- In production, `serde_json::to_string` and a copy into `Arc<str>` on
-  the tape thread.
+What it is now. `control_walk` is one unsized walk into `ControlAcc`
+(`arrival_control.rs`), which measures per-session blocks 1 to 3 and the
+minute ranges and nothing else: no decoration, no trace, no block 4, no
+forensics, no summary. The pieces it shares with the full measurements are
+shared code, not copies:
 
-Report 2's measurement, across the three crypto streams: full event
-consumption took about 1.34 s, parent advancement alone about 0.14 s.
-That is evidence of a large budget around materialization and delivery,
-not a demonstrated 9.6x win for a consumer that needs every field: the
-compact path omits output work, and the compiler can drop unused pure
-calculations.
+- `GeneratedAcc` split into `SessionFrame<O: FrameObserver>` (window and
+  lab-frame selection, rotation, book in force, the single close point,
+  complete-session emission) and `Forensics`, the observer the frame calls
+  synchronously at its print point and close point. `ControlAcc` is the same
+  frame with a unit observer and `SessionAcc::close_blocks_1_to_3`.
+- `MinuteRangeAcc` lifted out of `summarize` with its arithmetic unchanged;
+  both `summarize` and `ControlAcc` use it.
+- `ParentSource::next_parent_unsized` and `UnsizedParentView` in
+  `mogwai-data`: the generator skips `decorate()`, and the view exposes only a
+  quantity-free projection. `GeneratedAcc::walk` reads unsized too, so every
+  full 12a measurement drops its size draws as well.
+- `control_exposure` resolves the profile and source once for
+  `control_walk` and `control_generated_pass`.
 
-Downstream consumers then undo the materialization (report 2):
+Measured. The real-day test went from about 23 s to 8.8 s alone in dev and
+is no longer ignored; it runs in the plain lane.
 
-- `summary::summarize()` (mogwai-lab `summary.rs`) converts prices back
-  to float, reconstructs parents from quotes and trades, and formats
-  sizes into histogram keys.
-- `GeneratedAcc` (mogwai-lab `measure12a/generated.rs`) converts Decimal
-  prices into integer nanounits for the measurement engine.
-- Trace generation consumes individual children mostly to recover their
-  count.
+The test's claim changed. The old pin (two passes agree on parent count)
+had no content once there was one walk. The real-day test is now an
+integration claim (the one session date, the exposed hour set as a set).
+Numerical correctness is pinned on crafted streams with independently
+written expectations: control blocks equal the full measurement on the
+stream `measure12a_matches_independent_recompute` anchors; the two
+independent selections (burn-in child, unsided print, lab-halt print,
+straddling end); forensics delivered across a rotation forced from inside a
+print, with the deferred share resolving in the next session; and a
+mixed-reader generator test covering every transition out of an unsized
+read. Each was bite-checked by a text-edit mutation.
 
-The generator knew the parent boundary, book, child count and child
-progression before those consumers reconstructed them.
+Not done from the reports. Report B's pipelined multi-thread variant was not
+built: one walk with one cheap measurement left nothing to overlap. Report
+B's scratch-config versus preset profile equality pin was not added; the
+control no longer compares the two paths, but the fit driver still resolves
+through the scratch path.
 
-## Priority 1. Compact numeric records, with protocol objects at the edge
+Found on the way, open:
 
-Both reports; both rank it first. Byte-moving as specified (fixed-scale
-text), with a byte-preserving stepping stone.
+- The corrected-curve arm cannot run. The MNQ preset's calendar carries an
+  activity envelope, and profile resolution refuses a `session.intensity_hour`
+  override as inert, so `mogwai arrival-control` stops at the first test
+  seed. Pinned by `the_corrected_curve_is_refused_under_the_shipped_envelope`
+  and recorded in `docs/cli.md`. What the control should re-centre under an
+  envelope needs an owner ruling.
+- The same refusal makes `arrival_control_refuses_a_tree_that_changed_during_the_run`
+  (`mogwai-cli`) fail with the wrong refusal: its mid-run hook sits after
+  the test walks it can no longer reach. Not run here (it needs a clean
+  tree); it follows the ruling above.
+- `fit::walk::profile_from_config` formatted anyhow errors with `{e}`,
+  dropping the cause chain, so the inert refusal surfaced as "configured
+  symbol NVDA is invalid". Fixed to `{e:#}`. The `NVDA` label itself comes
+  from `mogwai_venue::config::build_instrument_profiles`, which names a
+  symbol-less boot shape by `DEFAULT_PRESET` even when an `[instrument]
+  preset` selects another; the label misleads and is not fixed.
+- Two incidental behaviour changes: a control window that is not a whole
+  number of seconds is no longer refused (the duration string it fed is
+  gone), and a walk with no in-window trade is now a recorded B4 refusal
+  rather than an error out of the nearest-rank helper.
 
-Bottleneck. The walk is already on an integer grid internally:
-`price_ticks` is an integral f64 (rounded, floored at 1, stepped by one
-tick), book bid and ask are integral ticks, quote sizes are constants.
-Every record still goes f64 to Decimal by the slowest conversion, then
-Decimal to String in serde, then String to `Arc<str>`, each stage
-discarding structure the previous one had.
+## Priority 2. Readers that use the compact records and assume time order (landed)
+
+Landed 2026-10-16 (uncommitted at the time of writing), sparred with codex to
+consensus and audited by a fresh codex session afterwards. Exact: no tape
+byte, no statistic and no serialized output moves, so no bump is owed.
+
+What it is now.
+
+- The four latent helpers in `crates/mogwai-data/src/generated/tests.rs`
+  (`durations`, `latent_returns`, `windowed_latent_returns`,
+  `measure_session_curves`) step with `advance_parent` and read no record.
+  `assert_placed` refuses a discrete-book walk, whose first trade is not at
+  its parent instant. The windowed helper still classifies by the resolved
+  end clock, not the parent instant. `discard_owed` is gone; its comment's
+  claim that discarding moved later draws had been stale since tape 36.
+  `measure_session_curves` reduces through `session_curves_from`, so the pin
+  runs the real helper.
+- `realism`'s `measure` reads sized `next_parent` views: integer off-grid
+  check, a dense hour bitset, one parent boundary per view instead of two
+  `owed_children` suffix scans per trade. Every float still goes through the
+  `Decimal` route the old reader used (each size, and each parent's last
+  trade price), so the compact reader is bit-identical, not merely within
+  tolerance. The old reader stays as `measure_records`; both share one
+  reduction, `summarize_measured`.
+- `SegmentCursor` (`mogwai-lab` `session.rs`): remembers the last segment
+  and answers from it while `origin <= ts < end`. Used by `SessionFrame`,
+  `Forensics` and `summarize`. `ScheduleFrame::session_segment_at` has
+  different boundary semantics and is untouched.
+- `SessionAcc`'s three minute maps fused into one `MinuteCell` map behind a
+  current-minute register that merges on revisit. A revisit is routine: a
+  parent closes after the print that follows it, which can sit in the next
+  minute. `block1` reads the fused keys; no minute carries a quote alone,
+  because the count is written before the quote range.
+- `summarize`: size and displacement histograms counted in `HashMap`s by
+  integer key and rendered to the same string-keyed maps at the end;
+  integer banker-rounded quote width, with the `Decimal` path kept for a
+  tick the price scale cannot hold; horizon moments by index; the levels
+  buffer reused; the worst-minute detail and per-minute parent counts behind
+  a `MinuteMap` register; `rank_top_minutes` validates every minute, then
+  selects 32 rather than sorting all of them.
+
+Pins, each bite-checked by a text-edit mutation:
+`compact_measurement_matches_the_record_reader` (every field, bit for bit,
+60k parents); `parent_helpers_match_the_record_readers` (all four helpers'
+outputs against record-reading references under clean, storm, drought, an
+edge spike the walk crosses into, and a crossed reopen);
+`segment_cursor_answers_what_the_function_answers` (every session boundary
+plus or minus 1 ns under four offsets, both `u64` extremes, forward,
+backward and scrambled); `a_revisited_minute_merges_rather_than_replaces`;
+`integer_quote_widths_round_as_the_decimal_path_did` (every width to 40
+ticks either way, ticks of 1 to 7 units, ties of both parities, inverted
+books); `top_minutes_select_what_a_full_sort_keeps` (0, 31, 32, 33 and 80
+minutes, ties across the cut, an unselected off-grid minute still refusing);
+`a_minute_map_merges_a_revisited_minute`.
+
+`summarize` was also checked once end to end: its serialized JSON
+byte-identical to the pre-change version over MNQ, MES, NVDA and BTCUSDT,
+seeds 1, 7 and 42, five-hour windows across the close and reopen, in
+release. That used a temporary in-tree copy of the old function, deleted
+afterwards; the unit pins above are what stays.
+
+Measured.
+
+- `session_edge_spike_lifts_realized_clamp` 24.3 s to 9.0 s, dev, alone.
+- `realism` 35.0 s to 23.3 s in dev, alone; 1.8 s in release. Still past
+  the 20 s watchdog in dev: the 2M parents' resolution alone is about that,
+  so its
+  `debug-slow` ignore stays until the generator gets cheaper (priority 3 or
+  4). It fails exactly as before (`abs_return_acf_lag10` 0.1832), the same
+  realization read the same way.
+- The control walk's real-day test 8.8 s to 7.8 s in dev. Bound by the
+  generator there.
+- `summarize` and `GeneratedAcc` were not benchmarked through `brokkr
+  mogwai`; the fit-driver and month-window win is unmeasured.
+
+Not done from the reports, deliberately:
+
+- Report B's integer round-lot test (`qty % lot_units == 0`) is not exact.
+  The old predicate tests near-integers in float, and a size a hair off a lot
+  multiple classifies differently under the two. The float predicate stays,
+  with its lot hoisted.
+- Report B's closed-form per-second counts per parent: the per-trade integer
+  loop is already cheap, and the closed form buys nothing a bench could see
+  behind the generator.
+- Report A's streaming autocorrelations: the retained 2M-element series cost
+  nothing measurable, and streaming changes the estimator's numerics.
+- Report B's per-session minute arrays and two live forensic minutes: the
+  register in front of one map is exact under any arrival order, the arrays
+  are exact only under an ordering contract nobody states, and the forensic
+  map is read back by the deferred share and by selection.
+
+## Priority 3. A placed parent as a compact sweep description
+
+Report A. Full rewrite of placed-parent internals. Exact for the tape.
+
+Bottleneck. Size decoration is separate from feedback, but feedback is not
+separate from record expansion. `emit_children` walks every child, computes
+its timestamp and price and pushes an undecorated `TradeRec`;
+`advance_parent` then counts and clears them. A consumer wanting only a
+parent's timestamp and count pays for every child record. `LevelSteps`
+already draws a sparse description - geometric gaps between level changes -
+which is then immediately expanded per child.
+
+Redesign. A resolved parent holds its quote, timestamp and child count, first
+child index, opening level and side, the positions of actual level changes,
+the final level and optional observation data. The serial resolver consumes
+every feedback draw and updates the clock, remembered price and drift without
+expanding the sweep. For a monotone sweep the final price follows from the
+opening level and the number of effective changes, floored at one tick; the
+reserved clock span follows from timestamp, count and fixed stride; legacy
+drift recentering and the repeat state need only the final level. Consumers
+choose what to observe: session-edge resolves feedback and reads the latent
+mid; arrival composition reads timing and count; minute ranges traverse price
+runs, splitting at time boundaries; `realism` generates and quantizes actual
+sizes; the venue reader expands records. One implementation of the stochastic
+parent with several ways to observe it, never a second approximate generator.
+The discrete-book walk keeps its own native result: its quantities and quote
+publications are consequences of execution.
+
+Payoff. Workloads that do not need children individually move from per-child
+toward per-parent plus actual level changes, and priority 1's quantity-free
+control walk stops paying for record expansion. The plan vector already
+reuses capacity, so the win is expansion and traversal, not allocation.
+
+Obligations. Consume the same level-step draws, terminal overshoots included;
+seller behaviour at the floor; child-index reservation and final drift
+recentering; price representability checks and atomic parent refusal;
+boundary-crossing children in minute and window statistics; checkpoint
+replay.
+
+## Priority 4. A serial feedback core with fixed draws per parent, and pure emission
+
+Both reports (report A section 5, report B R3). Byte-moving: owes a
+`TAPE_PROTOCOL_VERSION` bump, re-blessed goldens and re-run gates. Both say
+to land it after the exact priorities above, which leave the walk as the
+remaining cost and make this one's gain measurable.
+
+Bottleneck. One ChaCha12 stream consumed in parent order, with a variable
+amount per parent (report B): the ziggurat normal and the Marsaglia-Tsang
+gamma inside `ChiSquared` reject; the child mixture takes one or two
+uniforms; drift coins are drawn only in the high regime; the repeat coin only
+for single-child low-regime parents; the level-step gaps vary with the sweep.
+So nobody can know where parent k's draws start without running parents 0 to
+k-1, every reader pays for everything, and nothing batches. The stream mixes
+draws that feed back (gap, flip, innovation, side and regime, drift, count,
+repeat, and on the bounce walks the number of level steps) with draws that
+do not (where the steps fall; on the cascade, every step). Report A's framing:
+the ordering serializes more than the mathematics requires; a standardized
+innovation can be sampled before the previous variance is known, a unit
+Weibull before its scale, uniforms for state-dependent decisions before their
+thresholds.
 
 Redesign.
 
-- The generator emits `Copy` records with no symbol:
-  - trades `{ ts: u64, px_ticks: i64, qty_units: u64, side: u8 }`;
-  - quotes `{ ts, bid_ticks, ask_ticks, bid_units, ask_units }`.
-- Symbol, tick and scales belong to the river (stream or block), held
-  once.
-- A price Decimal, when needed, is
-  `from_i128_with_scale(ticks * tick_mantissa, price_decimals)`: pure
-  integer arithmetic, exact for any tick (0.01, 0.25 and so on).
-- Size is quantized once in the f64 domain to grid units: 1e-8 for spot,
-  whole contracts for integral grids. Minimum quantities, round-lot
-  snapping and exceptional magnitudes must be represented deliberately.
-- The continuous latent mid stays floating point; this is not a move to
-  integer stochastic arithmetic.
-- `TickSource` yields records; `TradeTick` and `QuoteTick` become edge
-  views built only where an engine or adapter needs Decimal. `next_tick()`
-  can survive as a compatibility surface draining compact records.
-- The tape thread writes the two JSON frame shapes directly from
-  integers into a reused buffer, then one `Arc<str>::from(&buf)`.
-- `vol_window` and extremes fold integer ticks.
-- The oracle hashes record bytes, or a fixed-scale canonical line
-  written without `format!`.
-- Measurement goes further (report 2): integrate the reducers with
-  parent execution. Pass the known parent book and boundary straight into
-  the accumulator and fold child values as they resolve, with no
-  intermediate per-parent vector. `SessionAcc::push_print()` and
-  `push_parent()` already take numeric inputs close to the native form.
-- Trace generation reads the child count from the parent transition
-  directly instead of consuming and counting individual children
-  (report 2 names the waste; the fix is implied rather than stated).
-- `summarize()` likewise takes parents, prices and sizes from the
-  records rather than rebuilding parents from quotes and trades and
-  formatting sizes into histogram keys.
+- Core with a fixed K u64 per parent (report B), about 11 to 12 for the
+  legacy walk: gap, flip, three for the innovation, two for side, two for
+  drift (always drawn), one count, one repeat. The normal through the AS 241
+  quantile already in the tree; chi-squared with 4 degrees of freedom is
+  exactly `-2 ln(u1 u2)`, so `t(4) = Phi_inv(u0) / sqrt(-0.5 ln(u1 u2))`,
+  three uniforms, no rejection, same law. The child mixture from one uniform:
+  below q one child, else a geometric on the rescaled remainder. Keep the
+  gamma path for odd `student_df`; even ones are `-2 ln` of a product.
+- Level steps to a child-indexed stream like sizes (report B): a parent with
+  c children draws at most c - 1 gaps, so each parent owns a contiguous
+  range. The bounce walks need only the step count to recentre, since the
+  per-step floor collapses to `max(first - s, 1)`; the cascade never feeds
+  steps back, so its core skips them.
+- Core output one compact row per parent (timestamp, side, first price, child
+  count, first child index, regime, book); emission (records, step positions,
+  sizes) a pure function of the row and the child-indexed streams (report B).
+  Report A's equivalent: generate independent random inputs in separate
+  domains, run the parent state updates in order, produce compact resolved
+  parents, decorate child-index ranges independently on request, then reduce
+  or expand.
+- Batching (both): with a fixed draw count, a block's uniforms generate in one
+  call and transform with SIMD (the central AS 241 branch is a ratio of
+  polynomials; ln and exp vectorize), and the serial recursion runs over
+  precomputed arrays. Report A: use reusable block streams, introducing random
+  addressing only where independently scheduled chunks need it; never
+  initialize or seek a generator per scalar draw.
+- Parallel decoration (both): `SizeStream`'s fixed four-word stride and seek
+  let workers generate disjoint child-index ranges, exposing the roughly 17M
+  decorations of a 2M-parent `realism` walk. For `realism` the workers can run
+  the production size law and quantizer and return moments and classification
+  counts rather than protocol trades; consumers needing quantities get
+  contiguous blocks (report A). Emission and per-record measurement split
+  across cores by block; realism's parent-level series come from the core
+  rows and its per-trade statistics are mergeable sums (report B).
 
-Existing footholds (report 2): `advance_parent()` already separates
-stochastic advancement from materialization; the discrete book already
-uses integer prices and quantities. `ParentSummary` alone is
-insufficient: it exposes timing and counts, not the prices and
-quantities real consumers need.
+Payoff. Readers needing only parents or the latent mid pay only the core:
+session-edge, the dwell arms, the session curves, checkpoint extension and
+venue seeks; report B guesses 60 to 100 ns per parent against 400 to 500 for
+a full legacy read today. `realism` becomes bounded by the serial core. The
+cascade gains less from emission at 1.16 children per parent, but still from
+fixed-length samplers: 13 normals per open second and a t draw per parent.
+Report A: plausible because expensive sampling and decoration leave the
+serial chain, unmeasured, and if the remaining state update dominates, more
+workers help little.
 
-Payoff. Removes the dominant per-record cost from `next_tick`, history
-replay, the paced tape and the offline gen/measure walks, plus the
-atomic refcount traffic on a symbol `Arc` every checkpoint clone shares.
-Several consumers stop paying for representations they immediately
-dismantle.
+Risks. The tape bump and re-blessing (`clean_regime_is_byte_identical`, the
+transcript, the size-draw heads), realism gates and fit tolerances re-run.
+Distributions unchanged except the AS 241 tail truncation near 8.3 sigma
+(already accepted for sizes) and a couple of bits lost in the rescaled
+mixture uniform (report B). The real cost is downstream: the committed
+generated-side artifacts, the 12a walk caches and the parity12a generated
+seeds, are specific realizations and must be regenerated with month-scale
+walks. `ARRIVAL_MEAN_CAL` was bisected on the seed-42 realism draw; the value
+stays inside its 10% band but its provenance sentence must be reworded
+(report B). Buffered state must distinguish generated-ahead from consumed for
+cloning, checkpoints, faults and observation data (report A).
 
-Risks.
+## Priority 5. Rail sizing as independent seeds
 
-- Wire text changes: fixed scale (`0.00270000` instead of `0.0027`), and
-  a rare double-rounding case can move a size by one unit.
-- `TickEvent` is used across venue, engine and adapter tests: a wide
-  edit.
-- Boundary semantics: a parent can straddle an observation window or bar
-  boundary, so direct reducer integration must not treat a parent as an
-  indivisible observation.
+Both reports. Exact in every pinned figure.
 
-Byte-preserving stepping stone (report 1). Price conversion is a pure
-function of integer `price_ticks`, so a small direct-mapped memo keyed on
-ticks is byte-identical by construction and nearly always hits, since
-prices cluster around the mid. Report 2's local variant of the same idea:
-reuse the materialized price while a level repeats across sibling trades.
-Sizes have no such memo; a guarded fast path would need differential
-proof. Interim only.
-
-## Priority 2. Forward-only parent execution and boundary checkpoints
-
-Both reports. Byte-preserving on its own. Both say to land it together
-with, or right after, priority 1, since staging plans of objects that
-priority 1 deletes is wasted work.
-
-Bottleneck.
-
-- `GeneratedSource::seek_to()` and `CheckpointIndex::extend_toward()`
-  clone the whole generator before trying each parent, so they can roll
-  back if it overshoots the target, checkpoint boundary or budget. On
-  overshoot they discard the clone and call `next_tick`, resolving the
-  same parent a second time: one clone plus two resolutions. The deeper
-  cause (report 2): a parent's footprint is discovered by executing it,
-  while the interfaces assume execution may need rolling back.
-- Cloning is expensive on the cascade: its mutable state holds several
-  vectors, a pending-child heap and a vector of sign slots (report 2),
-  and on calendar presets it deep-copies the session tables (priority 3).
-- Legacy `next_tick` re-dispatches every record: a fault check, a
-  `book.is_some()` check, a `pending_quote` take and a burst check.
-  `step_child` re-derives `level_step_prob` per child, branching on
-  cascade and high regime (report 1).
-- Report 2's measurement: one six-hour cascade case took about 27 ms
-  through compact parent advancement versus about 130 ms through
-  checkpoint extension. Not a perfect isolation of cloning, but the code
-  names a substantial structural cause.
+Bottleneck. `measure_uncapped_tail` walks eight independent seeds one after
+another on one thread, each step drawing a rejection-sampled t(4).
 
 Redesign.
 
-- `resolve_parent(&mut self, plan: &mut ParentPlan)` writes one parent
-  into a reusable struct-of-arrays buffer of priority-1 records, with no
-  allocation. The transition yields the continuation state, the emitted
-  records, the reserved timestamp span and record count, and a consumed
-  cursor.
-- Emission: `next_tick` becomes pop the cursor, else resolve.
-- Skipping: resolve, then reset the buffer.
-- Seeking: resolve; if `end_ns < target`, drop the plan, otherwise park
-  the cursor at the first in-window index. No clone, no re-resolution.
-- Checkpoints sit at parent boundaries carrying their actual timestamp
-  and sequence position. `k` becomes the first boundary after `k`
-  records, so a snapshot never carries a half-drained plan. Exact
-  placement every fixed number of wire records was an implementation
-  choice, not a reason to copy the machine before every parent.
-  Arbitrary-time reads restore an earlier checkpoint and replay into the
-  parent cursor.
-- The generator's resolved frontier and the reader's consumed position
-  become separate concepts. The book path already shows why they differ:
-  resolving a parent advances its clock across records not yet returned.
-- A batch API (`next_batch(&mut [Record]) -> usize`, or `&[Record]` per
-  parent) for the tape thread, history and gen.
+- One worker (scoped thread) per seed, each owning its seeded generator, its
+  `GarchVol`, two local tail accumulators, the squared-return sum and the
+  count, merged in seed order (both). The top-k merge is exact: the global top
+  k lies in the union of the per-seed top k's, since a sample excluded from a
+  seed's top k already has k samples above it in that seed. The real
+  `GarchVol::step` and both per-step rail assertions stay.
+- `TopK` (both): partition at the retained boundary (`select_nth_unstable_by`,
+  linear) instead of fully sorting 131,072 values per compaction, and sort the
+  retained values once when ranked queries are answered; today every query,
+  repeated maximum queries included, compacts again (report A). It keeps
+  65,536 values while the deepest rank read is 8,000 (report B). Report A
+  cautions that the threshold rejects most samples after warm-up, so
+  compaction is not every 65,536 updates indefinitely, and sorting is not
+  shown to dominate.
+- The innovation from priority 4's fixed-length sampler once it lands, still
+  the shipped draw and `GarchVol::step`, never a copy (report B).
+- Later: seeds in SIMD lanes, a batched kernel advancing independent seeds
+  while keeping each trajectory's order (both). A parallel prefix scan over
+  time: report B notes that while no rail binds, which the per-step assertion
+  guarantees, the variance recursion is exactly affine,
+  `sigma2' = a0 + (a1 z^2 + b1) sigma2`, so one seed's chain composes; not
+  worth it until one seed is the wall. Report A would not start there: the
+  shipped transition includes the clamps the test exists to detect, and
+  replacing it with an unrailed recurrence risks changing what is certified.
 
-Payoff. Removes per-record dispatch and per-child recomputation, turns a
-parent's children into one tight loop, and removes clone-per-parent and
-double resolution from every seek and checkpoint extension: warmup,
-history positioning and repeated reads.
+Payoff. About 8x from threads on an idle host with eight or more cores, less
+inside a loaded gate (report B); a latency gain, not less total work, and
+per-worker warm-up of the tail thresholds is duplicated (report A). About
+another 2x from the sampler (report B).
 
-Risks.
+Risks. Merge floating-point sums in fixed seed order, never completion order
+(report A). The RMS becomes a sum of per-seed partials and moves in its last
+bits, an intentional numeric change; the `consts.rs` figures quoted to 3 to 5
+significant figures are unaffected (both).
 
-- Strict-before seek: the partition relies on a checkpoint's `clock_ns`
-  being the last consumed `ts_event`. A boundary-only snapshot satisfies
-  this, but the argument must be redone, not assumed.
-- The plan cursor is a watermark and may only advance over records
-  actually handed out (frontier family).
-- Explicit cursor semantics are needed for inclusive seeks, quote/trade
-  timestamp ties, reserved-but-suppressed quote slots, fault propagation
-  (mid-plan faults especially) and partially consumed parents. Simply
-  deleting the clone would be incorrect.
+## Priority 6. The cascade's offspring as exponential intensity state
 
-## Priority 3. Split immutable spec from walk state; walk as an enum
+Report A. Full cascade rewrite. Conditional, lower confidence.
 
-Report 1 only. Byte-preserving. Independent of priorities 1 and 2, and
-fixes a memory problem and a doc defect regardless of throughput, so it
-can land first if wanted.
+Bottleneck. In `cascade.rs` every parent samples Poisson offspring counts for
+exponential delay kernels and inserts individual future timestamps into a
+heap, against which later parents compete.
 
-Bottleneck.
+Redesign. Represent offspring as exponential intensity components that decay
+between events and take an increment at each, replacing a population of
+scheduled offspring with a small state vector. This attacks heap operations,
+random memory access and explicit future-event materialization.
 
-- `SessionModulator` owns `EnvelopeTables`, which holds a cloned
-  `SessionCalendar` (including its envelope's 1440-entry volume and range
-  vectors) plus separate 1440-entry arrival and vol vectors. Every
-  `GeneratedSource` clone on a calendar preset deep-copies about 46 KB
-  across five heap allocations: once per parent in `seek_to`, once per
-  parent in `extend_toward`, and once per snapshot. At
-  `MAX_CHECKPOINTS = 4096` that is on the order of 190 MB of duplicated
-  immutable tables per river.
-- The `CheckpointIndex` doc claims cloning copies only mutable walk
-  state. On these presets that is false, which makes the comment a
-  defect until the code makes it true.
-- The walk's mode lives in eight `Option` fields (`arrival_kernel`,
-  `arrival_state`, `arrival_env`, `cadence_rng`, `cascade`,
-  `cascade_state`, `book`, `book_plan`), re-tested on hot paths and
-  carried by every clone.
-- Report 2 adds the book-specific form: `resolve_book_parent()` deep
-  clones the book configuration and selected phase knobs per parent
-  (see priority 5).
-
-Redesign.
-
-- `Arc<RiverSpec>` holds everything fixed: scalars, symbol, tick,
-  scales, distributions, session tables, calendar, a precomputed minute
-  table, cascade tables and the size grid. Execution borrows from it.
-- `WalkState` is an enum, `Legacy | Integrated | Cascade | CascadeBook`,
-  each variant holding only its own state.
-- The per-parent loop is monomorphized per variant and dispatched once
-  per parent or per batch.
-- A snapshot shrinks to a few hundred bytes, smaller still by storing
-  ChaCha's key and word position instead of its 256-byte buffer.
-
-Payoff. Seek, history and checkpoint costs on MNQ, MES and NVDA stop
-being dominated by memcpy and malloc; checkpoint memory drops by two to
-three orders of magnitude.
-
-Risk. Low but wide: touches every module that reads `self.*` fields
-directly, including the many `pub(super)` test hooks. Mechanical once
-priority 2 has settled the control flow.
-
-## Priority 4. Serial skeleton plus counter-addressed decorations
-
-Report 1 only. Byte-moving. Report 1 puts it after priorities 1 and 2,
-since once representation cost is gone, draw count and size sampling are
-what remain on emission and the whole cost of skipping.
-
-Bottleneck. One serial ChaCha12 stream interleaves draws that feed back
-into the walk with draws that never do.
-
-- Feeds back (legacy, integrated and cascade-placed paths): the clock
-  and arrival state; GARCH state (mid, sigma2, prev_return); bounce side,
-  regime and drift; the sweep's final `price_ticks`, through
-  `last_event_price_ticks` and the drift recentre; `last_book`, through
-  the repeat branch.
-- Never feeds back: child sizes and the lot-snap flag, two of the three
-  per-child draws and the expensive pair (exp plus ziggurat rejection).
-- Every skip path (seek, checkpoint extension, `advance_parent`) still
-  draws every size and throws it away to keep the stream aligned.
-
-Redesign.
-
-- The main stream draws only feedback state: gap, flip, innovation,
-  bounce, count, repeat and level steps.
-- Level steps as geometric gaps: within one parent `p` is constant
-  (fixed regime, fixed cascade), so draw geometric gaps between steps
-  instead of one Bernoulli per child. Emit and skip modes consume
-  identical draws at O(steps + 1) instead of O(children).
-- Sizes and snap flags become a pure function of
-  `(seed, global_child_index)` under their own domain tag, as the book
-  streams already are: a keyed hash, Philox, or ChaCha positioned by
-  word. Uniforms become normals by inverse CDF. The source carries a
-  `u64` child counter.
-
-Payoff.
-
-- Skipped parents cost O(parent draws + steps), independent of child
-  count; with 8.49 children mean and long active-state sweeps, report 1
-  expects a severalfold reduction for seek and checkpoint extension.
-- Emission vectorizes: a parent's sizes are a branch-free map over a
-  contiguous index range (block uniforms, lane-wise inverse CDF and exp,
-  quantize to priority-1 units).
-- Decorations can be generated lazily or on another thread for
-  consumers that never read sizes.
-
-Risks.
-
-- Statistically equivalent but sampled differently (inverse CDF for
-  ziggurat, geometric gaps for Bernoullis): realism gates and fit
-  tolerances re-run, with a bump.
-- The book path's sizes feed back through depletion, so they stay on
-  the skeleton. Acceptable while no shipped preset carries a book.
-
-Tension with report 2. Report 2 advises deferring any change to the
-random-number generator, and against stage workers or parallelizing
-consecutive parents: the shared stream and path-dependent price state
-are real serial dependencies, and queues between arrival, price and
-child stages add ownership transfers without removing them. This is
-compatible with report 1 in one reading: priority 4 does not
-parallelize the skeleton, it removes the non-feedback draws from it, so
-the serial dependency report 2 names is preserved. Report 2's
-parallelism recommendation is across independent realizations instead.
-
-## Priority 5. Discrete-book path as one compact transaction
-
-Both reports, report 2 in more detail. Byte-preserving. Priority follows
-use: no shipped preset activates the book.
-
-Bottleneck.
-
-- `resolve_book_parent()` clones the book configuration and selected
-  phase knobs per parent.
-- Book execution allocates a fill vector; reporting split returns
-  another vector, cloning the fills even when no split occurs.
-- `build_book_plan()` then builds a fresh `VecDeque<TickEvent>` per
-  parent with fully materialized Decimals and `Arc` clones.
-- `advance_for_checkpoint` resolves that plan and only reads its
-  length, so all materialization there is wasted.
-
-Redesign (report 2). Execute the parent into one compact transaction
-buffer: integer fills plus pre/post book snapshots. Reporting splits
-modify that buffer in place; quote suppression resolves into emission
-flags; timestamps follow the reserved-slot schedule. Wire events are
-built only when a reader requests them. Immutable configuration is
-borrowed from the compiled spec (priority 3), never deep-cloned. Wire
-emission and checkpoint advancement consume the same representation.
-
-Interim local fix (report 1). Until priority 2 lands, `build_book_plan`
-builds no Decimal and no `Arc` clone when called from
-`advance_for_checkpoint`, and reuses its `VecDeque` instead of
-allocating per parent.
-
-Risk. Preserving the causal chain among execution, depletion, reporting
-splits, impact, relaxation and quote suppression; the transaction must
-capture the whole result.
-
-## Priority 6. Shared generated blocks across delivery timelines
-
-Report 2 only. Full serving-path redesign, workload-dependent.
-Byte-preserving in principle (same realization, different delivery).
-
-Bottleneck. A boat is already shared among passengers with the same
-boat key. The duplication is across speeds or placements: `Boatyard`
-(mogwai-venue `boatyard.rs`) obtains separate positioned sources, and
-each boat's `Tape` (mogwai-venue `tape.rs`) independently generates
-events and serializes market frames. Speed changes when an event is
-delivered, not what it is, so overlapping spans are simulated and
-serialized repeatedly.
-
-Redesign. Each river gets a generated-block store of compact immutable
-records plus continuation checkpoints. Boats own delivery cursors and
-pacing, reading blocks at their own speed and start. History and
-execution scans read the same blocks; reusable market-frame encodings
-attach to blocks when needed. Boat-specific funding, visibility and
-accounting stay with the delivery timeline.
-
-Payoff. Generation scales with the distinct market span readers demand
-rather than the sum of every reader's overlapping span. Strong with
-several speeds, overlapping historical windows or repeated scans; little
-benefit to a single sequential consumer, so it does not explain the
-bare-walk timing.
-
-Risks.
-
-- Visibility: a fast reader must not expose future information to a
-  slower reader's market state.
-- Retention: a slow reader must not force unbounded memory; needs an
-  explicit eviction and regeneration policy.
-- Coordination: a generation owner publishes completed blocks without
-  holding a broad reader lock throughout simulation.
-
-Depends on priorities 1 and 2 (blocks are compact records with boundary
-checkpoints).
+Conditional. A small pending heap may be cheap, and sampling the next event
+under summed exponential intensities can itself be costly. Equivalence is
+substantial: per-second immigrant buckets, closures, minimum event spacing,
+placed-child clock advancement, pending-event handling and the heap ceiling
+all shape the implemented process, and ordinary branching-to-intensity
+equivalence does not automatically preserve them. Implement the complete
+alternative and benchmark it against the full cascade workload and its
+statistics, without routing flags around partial variants.
 
 ## Local changes
 
-Medium value. Both reports say these fold into the rewrites above rather
-than landing as substitutes for them.
+Medium value. Both reports would fold these into the rewrite that owns their
+site rather than land them alone.
 
-1. Session multiplier caching (report 1; byte-preserving).
-   `arrival_mult` and `vol_mult` do 64-bit divisions and modulos every
-   parent, and the regime's `vol_mult` calls `utc_hour` again. Cache the
-   current hour segment and its multipliers, recompute on crossing. On
-   calendar presets precompute a 10,080-entry minute table (open flag,
-   minutes to next open, arrival and vol multipliers), making `is_open`
-   and `session_position` O(1) and `next_open_ns` O(1) instead of a
-   minute-by-minute scan of up to 10,080 steps that loops over windows at
-   each step. Folds into priority 3's `RiverSpec`.
-2. Per-state sweep shapes (both reports; byte-preserving if the
-   expressions stay identical). `begin_event` rebuilds a `SweepShape` and
-   its branch arithmetic every parent, though its inputs vary only with
-   `last_quiet` and whether the surge is active. Precompute the two to
-   four shapes, including the `(1 - 1/m).ln()` denominator `next_count`
-   evaluates on every draw. Keyed on state, the cache never misses.
-3. Precomputed Bernoulli thresholds (report 1). `random_bool(p)`
-   converts `p` to an integer threshold every call. Hoist
-   `level_step_prob`'s threshold to once per parent, and the constant
-   probabilities (bounce, drift, repeat, snap) to the spec. Whether
-   bytes move depends on rand's internals.
-4. Precomputed round-lot scales (report 2; byte-preserving). Removes
-   repeated `log10` and `powf` from size materialization. Subsumed by
-   priority 1's size grid.
-5. Distribution micro-forms (report 1). Weibull with shape 1.0 is an
-   exponential, and `powf(x, 1.0)` is exactly `x`, so skipping it should
-   be byte-preserving. Chi-squared with df = 4 has the closed form
-   `-2 ln(u1 u2)`, replacing Marsaglia-Tsang rejection (byte-moving).
-6. Precomputed one-second cascade coefficients (report 2). Avoids
-   repeated exp and sqrt for a fixed elapsed time in the cascade's bucket
-   updates. Helps MNQ and MES, not the crypto materialization cost.
-7. Oracle harness buffer (report 1). Write canonical lines into one
-   reused buffer instead of `format!` per record. Changes how the hash
-   is computed, not what it covers; benchmark-hygiene rather than
-   production speed.
+1. Cascade child spawning (report B). `spawn_children` builds a Poisson
+   distribution three times per parent for fixed rates, three `exp` per parent
+   for constants. Precompute in `CascadeTables`; building a distribution draws
+   nothing, so no tape change.
+2. Per-parent `Arc` clone (report B). `Arc::clone(&self.spec)` in each
+   `begin_*` is an atomic increment and decrement per parent, there only for
+   the borrow checker. Split the borrows.
+3. Size stream (report B). Each child uses two u64; splitting one between the
+   size uniform and the snap coin halves it. A counter-based generator would
+   also remove the buffer regeneration on every seek. Either is a tape bump.
+4. Cascade immigrant placement (report B). Each immigrant does a `powf`;
+   drawing a second's immigrants at once (sorted uniforms, or normalized
+   exponential spacings) avoids it. Tape bump.
+5. Small re-derivations (report B). `LevelSteps::new` recomputes `ln_1p(-p)`
+   every parent for one of three constants; `is_round_lot` recomputes its lot
+   every call; `owed_children` is O(remaining).
+6. Lab calendar lookups (report B). `open_throughout` scans the calendar's
+   windows per call; the generator's `CompiledCalendar` minute table
+   (crate-private today) could serve the lab.
+7. A specialized Student-t sampler (report A), after work elimination and
+   block execution. Payoff depends on sampler and hardware, and the cascade's
+   degrees of freedom are configurable, so a hardcoded legacy sampler must not
+   quietly become the cascade's. Priority 4's fixed-draw t(4) is report B's
+   form of the same idea.
 
-## Explicitly deferred
+## Afterwards, if these work
 
-Report 2: changing the random-number generator, stage workers between
-arrival, price and child, and parallelizing consecutive parents. The
-cleaner parallelism is across independent realizations. See the tension
-note under priority 4.
+- One parent-block producer feeding sinks as the runner for every lab walk:
+  `arrival_screen`, `arrival_envelope`, the fit driver and `gen --type summary`
+  (report B).
+- Multi-seed `realism` (report B, needs an owner ruling): K arms of `DRAW/K`,
+  each reporting mergeable sufficient statistics. Report B holds that the
+  comment's "lag-50 autocorrelations need one continuous series" does not
+  hold statistically - segments of 250k parents against a GARCH half-life of
+  about 700 parents pool to essentially the same estimator - and that what is
+  actually tied to the single seed-42 draw is `ARRIVAL_MEAN_CAL`'s provenance.
+  Report A holds that lag 50 requires one continuous realization. Both
+  positions stand until measured.
+- Instruments built on many independent seeds (the dwell arms, rail sizing,
+  envelope cells) running seeds in SIMD lanes (report B).
 
-## Recommended order
+## Lateral findings from the two reports
 
-1. Priorities 1 and 2 as one intrusive change: records plus plans plus
-   an edge writer is the coherent unit. Benchmark against the oracle
-   walk, keep or revert on measured end-to-end results.
-2. Priority 3 whenever seek and history on calendar presets matter, or
-   first, since it is independent and fixes the memory and doc defect.
-3. Priority 4 once representation cost is gone.
-4. Priority 5 when a preset uses the book; its interim fix any time.
-5. Priority 6 when overlapping multi-speed consumption is a real
-   workload.
-6. Local changes ride along with whichever rewrite owns their site.
+- `session_edge_spike_localizes` is not ignored and runs in the fast lane
+  (report B; true since tape 36 re-enabled it).
+- Realism's off-grid check cannot trip on anything the walk does (report B):
+  every record price is a whole number of ticks times the tick mantissa, so it
+  only verifies the Decimal conversion at the edge.
+- The oversized `TopK` is under priority 5. The control-walk laterals were
+  closed by priority 1's rewrite; what it found in turn is listed there.
 
-Priorities 1 and 4 move bytes and owe a bump, re-bless and gate re-run.
-Priorities 2, 3, 5 and 6 are byte-preserving on their own. Each rewrite
-should replace the old mechanism completely rather than preserving the
-current internal interfaces, which would weaken it; generic interface
-cleanup follows once the winning shape is established.
+## Suggested sequence
 
-## Status (2026-10-16)
+Report B: measure first - time a bare walk against a walk with its readers for
+all three workloads, registered as brokkr targets that report parents,
+records, main-stream words and size-stream words, which settles whether the
+readers dominate. Then priority 2 and re-measure; priority 1 and re-measure
+(exact for the tape, but it changes the test's claim, an owner call); the
+rail-sizing threads at any time; priority 4 as one complete intrusive change,
+kept or reverted on the numbers. Report A's order puts the control rewrite
+first, the compact sweep second, rail threads third and block execution
+fourth, each a complete replacement benchmarked then kept or reverted, with
+wall time and processor work both measured so parallelism is distinguishable
+from eliminated work. Both: hold seeds, horizons and populations fixed where
+the tape is preserved; give a tape-changing rewrite its own identity and
+statistical validation; assess control throughput on the median-count day and
+the wider seed set, never a lighter realization.
 
-Context: dev builds lost their global `opt-level = 2`, so `brokkr check`
-now runs the test suite unoptimized, and several walks crossed the 20 s
-per-test watchdog. The work below was done against that, all of it
-byte-preserving: `protocol9_tape_oracle` still matches its protocol-9
-hashes and no `TAPE_PROTOCOL_VERSION` bump was owed.
+## Carried over: rewrites from the earlier round, not started
 
-### Landed
+Neither addresses the three workloads above; both stand on their own merits.
 
-- Byte-preserving stepping stone of priority 1: a direct-mapped price
-  memo (`PriceMemo` in `generated/numeric.rs`) for trade and quote
-  prices on the legacy, integrated and cascade paths, and a guarded fast
-  path for `decimal_from_f64(x).round_dp(dp)` on spot sizes, pinned by
-  `fast_round_dp_matches_the_decimal_conversion`.
-- Local change 1, partly: the session multipliers are a shared
-  per-minute-of-week table (`SessionModulator`), pinned by
-  `the_minute_table_reproduces_the_shape_at_every_instant`. A source
-  clone no longer deep-copies the modulator's calendar and envelope.
-- Local change 2, partly: the geometric denominator `ln(1 - 1/m)` is
-  solved once per `SweepShape`.
-- Local change 3: the size-snap, repeat, level-step, bounce and drift
-  coins are constructed `Bernoulli`s.
-- Local change 4: both round-lot scales are derived once per source.
-- Local change 5, the Weibull half: shape 1 skips the `powf`.
-- Local change 6: one-second cascade coefficients precomputed.
-- Local change 7: the oracle reuses one line buffer.
+### The discrete-book path as one compact transaction
 
-Measured on the oracle in debug: 24.5 s to about 14.8 s. Per 6-hour
-BTCUSDT stream the walk went from 5.8 s to 2.5 s; what remains is about
-1.5 s of draws (unoptimized ChaCha12 and the samplers), 1.2 s of
-`Decimal` Display in the harness, and the rest materialization.
+Byte-preserving. Priority follows use: no shipped preset activates the book.
+`resolve_book_parent()` once cloned the book configuration per parent (it now
+borrows it through the shared spec); book execution still allocates a fill
+vector, and the reporting split returns another, cloning the fills even when
+no split occurs. Redesign: execute the parent into one compact transaction
+buffer, integer fills plus pre and post book snapshots; reporting splits
+modify it in place; quote suppression resolves into emission flags;
+timestamps follow the reserved-slot schedule; wire records are built only for
+a reader; wire emission and checkpoint advancement consume the same
+representation. The earlier interim fix is moot: checkpoint extension no
+longer builds a separate per-parent book plan. Risk: preserving the causal
+chain among execution, depletion, reporting splits, impact, relaxation and
+quote suppression.
 
-### Priorities 1 and 2, landed as tape protocol 35
+### Shared generated blocks across delivery timelines
 
-Compact records (`mogwai_data::record`), whole-parent plans, boundary-only
-checkpoints, the wire frame written straight from integers, compiled integer
-trigger thresholds, and parent views for the lab consumers. Byte-moving: the
-protocol-9 oracle is retired for a wire-frame oracle
-(`analysis/tape-oracle-hashes.json`), goldens re-blessed with only the
-spelling moved. Lateral fixes that rode along: `last_trade_at_or_before`
-returned an earlier print when its budget ran out between two qualifying
-prints; several walks read a river fault as clean exhaustion. Not yet
-measured for speed; the debug-slow tests below have not been re-timed.
+Byte-preserving in principle. A boat is shared among passengers with the same
+boat key; the duplication is across speeds or placements: `Boatyard` obtains
+separate positioned sources and each boat's `Tape` generates and serializes
+independently, so overlapping spans are simulated and serialized repeatedly.
+Redesign: each river gets a store of compact immutable record blocks plus
+continuation checkpoints; boats own delivery cursors and pacing; history and
+execution scans read the same blocks. Payoff scales with distinct span
+demanded rather than the sum of overlapping reads; little benefit to a single
+sequential consumer. Risks: a fast reader must not expose future information
+to a slower one's market state; a slow reader must not force unbounded
+retention; publishing blocks must not hold a broad reader lock through
+simulation.
 
-### Not done, and why
+## Carried over: declined, with the reason
 
-- Chi-squared closed form (local change 5): byte-moving.
-- A per-state sweep-shape cache (local change 2): `begin_event`
-  re-solves per event on purpose, and the code records a measurement
-  showing no gain.
-### Priority 3, landed byte-preserving
+- Chi-squared closed form as a standalone change: byte-moving on its own
+  (now folded into priority 4's fixed-draw core).
+- A per-state sweep-shape cache: `begin_event` re-solves per event on purpose,
+  and the code records a measurement showing no gain.
+- Compressing a snapshot's `ChaCha12Rng` to key plus word position: about a
+  megabyte per river at the checkpoint cap.
+- Moving the few fixed scalars inside `ArrivalClock`, `BounceState`,
+  `SweepShape` and `RegimeState` into the shared spec: a few words each.
 
-`GeneratedSource` is now one `Arc<RiverSpec>` (config, record scale,
-compiled calendar, session and cascade tables, integrated environment,
-samplers, size grid, surge window) plus a `Walk` enum, `Legacy |
-Integrated | Cascade | CascadeBook`, each variant holding only the state
-its path reads. Dead writes went with the split: the cascade no longer
-keeps bounce state, a prior book or a prior price, and the integrated
-walk keeps no prior book or price. The sweep is parent-local.
-`SweepShape` stays whole on the source, so each path keeps its own
-truncation accounting.
+## Carried over: slow and failing tests
 
-- Local change 1's remainder: `CompiledCalendar` (`generated/calendar.rs`)
-  answers `is_open`, `session_position` and `next_open_ns` by a
-  per-UTC-minute-of-week table, filled by calling `SessionCalendar`'s own
-  methods. `SessionCalendar` stays the public input, so there is no
-  stale-cache risk. The cascade's per-second calendar questions read it.
-  Pinned by `a_compiled_calendar_answers_every_instant_as_the_calendar_does`
-  (bite-checked).
-- `ArrivalEnv` shares the compiled calendar and its transition schedule,
-  so the `CheckpointIndex` doc's sharing claim is now true and reworded
-  to name what a snapshot still copies.
-- `with_surge` documented a before-the-first-draw guarantee it did not
-  enforce. It now asserts on a sticky `resolved_any` flag and writes the
-  spec copy-on-write. Pinned by `a_surge_is_refused_once_the_walk_has_drawn`
-  (bite-checked) and `a_surge_never_reaches_a_clone_taken_before_it`.
-- Not done, deliberately: compressing the snapshot's `ChaCha12Rng` to key
-  plus word position (about a megabyte per river at the cap), and moving
-  the few fixed scalars inside `ArrivalClock`, `BounceState`, `SweepShape`
-  and `RegimeState` into the spec (a few words each).
-- Not measured: this should move seek, history and checkpoint costs on the
-  calendar presets, not the BTCUSDT walls below.
-
-### Priority 4, landed as tape protocol 36
-
-Placed-sweep sizes and lot snaps moved to a size stream addressed by
-global child index (`generated/children.rs`: `SizeStream`, two `u64` per
-child, the lognormal through the AS 241 normal quantile). Per-child
-level-step coins became geometric gaps (`LevelSteps`). Resolution
-reserves child indices; `decorate` fills quantities only before a record
-or parent view is handed out, so skipped, advanced and seek-dropped
-parents draw no size. The discrete-book path is untouched. Sparred with
-codex on the design, the conventions and the diff.
-
-- Re-blessed: the wire-frame oracle, the fill golden (a fresh draw that
-  passes its shape asserts), `clean_regime_is_byte_identical`, the spot
-  size head in `spot_draws_are_bit_identical_across_the_size_grid_change`
-  (its first four draws are the first parent's sizes in the
-  `clean_regime` golden, the cross-check the design predicts), and the
-  Stage A manifest digest. V4 and V5 conformance vectors name the new
-  `level_steps` stage.
-- The gate re-run, 16 seeds per tree in release: every `realism`
-  statistic's seed mean agrees between tapes 35 and 36 to about the third
-  decimal. `realism` itself (seed 42) now fails `abs_return_acf_lag10`
-  at 0.183 against the band's 0.1565 ceiling. That is not this change:
-  the lag-10 seed mean is 0.164 on both tapes, and about half the seeds
-  sit above the ceiling on either. The shipped law sits above its own
-  fingerprint band at lag 10, and seed 42 landed inside it at 35 by
-  chance. Open as fit work; neither the gate nor the band was touched.
-- `the_control_walk_pair_replays_one_tape` became debug-slow. Its pinned
-  day (seed 301) now carries 1.28M parents against 667k at tape 35, while
-  the cost per parent fell. Over seeds 300 to 316 the day count runs from
-  0.50M to 2.37M with a median of 1.21M, so 301 is a typical day; tape
-  35's was a light one. Picking a lighter seed would be choosing a
-  workload, so it is ignored instead.
-- Plain `brokkr check` test time fell from 1m36s to 1m03s.
-
-### Test changes
-
-- `dwell_is_bounded_across_run_seeds` became eight per-seed tests,
-  `dwell_is_bounded_at_run_seed_*`, measured through the compact parent
-  path (`measure_dwell`), with
-  `dwell_measurement_matches_the_full_walk` pinning bit-identity with the
-  full `measure`. About 3 s each instead of 46 s.
-
-### Disabled tests to investigate
+### Ignored as debug-slow
 
 Each carries an ignore reason beginning `debug-slow:`, so
-`git grep -n "debug-slow:"` lists them. Walls are one test alone in
-debug. `brokkr check --gate` sets `include_ignored`, so the gate still
-runs and times out on these until they are fixed or skip-listed.
+`git grep -n "debug-slow:"` lists them; `brokkr check --gate` still runs
+them. Walls are one test alone in a dev build, measured 2026-10-16.
 
-| Test | File | Wall | After P1+P2 (tape 35) | After P3 (f1e0deb) | After P4 (tape 36) |
-|---|---|---|---|---|---|
-| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 42.0 s | 38.3 s | 37.8 s | 35.0 s, and fails (see P4) |
-| `session_edge_spike_lifts_realized_clamp` | `crates/mogwai-data/src/generated/tests.rs` | 33.5 s | 27.3 s | 28.5 s | 24.3 s |
-| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.5 s | 17.3 s | 17.0 s |
-| `session_edge_spike_localizes` | `crates/mogwai-data/src/generated/tests.rs` | 16.8 s | 13.8 s | 14.3 s | 12.5 s, re-enabled |
-| `one_walk_serves_every_probe_on_a_symbol` | `crates/mogwai-venue/src/fills.rs` | 34.8 s | 35.8 s | 36.5 s | 12.5 s, re-enabled |
-| `sweep_pass_walks_only_the_new_span` | `crates/mogwai-venue/src/fills.rs` | 21.0 s | 21.5 s | 21.8 s | 7.5 s, re-enabled |
-| `the_control_walk_pair_replays_one_tape` | `crates/mogwai-lab/src/arrival_control.rs` | - | - | 13.8 s | about 23 s, newly ignored (see P4) |
+| Test | File | Tape 35 | Tape 36 | After priority 2 |
+|---|---|---|---|---|
+| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 37.8 s | 35.0 s, and fails (below) | 23.3 s, 1.8 s in release, still fails |
+| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.0 s | untouched |
 
-Priorities 1 and 2 did not move these walls much, being dominated by
-draws. Priority 4 took the venue pair under the watchdog: their reach to
-`TEST_ORIGIN` is checkpoint extension, which no longer draws sizes.
+Re-enabled at tape 36: `session_edge_spike_localizes` (12.5 s),
+`one_walk_serves_every_probe_on_a_symbol` (12.5 s) and
+`sweep_pass_walks_only_the_new_span` (7.5 s). Re-enabled by priority 1:
+the control walk's real-day test, now
+`the_control_walk_covers_every_exposed_hour_of_its_session` (8.8 s, was
+about 23 s as `the_control_walk_pair_replays_one_tape`; 7.8 s after
+priority 2). Re-enabled by priority 2:
+`session_edge_spike_lifts_realized_clamp` (9.0 s, was 24.3 s).
 
-What remains, and why priority 4 cannot reach it:
+The control walk's pinned day (seed 301) went from 667k parents at tape 35 to
+1.28M at tape 36 while cost per parent fell; over seeds 300 to 316 the day
+count runs from 0.50M to 2.37M with a median of 1.21M, so 301 is a typical
+day and tape 35's was a light one.
 
-- `realism` and the two `session_edge_spike` walks read every trade
-  through `next_tick`, so they decorate every child and pay the sizes
-  either way; their floor is the serial GARCH and arrival draws.
-  `realism` also needs one continuous series for its lag-50
-  autocorrelations. The options left are a split into shorter
-  multi-seed arms after measuring their margins, or a release sweep.
-- `shipped_garch_rails_sit_above_the_clean_tail` drives the bare GARCH
-  recursion, 16M updates, with no source walk at all.
-- `the_control_walk_pair_replays_one_tape` walks a full MNQ day twice;
-  sharing one walk between its two passes is the structural fix.
+### The realism gate misses its own band
+
+`realism` (seed 42) fails `abs_return_acf_lag10` at 0.183 against the
+fingerprint band's 0.1565 ceiling. Not a tape 36 regression: over seeds 0 to
+15 in release, the lag-10 seed mean is 0.164 on tape 35 and on tape 36 alike,
+about half the seeds above the ceiling on either, and every other realism
+statistic's seed mean agrees between the tapes to about the third decimal.
+The shipped BTCUSDT law sits above its own band at lag 10; seed 42 landed
+inside it at tape 35 by chance. Fit work, owed to `notes/todo.md` and to a
+comment at the test site; neither the gate nor the band has been touched.
 
 ### Failing under the gate, not timing out
 
 Both bind a loopback listener, so only `brokkr check --gate` runs them, and
 both fail an assertion rather than the watchdog. The first fails identically
-on the 2026-10-16 committed tree, before the record rewrite, so the rewrite
-did not cause it. Either fallout of the debug-build slowdown or something
-else; needs looking into once the planned work lands.
+on the tree before the tape 35 record rewrite.
 
 | Test | File | Observed |
 |---|---|---|
@@ -640,19 +581,16 @@ else; needs looking into once the planned work lands.
 | `a_short_accelerated_run_is_not_over_before_it_is_ready` | `crates/mogwai-cli/tests/completion.rs` | failed in the same gate run; not yet examined alone |
 
 The shortfall is about 32 ms on every run, and `elapsed_ns` counts from the
-boat's placement, so the likely cause is a slower placement (the warmup
-reach) in an unoptimized dev build. Not yet confirmed.
+boat's placement, so the likely cause is a slower placement (the warmup reach)
+in an unoptimized dev build. Not yet confirmed.
 
-### Near the watchdog, still enabled
+### Stale measurements
 
-Walls from `brokkr check --timings`, under the check's parallel load,
-measured before priority 4 and not re-measured since:
-
-- `r#gen::tests::protocol9_tape_oracle`
-  (`crates/mogwai-cli/src/gen.rs`, now `generated_tape_wire_frame_oracle`):
-  14.6 s.
-- In `crates/mogwai-venue/src/fills.rs`, all between 13.5 s and 14.5 s:
-  `a_resident_window_serves_a_miss_walk_free_and_walk_identical`,
+- The near-watchdog list predates tape 36 and has not been re-measured. Under
+  `brokkr check --timings` load it read: the wire-frame oracle
+  (`crates/mogwai-cli/src/gen.rs`, then `protocol9_tape_oracle`) 14.6 s; nine
+  `crates/mogwai-venue/src/fills.rs` tests between 13.5 s and 14.5 s
+  (`a_resident_window_serves_a_miss_walk_free_and_walk_identical`,
   `a_walk_stops_once_every_scan_has_triggered`,
   `a_truncated_drain_reports_where_it_stopped`,
   `a_pass_costs_one_walk_per_symbol_not_per_order`,
@@ -660,10 +598,9 @@ measured before priority 4 and not re-measured since:
   `every_configured_symbol_gets_its_own_chain`,
   `the_deciding_prints_are_the_prints_trades_serves`,
   `last_trade_at_or_before_never_looks_ahead`,
-  `triggers_only_on_prints_strictly_through_the_trigger`.
-- `boatyard::tests::two_boats_do_not_evict_each_other_s_market_reading`
-  (`crates/mogwai-venue/src/boatyard.rs`): 14.0 s.
-
-The fills and boatyard group cluster at one wall (multiples of about
-7 s alone), which suggests a shared setup walk; one fix there may cover
-all of them.
+  `triggers_only_on_prints_strictly_through_the_trigger`); and
+  `boatyard::tests::two_boats_do_not_evict_each_other_s_market_reading` 14.0 s.
+  The fills and boatyard group clustered at one wall, suggesting a shared setup
+  walk, which tape 36 shortened.
+- The shared-spec and compiled-calendar change (before tape 36) was never
+  benchmarked on the calendar presets' seeks, history and checkpoints.

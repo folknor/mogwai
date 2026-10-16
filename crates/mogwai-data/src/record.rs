@@ -418,6 +418,90 @@ pub struct ParentView<'a> {
     pub trace: Option<VolTrace>,
 }
 
+impl<'a> ParentView<'a> {
+    /// The same parent with its trade quantities hidden.
+    #[must_use]
+    pub fn unsized_view(&self) -> UnsizedParentView<'a> {
+        UnsizedParentView {
+            parent_ts: self.parent_ts,
+            records: self.records,
+            trace: self.trace,
+        }
+    }
+}
+
+/// One record of a parent with every quantity left out: what a reader that
+/// measures timing, prices and sides is allowed to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsizedRecord {
+    Quote {
+        ts: u64,
+        bid_px: i64,
+        ask_px: i64,
+    },
+    Trade {
+        ts: u64,
+        px: i64,
+        side: AggressorSide,
+    },
+}
+
+impl UnsizedRecord {
+    #[must_use]
+    pub fn ts(&self) -> u64 {
+        match *self {
+            Self::Quote { ts, .. } | Self::Trade { ts, .. } => ts,
+        }
+    }
+}
+
+impl From<&Record> for UnsizedRecord {
+    fn from(record: &Record) -> Self {
+        match *record {
+            Record::Quote(q) => Self::Quote {
+                ts: q.ts,
+                bid_px: q.bid_px,
+                ask_px: q.ask_px,
+            },
+            Record::Trade(t) => Self::Trade {
+                ts: t.ts,
+                px: t.px,
+                side: t.side,
+            },
+        }
+    }
+}
+
+/// One whole parent with its quantities hidden, from
+/// [`ParentSource::next_parent_unsized`].
+///
+/// The record slice is private on purpose. A generated source may hand this
+/// view out before it has drawn the trade sizes, leaving each placed trade's
+/// quantity at a placeholder zero; a public slice would let a reader take
+/// that zero for a size. Only the projection in [`UnsizedRecord`] leaves.
+#[derive(Debug, Clone, Copy)]
+pub struct UnsizedParentView<'a> {
+    /// The parent's own instant: its first reserved slot.
+    pub parent_ts: u64,
+    records: &'a [Record],
+    /// The parent's volatility intermediates, when the source traces them.
+    pub trace: Option<VolTrace>,
+}
+
+impl UnsizedParentView<'_> {
+    /// Every record the parent emits, in order, quantities left out. Never
+    /// empty.
+    pub fn records(&self) -> impl Iterator<Item = UnsizedRecord> + '_ {
+        self.records.iter().map(UnsizedRecord::from)
+    }
+
+    /// The timestamp of the parent's first record.
+    #[must_use]
+    pub fn first_ts(&self) -> u64 {
+        self.records[0].ts()
+    }
+}
+
 /// A river that can be read a whole parent at a time.
 ///
 /// `next_parent` is only defined at a parent boundary and consumes the entire
@@ -428,6 +512,14 @@ pub struct ParentView<'a> {
 /// with the misuse named.
 pub trait ParentSource: RiverSource {
     fn next_parent(&mut self) -> Option<ParentView<'_>>;
+
+    /// The next whole parent with its quantities hidden, under the same
+    /// boundary rule as `next_parent`. A source whose sizes cost a draw may
+    /// skip drawing them here; that must leave every later read, sized or
+    /// not, exactly as it would have been.
+    fn next_parent_unsized(&mut self) -> Option<UnsizedParentView<'_>> {
+        self.next_parent().map(|view| view.unsized_view())
+    }
 }
 
 /// A river as a heterogeneous event stream: the edge adapter that lets a

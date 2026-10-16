@@ -734,6 +734,13 @@ transcript before walking fit seeds 301 through 304 and test seeds 305 through
 per-symbol parent-build baselines under
 `analysis/out/arrival-control-b1-baseline/`.
 
+Against the shipped MNQ preset the command cannot currently complete. The test
+seeds walk under a re-centred `session.intensity_hour` override, and the preset's
+calendar now carries an activity envelope, which replaces the hourly session
+curves; profile resolution refuses that override as inert, so the run stops at
+the first test seed after the four fit walks. What the control should re-centre
+on an envelope-bearing preset is owed an owner ruling.
+
 Three baselines are required, one per symbol gate B1 walks: `BTCUSDT.csv`,
 `MES.csv` and `MNQ.csv`, named by `B1_SYMBOLS` in
 `crates/mogwai-cli/src/arrival_control.rs`. A missing, unreadable or

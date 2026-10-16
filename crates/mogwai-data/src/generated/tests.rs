@@ -13,7 +13,7 @@
 
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
-use crate::{RiverSource, TickEvent, TickFault};
+use crate::{Record, RiverSource, TickEvent, TickFault};
 
 use super::arrival::cadence_base_mean_s;
 use super::checkpoint::MAX_CHECKPOINTS;
@@ -1489,7 +1489,7 @@ fn liquidity_drought_imitates_dying_symbol() {
     );
 }
 
-// A 1M-tick walk: see the heavy-walk cfg note at the top of this file.
+// A 1M-parent walk: see the heavy-walk cfg note at the top of this file.
 #[test]
 #[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_localizes() {
@@ -1522,9 +1522,8 @@ fn session_edge_spike_localizes() {
 // (1.0 + extra_vol_mult), so a near-ceiling extra_vol_mult both breaks the
 // old MAX_ABS_RETURN ceiling and scales the in-window RMS with the knob.
 //
-// Two 1M-tick walks: see the heavy-walk cfg note at the top of this file.
+// Two 1M-parent walks: see the heavy-walk cfg note at the top of this file.
 #[test]
-#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_lifts_realized_clamp() {
     let fp = Fingerprint::from_repo_json();
@@ -1824,6 +1823,65 @@ fn calendar_source(start: u64) -> GeneratedSource {
         SizeGrid::spot(),
         Some(cme_calendar()),
     )
+}
+
+/// An unsized parent read skips the size draws and nothing else: what it
+/// shows is the decorated parent with quantities hidden, and every read after
+/// it - sized parent, unsized parent, or records taken one at a time from
+/// inside a parent - sees exactly the records a reader that always decorated
+/// would. The twin reads every parent sized; the mixed reader follows a
+/// schedule of the three readers - 0 unsized, 1 sized, 2 record-wise - whose
+/// cycle holds every transition out of an unsized read (to another unsized
+/// read, to a sized one, to a record-wise one) and back into one. The
+/// record-wise reader enters a parent partway and drains it before the next
+/// parent read.
+#[test]
+fn an_unsized_parent_read_leaves_every_later_read_as_it_was() {
+    use crate::record::{ParentSource, RiverSource, UnsizedRecord};
+    const SCHEDULE: [u8; 6] = [0, 0, 2, 0, 1, 2];
+    let start = FIRST_SUNDAY_NS + 1_080 * MINUTE_NS;
+    let mut twin = calendar_source(start);
+    let mut mixed = calendar_source(start);
+    let mut partial_entries = 0;
+    for i in 0..3_000 {
+        let expected = twin
+            .next_parent()
+            .expect("the twin resolves")
+            .records
+            .to_vec();
+        match SCHEDULE[i % SCHEDULE.len()] {
+            0 => {
+                let view = mixed.next_parent_unsized().expect("an unsized parent");
+                let got: Vec<UnsizedRecord> = view.records().collect();
+                let want: Vec<UnsizedRecord> = expected.iter().map(UnsizedRecord::from).collect();
+                assert_eq!(got, want, "parent {i}: the unsized projection");
+            }
+            1 => {
+                let view = mixed.next_parent().expect("a sized parent");
+                assert_eq!(view.records, &expected[..], "parent {i}: a sized read");
+            }
+            _ => {
+                let mut got = vec![mixed.next_record().expect("a first record")];
+                if expected.len() > 1 {
+                    assert!(
+                        !mixed.at_parent_boundary(),
+                        "parent {i}: one record taken of {} left no parent open",
+                        expected.len()
+                    );
+                    partial_entries += 1;
+                }
+                while !mixed.at_parent_boundary() {
+                    got.push(mixed.next_record().expect("the rest of the parent"));
+                }
+                assert_eq!(got, expected, "parent {i}: a record-wise read");
+            }
+        }
+    }
+    assert!(
+        partial_entries > 100,
+        "the record-wise reader must actually enter parents partway; it did so {partial_entries} times"
+    );
+    assert_eq!(mixed.fault(), twin.fault());
 }
 
 #[test]
@@ -2703,7 +2761,9 @@ fn measure_dwell(src: &mut GeneratedSource, draw: usize) -> Dwell {
     sorted_durations.sort_by(f64::total_cmp);
     let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
     let (empty_hour_frac, max_empty_hour_run_h) =
-        empty_hour_stats_over(parent_timestamps[0], last_ts, &occupied_hours);
+        empty_hour_stats_over(parent_timestamps[0], last_ts, |hour| {
+            occupied_hours.contains(&hour)
+        });
     Dwell {
         mean_gap_s: mean(&durations),
         gap_p999_s: sorted_durations[p999_index],
@@ -2798,14 +2858,10 @@ fn assert_dwell_is_bounded(measured: &Dwell, scalars: &GeneratorScalars, fp: &Fi
 // mean event gap, 15M parent events is about 30 simulated days, and the seven
 // `dow_weight` assertions below need several whole weeks to separate a weekend
 // from a weekday; halving the draw halves the span to two weeks, which does not
-// fail sooner, it passes on less evidence. The harness already throws every
-// child away (`src.owed_children() = 0`), so what is left is the arrival draw
-// itself at about 500 ns per event in dev - there is no fat to take.
-//
-// The watchdog headroom is 2.6x, measured, not the ~1.6x a static estimate
-// suggested: 7.51 s one test per process in dev, and the runner config records
-// the same walk at 7.622 s serial against 7.768 s at eight threads, i.e. this
-// walk barely notices the parallel lane. The 20 s per-test kill is not close.
+// fail sooner, it passes on less evidence. The harness steps whole parents
+// and reads no record, so what is left is parent resolution itself.
+// Resolution itself still lays out every child record of a parent before
+// the helper drops them.
 //
 // A 15M-parent-event walk: see the heavy-walk cfg note at the top of this file.
 #[test]
@@ -2888,18 +2944,8 @@ fn session_modulation_reproduces_curves() {
 #[derive(Default)]
 struct Measured {
     mean_gap_s: f64,
-    // The `expect` is conditional because under `hotpath` the whole struct is
-    // unreachable (its two callers are the compiled-out heavy walks), so rustc
-    // reports the struct and this field-level expectation goes unfulfilled -
-    // which is itself an error. It still bites in the default shape, which is
-    // the shape that gets to say a field has no reader.
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            dead_code,
-            reason = "Sample maxima are recorded for diagnostic context but intentionally never gated."
-        )
-    )]
+    /// Recorded for diagnostic context and never gated; read only by the
+    /// reader-equivalence pin.
     max_gap_s: f64,
     gap_p999_s: f64,
     empty_hour_frac: f64,
@@ -2929,11 +2975,194 @@ struct Measured {
 /// The per-event series (parent timestamps, event prices, the gaps and returns
 /// derived from them) are retained in full - 2M `f64` is 16 MB apiece and the
 /// dwell block's p999 needs a sortable duration vector. The per-print series
-/// are not: 17M timestamps plus 17M `Decimal` sizes would be most of a
-/// gigabyte, so sizes are folded into running moments and timestamps into the
-/// two structures that actually read them - the occupied-hour set and the
+/// are not: 17M timestamps plus 17M sizes would be most of a gigabyte, so
+/// sizes are folded into running moments and timestamps into the two
+/// structures that actually read them - the occupied-hour bitset and the
 /// per-second count vector, both O(simulated seconds) rather than O(prints).
+///
+/// Reads whole sized parents as compact records. Every float that reaches a
+/// statistic is converted exactly as `measure_records` converts it - a size
+/// through its `Decimal`, a parent price likewise, once per parent - and
+/// folded in the same order, so the two agree bit for bit on every field;
+/// `compact_measurement_matches_the_record_reader` pins that. What is gone is
+/// the protocol object per print, the `Decimal` division for the off-grid
+/// check, the `SipHash` set and the suffix scans that found each parent's
+/// ends.
 fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -> Measured {
+    assert_placed(src);
+    let median_size = decimal_to_f64(scalars.latent_size_median);
+    let lot = round_lot(median_size);
+    let scale = RiverSource::scale(src).clone();
+    let tick_mantissa = scale.price_mantissa(scalars.modal_tick).filter(|m| *m > 0);
+    let mut parent_timestamps = Vec::with_capacity(draw);
+    let mut prices = Vec::with_capacity(draw);
+    let mut size_n = 0_u64;
+    let mut size_sum = 0.0_f64;
+    let mut size_sumsq = 0.0_f64;
+    let mut round_lots = 0_u64;
+    let mut occupied_hours = HourBits::default();
+    let mut first_ts = None;
+    let mut last_ts = 0_u64;
+    let mut counts: Vec<u32> = Vec::new();
+    let mut off_grid_prices = 0;
+    let mut neutral_aggressors = 0;
+    while prices.len() < draw {
+        let parent = crate::ParentSource::next_parent(src).expect("infinite generated tape");
+        let mut opened = false;
+        let mut last_px = None;
+        for record in parent.records {
+            let Record::Trade(trade) = record else {
+                continue;
+            };
+            let off_grid = match tick_mantissa {
+                Some(tick) => trade.px % tick != 0,
+                None => (scale.price(trade.px) / scalars.modal_tick).fract() != Decimal::ZERO,
+            };
+            off_grid_prices += usize::from(off_grid);
+            neutral_aggressors += usize::from(trade.side == AggressorSide::NoAggressor);
+            let first = *first_ts.get_or_insert(trade.ts);
+            last_ts = trade.ts;
+            occupied_hours.insert(trade.ts / NS_PER_HOUR);
+            let second = (trade.ts / 1_000_000_000 - first / 1_000_000_000) as usize;
+            if second >= counts.len() {
+                counts.resize(second + 1, 0);
+            }
+            counts[second] += 1;
+            if !opened {
+                opened = true;
+                parent_timestamps.push(trade.ts);
+            }
+            last_px = Some(trade.px);
+            let size = decimal_to_f64(scale.size(trade.qty));
+            size_n += 1;
+            size_sum += size;
+            size_sumsq += size * size;
+            round_lots += u64::from(is_round_lot_f64(size, lot));
+        }
+        let last_px = last_px.expect("a placed parent prints at least one trade");
+        prices.push(decimal_to_f64(scale.price(last_px)));
+    }
+    summarize_measured(
+        src,
+        draw,
+        &parent_timestamps,
+        &prices,
+        &Sizes {
+            n: size_n,
+            sum: size_sum,
+            sumsq: size_sumsq,
+            round_lots,
+        },
+        empty_hour_stats_over(first_ts.expect("a non-empty draw"), last_ts, |hour| {
+            occupied_hours.contains(hour)
+        }),
+        counts,
+        off_grid_prices,
+        neutral_aggressors,
+    )
+}
+
+/// Occupied UTC hours as a dense bitset from the first hour inserted; a walk
+/// is time-ordered, so nothing lands below it.
+#[derive(Default)]
+struct HourBits {
+    base: Option<u64>,
+    words: Vec<u64>,
+}
+
+impl HourBits {
+    fn insert(&mut self, hour: u64) {
+        let base = *self.base.get_or_insert(hour);
+        let offset = hour.checked_sub(base).expect("hours arrive in time order") as usize;
+        let word = offset / 64;
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        self.words[word] |= 1 << (offset % 64);
+    }
+
+    fn contains(&self, hour: u64) -> bool {
+        let Some(base) = self.base else { return false };
+        let Some(offset) = hour.checked_sub(base) else {
+            return false;
+        };
+        let offset = offset as usize;
+        self.words
+            .get(offset / 64)
+            .is_some_and(|word| word & (1 << (offset % 64)) != 0)
+    }
+}
+
+struct Sizes {
+    n: u64,
+    sum: f64,
+    sumsq: f64,
+    round_lots: u64,
+}
+
+/// The reduction both readers share, from the series they collected.
+#[expect(clippy::too_many_arguments, reason = "the two readers' whole output")]
+fn summarize_measured(
+    src: &GeneratedSource,
+    draw: usize,
+    parent_timestamps: &[u64],
+    prices: &[f64],
+    sizes: &Sizes,
+    (empty_hour_frac, max_empty_hour_run_h): (f64, f64),
+    mut counts: Vec<u32>,
+    off_grid_prices: usize,
+    neutral_aggressors: usize,
+) -> Measured {
+    let mut durations = Vec::with_capacity(draw - 1);
+    let mut returns = Vec::with_capacity(draw - 1);
+    let mut zero_changes = 0;
+    for i in 1..draw {
+        durations.push((parent_timestamps[i] - parent_timestamps[i - 1]) as f64 / 1_000_000_000.0);
+        returns.push((prices[i] / prices[i - 1]).ln());
+        if prices[i] == prices[i - 1] {
+            zero_changes += 1;
+        }
+    }
+    let abs_returns: Vec<f64> = returns.iter().map(|r| r.abs()).collect();
+
+    let mut sorted_durations = durations.clone();
+    sorted_durations.sort_by(f64::total_cmp);
+    let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
+    let span = counts.len();
+    counts.sort_unstable();
+    let size_mean = sizes.sum / sizes.n as f64;
+    let size_var = (sizes.sumsq / sizes.n as f64 - size_mean * size_mean).max(0.0);
+    let zero_seconds = counts.partition_point(|count| *count == 0);
+    Measured {
+        mean_gap_s: mean(&durations),
+        max_gap_s: durations.iter().copied().fold(0.0_f64, f64::max),
+        gap_p999_s: sorted_durations[p999_index],
+        empty_hour_frac,
+        max_empty_hour_run_h,
+        duration_dispersion_cv2: variance(&durations) / mean(&durations).powi(2),
+        duration_acf_lag1: acf(&durations, 1),
+        duration_acf_lag5: acf(&durations, 5),
+        return_acf_lag1: acf(&returns, 1),
+        abs_return_acf_lag1: acf(&abs_returns, 1),
+        abs_return_acf_lag10: acf(&abs_returns, 10),
+        abs_return_acf_lag50: acf(&abs_returns, 50),
+        zero_change_frac: zero_changes as f64 / returns.len() as f64,
+        round_lot_frac: sizes.round_lots as f64 / sizes.n as f64,
+        size_cv: size_var.sqrt() / size_mean,
+        off_grid_prices,
+        neutral_aggressors,
+        fills_per_second_mean: sizes.n as f64 / span as f64,
+        fills_per_second_median: counts[(span - 1) / 2],
+        fills_per_second_p95: counts[(95 * span).div_ceil(100) - 1],
+        zero_second_frac: zero_seconds as f64 / span as f64,
+        truncation_frac: src.shape.truncated as f64 / src.shape.drawn as f64,
+    }
+}
+
+/// The record-by-record reader `measure` replaced, kept as its reference:
+/// one protocol `TradeTick` per print, parent ends found by asking the source
+/// how many children it still owes.
+fn measure_records(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -> Measured {
     let median_size = decimal_to_f64(scalars.latent_size_median);
     let mut parent_timestamps = Vec::with_capacity(draw);
     let mut prices = Vec::with_capacity(draw);
@@ -2976,56 +3205,75 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         size_sumsq += size * size;
         round_lots += u64::from(is_round_lot(trade.size, median_size));
     }
-
-    let mut durations = Vec::with_capacity(draw - 1);
-    let mut returns = Vec::with_capacity(draw - 1);
-    let mut zero_changes = 0;
-    for i in 1..draw {
-        durations.push((parent_timestamps[i] - parent_timestamps[i - 1]) as f64 / 1_000_000_000.0);
-        returns.push((prices[i] / prices[i - 1]).ln());
-        if prices[i] == prices[i - 1] {
-            zero_changes += 1;
-        }
-    }
-    let abs_returns: Vec<f64> = returns.iter().map(|r| r.abs()).collect();
-
-    let mut sorted_durations = durations.clone();
-    sorted_durations.sort_by(f64::total_cmp);
-    let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
-    let (empty_hour_frac, max_empty_hour_run_h) = empty_hour_stats_over(
-        first_ts.expect("a non-empty draw"),
-        last_ts,
-        &occupied_hours,
-    );
-    let span = counts.len();
-    counts.sort_unstable();
-    let size_mean = size_sum / size_n as f64;
-    let size_var = (size_sumsq / size_n as f64 - size_mean * size_mean).max(0.0);
-    let zero_seconds = counts.partition_point(|count| *count == 0);
-    Measured {
-        mean_gap_s: mean(&durations),
-        max_gap_s: durations.iter().copied().fold(0.0_f64, f64::max),
-        gap_p999_s: sorted_durations[p999_index],
-        empty_hour_frac,
-        max_empty_hour_run_h,
-        duration_dispersion_cv2: variance(&durations) / mean(&durations).powi(2),
-        duration_acf_lag1: acf(&durations, 1),
-        duration_acf_lag5: acf(&durations, 5),
-        return_acf_lag1: acf(&returns, 1),
-        abs_return_acf_lag1: acf(&abs_returns, 1),
-        abs_return_acf_lag10: acf(&abs_returns, 10),
-        abs_return_acf_lag50: acf(&abs_returns, 50),
-        zero_change_frac: zero_changes as f64 / returns.len() as f64,
-        round_lot_frac: round_lots as f64 / size_n as f64,
-        size_cv: size_var.sqrt() / size_mean,
+    summarize_measured(
+        src,
+        draw,
+        &parent_timestamps,
+        &prices,
+        &Sizes {
+            n: size_n,
+            sum: size_sum,
+            sumsq: size_sumsq,
+            round_lots,
+        },
+        empty_hour_stats_over(first_ts.expect("a non-empty draw"), last_ts, |hour| {
+            occupied_hours.contains(&hour)
+        }),
+        counts,
         off_grid_prices,
         neutral_aggressors,
-        fills_per_second_mean: size_n as f64 / span as f64,
-        fills_per_second_median: counts[(span - 1) / 2],
-        fills_per_second_p95: counts[(95 * span).div_ceil(100) - 1],
-        zero_second_frac: zero_seconds as f64 / span as f64,
-        truncation_frac: src.shape.truncated as f64 / src.shape.drawn as f64,
-    }
+    )
+}
+
+/// `measure` against `measure_records` on the same realization: every field
+/// bit for bit. At a draw short enough to walk both ways, and long enough to
+/// cross several hour buckets and many multi-child sweeps.
+#[test]
+fn compact_measurement_matches_the_record_reader() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let draw = 60_000;
+    let mut compact = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let compact = measure(&mut compact, &scalars, draw);
+    let mut records = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let records = measure_records(&mut records, &scalars, draw);
+    let floats = |m: &Measured| {
+        [
+            m.mean_gap_s,
+            m.max_gap_s,
+            m.gap_p999_s,
+            m.empty_hour_frac,
+            m.max_empty_hour_run_h,
+            m.duration_dispersion_cv2,
+            m.duration_acf_lag1,
+            m.duration_acf_lag5,
+            m.return_acf_lag1,
+            m.abs_return_acf_lag1,
+            m.abs_return_acf_lag10,
+            m.abs_return_acf_lag50,
+            m.zero_change_frac,
+            m.round_lot_frac,
+            m.size_cv,
+            m.fills_per_second_mean,
+            m.zero_second_frac,
+            m.truncation_frac,
+        ]
+        .map(f64::to_bits)
+    };
+    let integers = |m: &Measured| {
+        [
+            m.off_grid_prices as u64,
+            m.neutral_aggressors as u64,
+            u64::from(m.fills_per_second_median),
+            u64::from(m.fills_per_second_p95),
+        ]
+    };
+    assert_eq!(floats(&compact), floats(&records));
+    assert_eq!(integers(&compact), integers(&records));
+    // Not vacuous: the round-lot classification and the size moments saw
+    // real, varied sizes.
+    assert!(compact.round_lot_frac > 0.0 && compact.round_lot_frac < 1.0);
+    assert!(compact.size_cv > 0.0);
 }
 
 /// Slice-shaped front for the slice test below. `measure` streams and calls
@@ -3036,10 +3284,10 @@ fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
         return (0.0, 0.0);
     };
     let seen: HashSet<u64> = timestamps_ns.iter().map(|ts| ts / NS_PER_HOUR).collect();
-    empty_hour_stats_over(first, last, &seen)
+    empty_hour_stats_over(first, last, |hour| seen.contains(&hour))
 }
 
-fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f64) {
+fn empty_hour_stats_over(first: u64, last: u64, seen: impl Fn(u64) -> bool) -> (f64, f64) {
     // Population: every whole UTC hour bucket lying fully inside [first, last],
     // matching `mogwai_lab::characterize::dwell_stats` bucket for bucket so the
     // realism gate compares like with like. The two are held equal by
@@ -3057,7 +3305,7 @@ fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f6
     let mut run = 0_u64;
     let mut max_run = 0_u64;
     for hour in first_complete..after_last_complete {
-        if seen.contains(&hour) {
+        if seen(hour) {
             run = 0;
         } else {
             empty += 1;
@@ -3149,7 +3397,9 @@ fn empty_hour_stats_match_the_shared_conformance_fixture() {
             .collect();
         let to_ns = |offset_s: f64| epoch_ns + (offset_s * 1_000_000_000.0) as u64;
         let (frac, run) =
-            empty_hour_stats_over(to_ns(case.first_ts_s), to_ns(case.last_ts_s), &seen);
+            empty_hour_stats_over(to_ns(case.first_ts_s), to_ns(case.last_ts_s), |h| {
+                seen.contains(&h)
+            });
         assert!(
             (frac - case.expect.empty_hour_frac).abs() <= spec.tolerance,
             "{}: empty_hour_frac {frac} != {}",
@@ -3178,53 +3428,74 @@ fn empty_hour_stats_bucket_a_timestamp_slice() {
     assert_eq!(empty_hour_stats(&[]), (0.0, 0.0));
 }
 
+// The four parent-level helpers below step with `advance_parent`: they read no
+// record, convert none to a protocol event and draw no size, though resolving
+// a parent still lays out its records internally. That is exact, not an
+// approximation: `resolve_parent` runs
+// every main-stream draw of a parent - the latent update, the level steps,
+// the drift recentering and the clock advance - before its first record is
+// returned, and sizes ride their own child-indexed stream. So after
+// `advance_parent` the source holds exactly the `vol.mid` and `clock_ns` a
+// record reader saw at the parent's first record, and a placed parent's
+// quote and first trade both sit at `parent_ts_ns`.
+// `parent_helpers_match_the_record_readers` pins all four against
+// record-reading references under every regime they are called with.
+//
+// They hold for the placed path only: a discrete-book parent's first trade
+// is not at its parent instant, and its opening quote may be suppressed. No
+// caller builds a book, and `assert_placed` refuses one.
+
+fn assert_placed(src: &GeneratedSource) {
+    assert!(
+        !src.is_book_walk(),
+        "the parent-level helpers read a placed walk only"
+    );
+}
+
 fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
+    assert_placed(src);
     let mut out = Vec::with_capacity(draw.saturating_sub(1));
-    let mut prior_ts = None;
-    while prior_ts.is_none() || out.len() < draw.saturating_sub(1) {
-        let starts_event = src.owed_children() == 0;
-        let tick = src.next_tick().expect("unbounded generated source");
-        if !starts_event {
-            continue;
-        }
-        if let Some(prior) = prior_ts {
-            out.push((tick.ts_event() - prior) as f64 / 1_000_000_000.0);
-        }
-        prior_ts = Some(tick.ts_event());
+    let mut prior_ts = src
+        .advance_parent()
+        .expect("unbounded generated source")
+        .parent_ts_ns;
+    while out.len() < draw.saturating_sub(1) {
+        let ts = src
+            .advance_parent()
+            .expect("unbounded generated source")
+            .parent_ts_ns;
+        out.push((ts - prior_ts) as f64 / 1_000_000_000.0);
+        prior_ts = ts;
     }
     out
 }
 
 fn latent_returns(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(draw.saturating_sub(1));
+    assert_placed(src);
+    let mut out = Vec::with_capacity(draw);
     let mut prior_mid = src.vol.mid;
     while out.len() < draw {
-        let starts_event = src.owed_children() == 0;
-        let _tick = src.next_tick().expect("unbounded generated source");
-        if !starts_event {
-            continue;
-        }
+        src.advance_parent().expect("unbounded generated source");
         out.push((src.vol.mid / prior_mid).ln());
         prior_mid = src.vol.mid;
     }
     out
 }
 
+/// Latent returns split by the UTC hour of the resolved clock - the clock
+/// after the parent's children advanced it, not the parent instant.
 fn windowed_latent_returns(
     src: &mut GeneratedSource,
     draw: usize,
     start_hour: u8,
     end_hour: u8,
 ) -> (Vec<f64>, Vec<f64>) {
+    assert_placed(src);
     let mut in_window = Vec::new();
     let mut out_window = Vec::new();
     let mut prior_mid = src.vol.mid;
     while in_window.len() + out_window.len() < draw {
-        let starts_event = src.owed_children() == 0;
-        let _tick = src.next_tick().expect("unbounded generated source");
-        if !starts_event {
-            continue;
-        }
+        src.advance_parent().expect("unbounded generated source");
         let ret = (src.vol.mid / prior_mid).ln();
         let hour = utc_hour(src.clock_ns);
         if usize::from(start_hour) <= hour && hour < usize::from(end_hour) {
@@ -3237,6 +3508,159 @@ fn windowed_latent_returns(
     (in_window, out_window)
 }
 
+/// The four parent-level helpers return exactly what the record readers they
+/// replaced returned, under every regime a caller drives them with: clean,
+/// a storm, a drought, an edge spike whose window the walk crosses, and a
+/// reopen gap the walk crosses. The references are the replaced bodies,
+/// reading every record and finding a parent's start by asking the source how
+/// many children it still owes.
+#[test]
+fn parent_helpers_match_the_record_readers() {
+    fn ref_durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(draw.saturating_sub(1));
+        let mut prior_ts = None;
+        while prior_ts.is_none() || out.len() < draw.saturating_sub(1) {
+            let starts_event = src.owed_children() == 0;
+            let tick = src.next_tick().expect("unbounded generated source");
+            if !starts_event {
+                continue;
+            }
+            if let Some(prior) = prior_ts {
+                out.push((tick.ts_event() - prior) as f64 / 1_000_000_000.0);
+            }
+            prior_ts = Some(tick.ts_event());
+        }
+        out
+    }
+    fn ref_windowed(
+        src: &mut GeneratedSource,
+        draw: usize,
+        start_hour: u8,
+        end_hour: u8,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let mut in_window = Vec::new();
+        let mut out_window = Vec::new();
+        let mut prior_mid = src.vol.mid;
+        while in_window.len() + out_window.len() < draw {
+            let starts_event = src.owed_children() == 0;
+            let _tick = src.next_tick().expect("unbounded generated source");
+            if !starts_event {
+                continue;
+            }
+            let ret = (src.vol.mid / prior_mid).ln();
+            let hour = utc_hour(src.clock_ns);
+            if usize::from(start_hour) <= hour && hour < usize::from(end_hour) {
+                in_window.push(ret);
+            } else {
+                out_window.push(ret);
+            }
+            prior_mid = src.vol.mid;
+        }
+        (in_window, out_window)
+    }
+    // (hour, dow, latent mid) at each parent's first trade, read record by
+    // record: the session curves' per-parent input as the replaced reader
+    // collected it.
+    fn ref_session_points(src: &mut GeneratedSource, draw: usize) -> Vec<(usize, usize, f64)> {
+        let mut out = Vec::with_capacity(draw);
+        while out.len() < draw {
+            let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source")
+            else {
+                continue;
+            };
+            if src.emitted_children() != 1 {
+                continue;
+            }
+            let (hour, dow) = utc_hour_dow(trade.ts_event);
+            out.push((hour, dow, src.vol.mid));
+        }
+        out
+    }
+    let curve_bits = |c: &SessionCurves| {
+        c.intensity_hour
+            .iter()
+            .chain(&c.vol_hour)
+            .chain(&c.dow_weight)
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let halt_ns = 86_400_000_000_000;
+    let regimes = [
+        (0, None),
+        (0, Some(MarketRegime::VolStorm { vol_mult: 100.0 })),
+        (
+            0,
+            Some(MarketRegime::LiquidityDrought {
+                thin_factor: 1000.0,
+            }),
+        ),
+        // From 13:30 UTC, so the walk crosses into the 14:00 window.
+        (
+            SESSION_START_TS + 27 * NS_PER_HOUR / 2,
+            Some(MarketRegime::SessionEdgeSpike {
+                start_hour: 14,
+                end_hour: 16,
+                extra_vol_mult: 90.0,
+            }),
+        ),
+        (
+            0,
+            Some(MarketRegime::ReopenGap {
+                at_ts: 400_000_000_000,
+                halt_secs: halt_ns / 1_000_000_000,
+                gap_frac: 0.05,
+            }),
+        ),
+    ];
+    let draw = 30_000;
+    for (origin, regime) in regimes {
+        let fresh = || GeneratedSource::new(scalars.clone(), 42, origin, &fp, regime);
+        let label = format!("{regime:?}");
+
+        let new = durations(&mut fresh(), draw);
+        assert_eq!(
+            bits(&new),
+            bits(&ref_durations(&mut fresh(), draw)),
+            "{label}"
+        );
+        if matches!(regime, Some(MarketRegime::ReopenGap { .. })) {
+            let halt_s = halt_ns as f64 / 1e9;
+            assert!(
+                new.iter().any(|gap| *gap >= halt_s),
+                "the reopen witness never crossed its halt"
+            );
+        }
+
+        let (new_in, new_out) = windowed_latent_returns(&mut fresh(), draw, 14, 16);
+        let (ref_in, ref_out) = ref_windowed(&mut fresh(), draw, 14, 16);
+        assert_eq!(bits(&new_in), bits(&ref_in), "{label}");
+        assert_eq!(bits(&new_out), bits(&ref_out), "{label}");
+        if matches!(regime, Some(MarketRegime::SessionEdgeSpike { .. })) {
+            assert!(
+                !new_in.is_empty() && !new_out.is_empty(),
+                "the edge-spike witness never crossed its window"
+            );
+        }
+        // `latent_returns` is the windowed split with the split undone.
+        let joined = latent_returns(&mut fresh(), draw);
+        let (ref_in, ref_out) = ref_windowed(&mut fresh(), draw, 0, 24);
+        assert!(ref_out.is_empty());
+        assert_eq!(bits(&joined), bits(&ref_in), "{label}");
+
+        assert_eq!(
+            curve_bits(&measure_session_curves(&mut fresh(), draw)),
+            curve_bits(&session_curves_from(
+                ref_session_points(&mut fresh(), draw).into_iter()
+            )),
+            "{label}"
+        );
+    }
+}
+
 fn rms(values: &[f64]) -> f64 {
     (values.iter().map(|value| value.powi(2)).sum::<f64>() / values.len() as f64).sqrt()
 }
@@ -3247,40 +3671,33 @@ struct SessionCurves {
     dow_weight: [f64; 7],
 }
 
+/// Hour and day-of-week curves over `draw` parents, each placed at its own
+/// instant, which is its first trade's. Steps whole parents and reads no
+/// record; see the note above `durations`.
 fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurves {
+    assert_placed(src);
+    session_curves_from((0..draw).map(|_| {
+        let parent = src.advance_parent().expect("unbounded generated source");
+        let (hour, dow) = utc_hour_dow(parent.parent_ts_ns);
+        (hour, dow, src.vol.mid)
+    }))
+}
+
+/// The curves from each parent's (UTC hour, day of week, latent mid after
+/// resolution), in walk order.
+fn session_curves_from(points: impl Iterator<Item = (usize, usize, f64)>) -> SessionCurves {
     let mut hour_count = [0_u64; 24];
     let mut abs_ret_hour: [Vec<f64>; 24] = std::array::from_fn(|_| Vec::new());
     let mut dow_count = [0_u64; 7];
     let mut prev_price: Option<f64> = None;
 
-    let mut events = 0;
-    while events < draw {
-        let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
-            continue;
-        };
-        let starts_event = src.emitted_children() == 1;
-        if !starts_event {
-            continue;
-        }
-        // Drop the rest of the sweep instead of emitting it, so a four-week
-        // span costs 15M ticks rather than ~130M. Safe for this test and no
-        // other: no child draw touches the arrival clock, the GARCH state or
-        // the session curves, which are the only things measured here. It is
-        // not the shipped tape's realization - the skipped children would have
-        // consumed level and size draws, so every later draw lands at a
-        // different position in the RNG stream. That makes this a statistically
-        // equivalent path, not a byte-identical one, which is all a curve-shape
-        // assertion needs.
-        src.discard_owed();
-        events += 1;
-        let (hour, dow) = utc_hour_dow(trade.ts_event);
+    for (hour, dow, price) in points {
         hour_count[hour] += 1;
         dow_count[dow] += 1;
 
         // Session volatility modulates the one latent update made for each
         // parent event. Child sweep geometry is execution microstructure, so
         // measuring the final child would mix level count into this curve.
-        let price = src.vol.mid;
         if let Some(prev) = prev_price {
             // Absolute latent return, for the median scale below. Latent
             // mids are continuous, so no tick-grid zero atom threatens the
@@ -3523,11 +3940,15 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // This is the repository's rail-sizing claim and it runs. It was `#[ignore]`d
 // and in the gate profile's `skip` list under a cost heading asserting that
 // every entry there outlives the 20-second per-test hang watchdog. Measured on
-// 2026-08-18, one test per process in dev, it takes 0.43 s - so the durable
+// 2026-08-18, one test per process in dev, it took 0.43 s, so the durable
 // numbers in `consts.rs` (a sigma reaching 57.2x its unconditional scale, a
 // largest clean return of 3.33e-3, an RMS of 1.2393e-5, all over 16M updates)
-// rested on a test nothing had run since it was written. Neither the
-// `#[ignore]` nor the skip entry survives that measurement.
+// had rested on a test nothing had run since it was written, and both the
+// `#[ignore]` and the skip entry went. That dev build was optimized by the
+// owner's host-wide cargo configuration, not by anything in this repository;
+// under the unoptimized dev profile the repository builds now, the test is
+// past the watchdog again and is `#[ignore]`d as debug-slow, which the gate
+// still runs.
 //
 // It is also pointed at the shipped constants rather than at a written-down
 // "stage-1 winner" triple that happened to equal them. A candidate frozen in a
@@ -5178,8 +5599,21 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
 }
 
 fn is_round_lot(size: Decimal, median: f64) -> bool {
-    let lot = 10.0_f64.powf(median.log10().floor());
-    let units = decimal_to_f64(size) / lot;
+    is_round_lot_f64(decimal_to_f64(size), round_lot(median))
+}
+
+/// The lot `is_round_lot` classifies against: the decade at or below the
+/// median, unclamped - unlike `integral_lot`, a sub-unit median keeps its
+/// sub-unit lot.
+fn round_lot(median: f64) -> f64 {
+    10.0_f64.powf(median.log10().floor())
+}
+
+/// Near-integer in lots, by the float tolerance the realism band was fitted
+/// against. Not exact divisibility of the quantity mantissa: the two differ
+/// for a size a hair off a lot multiple.
+fn is_round_lot_f64(size: f64, lot: f64) -> bool {
+    let units = size / lot;
     (units - units.round()).abs() < 1e-6
 }
 

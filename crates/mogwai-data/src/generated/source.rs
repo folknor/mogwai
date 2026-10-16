@@ -42,6 +42,7 @@ use rust_decimal::Decimal;
 
 use crate::record::{
     ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, TradeRec,
+    UnsizedParentView,
 };
 use crate::{TickEvent, TickFault};
 
@@ -1481,6 +1482,33 @@ impl ParentSource for GeneratedSource {
             },
         })
     }
+
+    /// `next_parent` without the size draws. Sizes ride their own
+    /// child-indexed stream, which `decorate` seeks to the parent's first
+    /// child before every use, so leaving a parent undecorated moves no draw
+    /// of the main stream and no quantity of any later parent: the child
+    /// indices were reserved at resolution either way.
+    fn next_parent_unsized(&mut self) -> Option<UnsizedParentView<'_>> {
+        assert!(
+            self.at_parent_boundary(),
+            "next_parent_unsized called mid-parent, after a partial record read"
+        );
+        self.resolve_parent().ok()?;
+        self.cursor = self.plan.len();
+        Some(
+            ParentView {
+                parent_ts: self.plan_parent_ts,
+                records: &self.plan,
+                trades: self.plan_trades,
+                trace: if self.vol_trace_enabled {
+                    self.vol_trace
+                } else {
+                    None
+                },
+            }
+            .unsized_view(),
+        )
+    }
 }
 
 impl GeneratedSource {
@@ -1499,18 +1527,17 @@ impl GeneratedSource {
             .count() as u32
     }
 
+    /// Whether the walk is the discrete-book path, whose parents publish
+    /// their quotes and first trade off the parent instant.
+    #[cfg(test)]
+    pub(super) fn is_book_walk(&self) -> bool {
+        matches!(self.walk, Walk::CascadeBook(_))
+    }
+
     /// Trades of the current (or just drained) parent a reader has taken.
     #[cfg(test)]
     pub(super) fn emitted_children(&self) -> u32 {
         self.reader_emitted
-    }
-
-    /// Drop the rest of the current parent unread, for the measurements that
-    /// want the parent stream and not its prints.
-    #[cfg(test)]
-    pub(super) fn discard_owed(&mut self) {
-        self.plan.clear();
-        self.cursor = 0;
     }
 
     /// The edge view of the next record: the protocol event it denotes. For

@@ -130,7 +130,8 @@ fn push_view(
             .count() as u32,
         trace,
     };
-    acc.push_parent(scale, &view).expect("parent");
+    acc.push_parent(scale, &view.unsized_view())
+        .expect("parent");
 }
 
 /// Crafted parents through `push_parent`, the path the generated walk takes.
@@ -203,9 +204,56 @@ fn the_log_mid_is_ln_of_the_nano_unit_price_sum_halved() {
     assert!((got - in_points - (1.0e9f64).ln()).abs() < 1e-9);
     // The half-tick quote-mid divides the sum by the full tick.
     assert_eq!(
-        acc.quote_min[&((OPEN_NS + 1) / NS_PER_MIN)],
-        (184_000, 184_000)
+        acc.quote_range((OPEN_NS + 1) / NS_PER_MIN),
+        Some((184_000, 184_000))
     );
+}
+
+/// A minute written again after a later one merges into what it already
+/// held rather than replacing it. The observed driver pushes the incoming
+/// print before it closes the previous parent, so a parent of minute `m`
+/// routinely lands after a print of minute `m + 1`.
+#[test]
+fn a_revisited_minute_merges_rather_than_replaces() {
+    let seg = SessionSegment {
+        session_start_ns: OPEN_NS,
+        session_end_ns: CLOSE_NS,
+        segment_origin_ns: OPEN_NS,
+        segment_end_ns: CLOSE_NS,
+        trade_day: 0,
+        segment: "overnight",
+    };
+    let mut acc = SessionAcc::new("2026-07-07".to_string(), &seg, OFFSET);
+    let m = OPEN_NS / NS_PER_MIN + 3;
+    let at = |minute: u64| minute * NS_PER_MIN + 1;
+    let tick = 250_000_000_i64;
+    let px = 23_000_000_000_000_i64;
+    acc.push_print(at(m), px);
+    acc.push_parent(0, at(m), px - tick, px + tick, true)
+        .expect("parent");
+    acc.push_print(at(m + 1), px + 4 * tick);
+    acc.push_print(at(m), px + 2 * tick);
+    acc.push_parent(0, at(m), px + tick, px + 3 * tick, true)
+        .expect("parent");
+    acc.push_print(at(m + 1), px - tick);
+    let cells = acc.settled_minutes().clone();
+    assert_eq!(
+        cells[&m],
+        MinuteCell {
+            trade: Some((px, px + 2 * tick)),
+            quote: Some((184_000, 184_004)),
+            n: 2,
+        }
+    );
+    assert_eq!(
+        cells[&(m + 1)],
+        MinuteCell {
+            trade: Some((px - tick, px + 4 * tick)),
+            quote: None,
+            n: 0,
+        }
+    );
+    assert_eq!(cells.len(), 2);
 }
 
 #[test]
@@ -333,23 +381,45 @@ fn the_refusal_scope_distinguishes_the_two_sides() {
 /// The Brick G gate test, carried over from the `mogwai-cli` twin: the
 /// accumulator's serialized blocks against an independent recompute over the
 /// same crafted parent stream.
+/// The crafted stream `measure12a_matches_independent_recompute` anchors:
+/// one parent per entry, a leading quote at the given level, then trades.
+fn recompute_stream() -> Vec<(Vec<Record>, mogwai_data::VolTrace)> {
+    let minute = |m: u64| H23_NS + m * NS_PER_MIN;
+    let parent = |ts: u64, level: i64, trace, trades: &[i64]| {
+        let mut records = vec![quote_rec(ts, level)];
+        records.extend(
+            trades
+                .iter()
+                .enumerate()
+                .map(|(i, &tl)| trade_rec(ts + i as u64, tl)),
+        );
+        (records, trace)
+    };
+    // Minute 0: the extreme - a calm opener, then a 12-sigma parent with two
+    // clamp flags printing an 80-tick range.
+    let mut stream = vec![
+        parent(minute(0) + 10_000_000_000, 0, quiet(), &[0]),
+        parent(
+            minute(0) + 20_000_000_000,
+            40,
+            vt(12.0, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, true, true),
+            &[40, -40],
+        ),
+    ];
+    // Minutes 5..45: forty quiet one-parent minutes (the control candidate
+    // pool past the top-32 exclusion).
+    for m in 5..45 {
+        stream.push(parent(minute(m) + 30_000_000_000, 0, quiet(), &[0]));
+    }
+    stream
+}
+
 #[test]
 fn measure12a_matches_independent_recompute() {
     let mut fx = Fixture::new();
     let minute = |m: u64| H23_NS + m * NS_PER_MIN;
-    // Minute 0: the extreme - a calm opener, then a 12-sigma parent with two
-    // clamp flags printing an 80-tick range.
-    fx.parent(minute(0) + 10_000_000_000, 0, quiet(), &[0]);
-    fx.parent(
-        minute(0) + 20_000_000_000,
-        40,
-        vt(12.0, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, true, true),
-        &[40, -40],
-    );
-    // Minutes 5..45: forty quiet one-parent minutes (the control candidate
-    // pool past the top-32 exclusion).
-    for m in 5..45 {
-        fx.parent(minute(m) + 30_000_000_000, 0, quiet(), &[0]);
+    for (records, trace) in recompute_stream() {
+        fx.records(&records, trace);
     }
     let value = fx.acc.finish().expect("finish");
 
@@ -497,6 +567,171 @@ fn measure12a_matches_independent_recompute() {
         })
         .expect("nine candidates");
     assert_eq!(control["minute_start_ns"].as_u64(), Some(expected_control));
+}
+
+/// The protocol 12b control's blocks 1 to 3 on the stream
+/// `measure12a_matches_independent_recompute` anchors against a naive
+/// recompute: equal to the full measurement's, so the anchor carries over.
+/// The control reads the stream unsized and untraced, which the full
+/// measurement does not.
+#[test]
+fn the_control_blocks_equal_the_anchored_full_measurement() {
+    let mut full = Fixture::new();
+    let mut control = crate::arrival_control::ControlAcc::new(9, OPEN_NS, CLOSE_NS, OFFSET, tick());
+    let scale = rec_scale();
+    for (records, trace) in recompute_stream() {
+        full.records(&records, trace);
+        let view = ParentView {
+            parent_ts: records[0].ts(),
+            records: &records,
+            trades: 0,
+            trace: None,
+        };
+        control
+            .push_parent(&scale, &view.unsized_view())
+            .expect("parent");
+    }
+    let full = full.acc.finish().expect("finish");
+    let (sessions, _) = control.finish(&scale).expect("finish");
+    assert_eq!(sessions.len(), 1);
+    let want = &full["per_session"][0];
+    let got = &sessions[0];
+    for key in ["session_date", "block1_hist", "block2", "block3"] {
+        assert_eq!(got[key], want[key], "{key}");
+    }
+    assert!(got.get("block4").is_none(), "block 4 is not computed");
+}
+
+fn unsided_rec(ts: u64, level: i64) -> Record {
+    Record::Trade(TradeRec {
+        ts,
+        px: px_m(level),
+        qty: 1,
+        side: AggressorSide::NoAggressor,
+    })
+}
+
+/// The control's two selections, independently written down. A minute range
+/// takes every trade whose own timestamp is in the window - a burn-in
+/// parent's in-window child, an unsided print, a print in the lab frame's
+/// 15:15 hole, the in-window head of a parent straddling the end - and
+/// nothing past the end. The session frame measures parents whose first
+/// child opens in the window inside a segment, against a book.
+#[test]
+fn the_control_selects_minute_ranges_and_parents_independently() {
+    let s = 1_000_000_000;
+    // 20:20 UTC, 15:20 Chicago: inside the lab frame's carved halt.
+    let halt = CLOSE_NS - 40 * NS_PER_MIN;
+    let parents = vec![
+        // Burn-in, quoteless: only its in-window child prints, at level 2.
+        vec![trade_rec(OPEN_NS - s, 0), trade_rec(OPEN_NS + s, 2)],
+        vec![
+            quote_rec(H23_NS + 10 * s, 0),
+            trade_rec(H23_NS + 10 * s, 0),
+            trade_rec(H23_NS + 10 * s + 1, 3),
+        ],
+        // An unsided print first: it widens the range but opens nothing.
+        vec![
+            quote_rec(H23_NS + 70 * s, 0),
+            unsided_rec(H23_NS + 71 * s, 6),
+            trade_rec(H23_NS + 72 * s, 0),
+        ],
+        vec![
+            quote_rec(halt, 0),
+            trade_rec(halt, 0),
+            trade_rec(halt + 1, 5),
+        ],
+        // Straddles the end: one in-window print, one past it.
+        vec![
+            quote_rec(CLOSE_NS - s, 0),
+            trade_rec(CLOSE_NS - s, 1),
+            trade_rec(CLOSE_NS + s, 9),
+        ],
+        // Begins past the end: the walk stops before it.
+        vec![
+            quote_rec(CLOSE_NS + 10 * s, 0),
+            trade_rec(CLOSE_NS + 10 * s, 7),
+        ],
+    ];
+    let mut control = crate::arrival_control::ControlAcc::new(9, OPEN_NS, CLOSE_NS, OFFSET, tick());
+    let mut source = MemoryParents::new(rec_scale(), parents);
+    control.walk(&mut source).expect("walk");
+    let (sessions, ranges) = control.finish(&rec_scale()).expect("finish");
+    assert_eq!(
+        ranges.hist,
+        std::collections::BTreeMap::from([(0, 2), (3, 1), (5, 1), (6, 1)])
+    );
+    assert_eq!((ranges.max_ticks, ranges.second_max_ticks), (6, 5));
+    assert_eq!(sessions.len(), 1);
+    let rows = sessions[0]["block1_hist"].as_array().expect("block1");
+    let row = |n: u64, trade: u64| {
+        rows.iter()
+            .filter(|r| r["n"] == n && r["trade_range_ticks"] == trade)
+            .map(|r| r["count"].as_u64().expect("count"))
+            .sum::<u64>()
+    };
+    // The burn-in child's minute: a print and no measured parent.
+    assert_eq!(row(0, 0), 1);
+    // The two-trade parent, the straddler's in-window head.
+    assert_eq!(row(1, 3), 1);
+    assert_eq!(row(1, 0), 1);
+    // The unsided print widens its minute to six ticks; the sided trade after
+    // it opens the parent.
+    assert_eq!(row(1, 6), 1);
+    let minutes: u64 = rows
+        .iter()
+        .map(|r| r["count"].as_u64().expect("count"))
+        .sum();
+    assert_eq!(minutes, 4, "the halt minute is outside the session frame");
+}
+
+/// A parent that a session rotation closes from inside a print still reaches
+/// the forensics, and its deferred ARCH share resolves against a measured
+/// successor in the next session: forensic state is walk-global. The parent
+/// carries a child in the next session, so the print of that child is what
+/// rotates the session and closes it.
+#[test]
+fn a_rotation_inside_a_print_delivers_the_closed_parent_to_the_forensics() {
+    const DAY: u64 = 86_400_000_000_000;
+    let mut acc = GeneratedAcc::new(9, OPEN_NS, CLOSE_NS + DAY, OFFSET, tick());
+    let scale = rec_scale();
+    let x_ts = CLOSE_NS - 30_000_000_000;
+    let next_open = OPEN_NS + DAY;
+    let x_trace = vt(12.0, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, false, false);
+    push_view(
+        &mut acc,
+        &scale,
+        &[
+            quote_rec(x_ts, 40),
+            trade_rec(x_ts, 40),
+            trade_rec(x_ts + 1, -40),
+            trade_rec(next_open + 5_000_000_000, 0),
+        ],
+        Some(x_trace),
+    );
+    let y_ts = next_open + 10_000_000_000;
+    let y_trace = vt(0.5, 2.0e-8, 2.0e-8, 1.0e-4, 1.0e-4, 23_000.0, false, false);
+    push_view(
+        &mut acc,
+        &scale,
+        &[quote_rec(y_ts, 0), trade_rec(y_ts, 0)],
+        Some(y_trace),
+    );
+    let value = acc.finish().expect("finish");
+    assert_eq!(value["per_session"].as_array().expect("sessions").len(), 2);
+    let extreme = &value["forensic"]["records"][0];
+    assert_eq!(extreme["kind"], "extreme_range");
+    assert_eq!(
+        extreme["minute_start_ns"].as_u64(),
+        Some(x_ts / NS_PER_MIN * NS_PER_MIN)
+    );
+    assert_eq!(extreme["parent_count"], 1);
+    assert_eq!(extreme["largest_innovation_std"], 12.0);
+    let want = generated::ARCH_12A * 3.0e-4_f64.powi(2) / 2.0e-8;
+    let got = extreme["arch_share_next"]
+        .as_f64()
+        .expect("a resolved share");
+    assert!((got - want).abs() < 1e-12, "{got} vs {want}");
 }
 
 #[test]

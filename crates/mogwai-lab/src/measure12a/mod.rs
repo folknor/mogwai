@@ -39,7 +39,7 @@
 //!   `state.order`, because block-3 and block-4 sums are float
 //!   accumulations whose value depends on the order the segments contribute.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::error::{LabError, LabResult};
 use crate::kernel::{fisher_yates, nearest_rank_list, tuple_mix, weighted_nearest_rank};
@@ -148,14 +148,44 @@ pub struct SessionAcc {
     order: Vec<u8>,
     segments: [Option<SegmentAcc>; 2],
     bounds: [(u64, u64); 2],
-    /// minute -> (trade lo, trade hi) in 1e-9 price units, over all
-    /// structurally valid prints (unsided and invalid-book included).
-    trade_min: BTreeMap<u64, (i64, i64)>,
-    /// minute -> (lo, hi) quote-mid half ticks, valid-book parents only.
-    quote_min: BTreeMap<u64, (i64, i64)>,
-    /// minute -> sided parent count by first-child timestamp.
-    n_min: BTreeMap<u64, u64>,
+    /// Every minute carrying a print or a parent, with what it carried.
+    /// Written through `minute`, which keeps the minute being written in
+    /// `current` and merges it in here when another minute is written or
+    /// the map is read.
+    minutes: BTreeMap<u64, MinuteCell>,
+    current: Option<(u64, MinuteCell)>,
     count_windows_s: &'static [i64],
+}
+
+/// What one minute of a session carried.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MinuteCell {
+    /// (lo, hi) in 1e-9 price units over all structurally valid prints
+    /// (unsided and invalid-book included).
+    trade: Option<(i64, i64)>,
+    /// (lo, hi) quote-mid half ticks, valid-book parents only.
+    quote: Option<(i64, i64)>,
+    /// Sided parents by first-child timestamp.
+    n: u64,
+}
+
+fn widen(range: &mut Option<(i64, i64)>, lo: i64, hi: i64) {
+    *range = Some(match *range {
+        Some((a, b)) => (a.min(lo), b.max(hi)),
+        None => (lo, hi),
+    });
+}
+
+impl MinuteCell {
+    fn merge(&mut self, other: MinuteCell) {
+        if let Some((lo, hi)) = other.trade {
+            widen(&mut self.trade, lo, hi);
+        }
+        if let Some((lo, hi)) = other.quote {
+            widen(&mut self.quote, lo, hi);
+        }
+        self.n += other.n;
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -230,11 +260,46 @@ impl SessionAcc {
                 (overnight.segment_origin_ns, overnight.segment_end_ns),
                 (post.segment_origin_ns, post.segment_end_ns),
             ],
-            trade_min: BTreeMap::new(),
-            quote_min: BTreeMap::new(),
-            n_min: BTreeMap::new(),
+            minutes: BTreeMap::new(),
+            current: None,
             count_windows_s,
         }
+    }
+
+    /// The cell of `minute`, for writing. Prints and parents arrive almost
+    /// in minute order, but not exactly - a parent closes after the print
+    /// that follows it, which can sit in the next minute - so a minute that
+    /// is written again after another one merges, never replaces.
+    fn minute(&mut self, minute: u64) -> &mut MinuteCell {
+        if self.current.as_ref().is_none_or(|(m, _)| *m != minute) {
+            self.flush_minute();
+            self.current = Some((minute, MinuteCell::default()));
+        }
+        &mut self.current.as_mut().expect("set above").1
+    }
+
+    /// Merge the minute being written into the map.
+    fn flush_minute(&mut self) {
+        if let Some((minute, cell)) = self.current.take()
+            && cell != MinuteCell::default()
+        {
+            self.minutes.entry(minute).or_default().merge(cell);
+        }
+    }
+
+    /// Every minute's cell, the one being written included.
+    #[cfg(test)]
+    fn settled_minutes(&mut self) -> &BTreeMap<u64, MinuteCell> {
+        self.flush_minute();
+        &self.minutes
+    }
+
+    /// The quote-mid half-tick range of one minute.
+    #[cfg(test)]
+    pub(crate) fn quote_range(&mut self, minute: u64) -> Option<(i64, i64)> {
+        self.settled_minutes()
+            .get(&minute)
+            .and_then(|cell| cell.quote)
     }
 
     /// `_M12aSession.seg`: get-or-create, appending to the insertion order.
@@ -263,16 +328,11 @@ impl SessionAcc {
     /// the minute's trade range. Every print counts, sided or not, valid book
     /// or not.
     pub fn push_print(&mut self, ts_ns: u64, price_nanos: i64) {
-        let entry = self
-            .trade_min
-            .entry(ts_ns / NS_PER_MIN)
-            .or_insert((price_nanos, price_nanos));
-        if price_nanos < entry.0 {
-            entry.0 = price_nanos;
-        }
-        if price_nanos > entry.1 {
-            entry.1 = price_nanos;
-        }
+        widen(
+            &mut self.minute(ts_ns / NS_PER_MIN).trade,
+            price_nanos,
+            price_nanos,
+        );
     }
 
     /// One closed sided parent: its first-child timestamp, the segment it
@@ -291,20 +351,15 @@ impl SessionAcc {
             let seg = self.seg(segment_index);
             seg.parent_ts.push(first_ts);
         }
-        *self.n_min.entry(minute).or_insert(0) += 1;
+        // Counted before the division below can refuse, as it always was.
+        self.minute(minute).n += 1;
         if book_normal {
             let sum = bid_nanos + ask_nanos;
             // The quote-mid range in half ticks: the price sum divided by the
             // full tick. Both prices are on the tick grid, so the sum always
             // divides exactly.
             let mid2 = exact_div(sum, TICK_UNITS, "quote-mid half-ticks")?;
-            let entry = self.quote_min.entry(minute).or_insert((mid2, mid2));
-            if mid2 < entry.0 {
-                entry.0 = mid2;
-            }
-            if mid2 > entry.1 {
-                entry.1 = mid2;
-            }
+            widen(&mut self.minute(minute).quote, mid2, mid2);
             // The canonical log-mid: exact integer nano-unit sum, halved in
             // f64, then ln. See the module docs.
             #[expect(
@@ -373,22 +428,37 @@ impl SessionAcc {
         }))
     }
 
+    /// Close blocks 1 to 3 only: what the protocol 12b control's gates read.
+    /// The same block implementations as `close`, without block 4, the
+    /// permutations or the segment list.
+    pub fn close_blocks_1_to_3(mut self, _scope: Scope) -> LabResult<serde_json::Value> {
+        self.seg(0);
+        self.seg(1);
+        let (block3, _perm_windows) = self.block3()?;
+        Ok(serde_json::json!({
+            "session_date": self.date,
+            "block1_hist": self.block1()?,
+            "block2": self.block2(),
+            "block3": block3,
+        }))
+    }
+
     // -- Block 1 ------------------------------------------------------------
 
     /// The exact sparse joint histogram (spec 3.5), one record per distinct
     /// key with its occurrence count.
-    fn block1(&self) -> LabResult<serde_json::Value> {
+    fn block1(&mut self) -> LabResult<serde_json::Value> {
         // Keyed for the frozen ascending sort: (n, quote with null first as
         // -1, trade, hour, since, until).
         let mut hist: BTreeMap<(u64, i64, i64, u64, &'static str, &'static str), u64> =
             BTreeMap::new();
-        let minutes: BTreeSet<u64> = self
-            .trade_min
-            .keys()
-            .chain(self.n_min.keys())
-            .copied()
-            .collect();
-        for minute in minutes {
+        self.flush_minute();
+        // The population is every minute with a print or a parent. A quote
+        // range is only ever written after its parent was counted, so no
+        // minute carries a quote alone.
+        for (&minute, cell) in &self.minutes {
+            debug_assert!(cell.trade.is_some() || cell.n > 0);
+            debug_assert!(cell.quote.is_none() || cell.n > 0);
             let start_ns = minute * NS_PER_MIN;
             // A structurally valid print outside the session's own open
             // segments is a session-assignment defect (the Python raises
@@ -406,12 +476,12 @@ impl SessionAcc {
                 })?;
             let (since, until) = segment_labels(start_ns, seg.origin_ns, seg.end_ns);
             let hour = (start_ns / NS_PER_HOUR) % 24;
-            let trade_ticks = match self.trade_min.get(&minute) {
-                Some(&(lo, hi)) => exact_div(hi - lo, TICK_UNITS, "trade range ticks")?,
+            let trade_ticks = match cell.trade {
+                Some((lo, hi)) => exact_div(hi - lo, TICK_UNITS, "trade range ticks")?,
                 None => 0,
             };
-            let quote_half = self.quote_min.get(&minute).map_or(-1, |&(lo, hi)| hi - lo);
-            let n = self.n_min.get(&minute).copied().unwrap_or(0);
+            let quote_half = cell.quote.map_or(-1, |(lo, hi)| hi - lo);
+            let n = cell.n;
             *hist
                 .entry((n, quote_half, trade_ticks, hour, since, until))
                 .or_insert(0) += 1;

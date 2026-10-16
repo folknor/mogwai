@@ -342,8 +342,11 @@ pub fn run_summary_walk(
 /// One instrument profile from a scratch config, through the same
 /// `Config::load` and profile construction a served run boots with.
 pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::InstrumentProfile> {
+    // `{e:#}` throughout: the venue wraps its causes in context, and the plain
+    // form prints only the outermost layer - a refusal that names a symbol and
+    // drops the reason.
     let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
-        .map_err(|e| LabError::refusal(format!("loading scratch config: {e}")))?;
+        .map_err(|e| LabError::refusal(format!("loading scratch config: {e:#}")))?;
     if cfg.default_symbol_carries_no_knobs() {
         return Err(LabError::refusal(
             "the scratch config carries no [instrument] or matching [symbols.*] knobs for its \
@@ -351,10 +354,10 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::Instr
         ));
     }
     let profiles = mogwai_venue::config::build_instrument_profiles(&cfg)
-        .map_err(|e| LabError::refusal(format!("building instrument profiles: {e}")))?;
+        .map_err(|e| LabError::refusal(format!("building instrument profiles: {e:#}")))?;
     let def = profiles
         .default_symbol_def(cfg.default_symbol())
-        .map_err(|e| LabError::refusal(format!("resolving boot shape: {e}")))?;
+        .map_err(|e| LabError::refusal(format!("resolving boot shape: {e:#}")))?;
     Ok((*profiles
         .configured(&def.symbol)
         .expect("just listed this symbol"))

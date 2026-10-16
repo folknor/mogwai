@@ -2140,7 +2140,8 @@ mod tests {
             if view.records[0].ts() >= end {
                 break;
             }
-            acc.push_parent(&scale, &view).expect("parent");
+            acc.push_parent(&scale, &view.unsized_view())
+                .expect("parent");
             for record in view.records {
                 if let mogwai_data::Record::Trade(t) = record
                     && t.ts >= M12A_START_NS
