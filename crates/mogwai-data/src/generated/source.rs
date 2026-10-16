@@ -9,13 +9,17 @@
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
 //!
-//! The walk resolves one whole parent transaction at a time into a reused
-//! plan of compact records, and readers drain that plan. A parent's footprint
-//! is therefore known the moment it is drawn: a seek drops a parent that ends
-//! before its target without cloning the generator to try it, and a checkpoint
-//! extension advances whole parents only. Emitting and skipping a parent are
-//! one code path, because materializing a compact record is a handful of
-//! integer operations.
+//! The walk resolves one whole parent transaction at a time: its quotes, and
+//! on the discrete-book path its trades, into a reused plan of compact
+//! records; a placed sweep's trades into a description - its opening level,
+//! side, child count and the children that step a level - proven
+//! representable as it resolves. A parent's footprint is therefore known the
+//! moment it is drawn: a seek drops a parent that ends before its target
+//! without cloning the generator to try it, and a checkpoint extension
+//! advances whole parents only. Emitting and skipping a parent are one
+//! resolution; only the readers that hand out records or sized parents lay a
+//! sweep's trades out, and an unsized parent view computes them as it is
+//! iterated.
 //!
 //! One consequence of the determinism is worth stating before it is
 //! rediscovered as a bug: a drought is per-config, not intermittent. Every boot
@@ -41,7 +45,7 @@ use rand_distr::{ChiSquared, Distribution, Normal, Weibull};
 use rust_decimal::Decimal;
 
 use crate::record::{
-    ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, TradeRec,
+    ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, SweepTrades, TradeRec,
     UnsizedParentView,
 };
 use crate::{TickEvent, TickFault};
@@ -55,7 +59,7 @@ use super::calendar::{CompiledCalendar, SessionCalendar};
 use super::cascade::{
     CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
 };
-use super::children::{LevelSteps, SizeStream};
+use super::children::{LevelSteps, SizeStream, SweepOutcome, resolve_sweep};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -122,6 +126,17 @@ struct RiverSpec {
     coins: ChildCoins,
     tick_f64: f64,
     surge: Option<SurgeWindow>,
+}
+
+/// A resolved placed sweep, less its stepping children (held beside it in
+/// `GeneratedSource::sweep_steps`). Built only from `SweepOutcome::Placed`,
+/// so every child's price is already proven representable.
+#[derive(Clone, Copy)]
+struct PlacedSweep {
+    parent_ts: u64,
+    count: u32,
+    side: AggressorSide,
+    open_ticks: i64,
 }
 
 /// The walk's mode and the mutable state only that mode carries. Which mode a
@@ -224,6 +239,18 @@ pub struct GeneratedSource {
     /// Cleared once drained, so a snapshot at a boundary copies no records.
     plan: Vec<Record>,
     cursor: usize,
+    /// The resolved parent's placed sweep, described rather than laid out:
+    /// its trades follow `plan`'s records. A record reader or a sized parent
+    /// view lays it out into `plan` (`expand`); a parent summary, a skip, a
+    /// dropped seek parent and an unsized parent view never do. Cleared at every resolution attempt, so a consumed
+    /// sweep never outlives the parent that resolved it.
+    sweep: Option<PlacedSweep>,
+    /// The resolved sweep's stepping children, reused across parents.
+    sweep_steps: Vec<u32>,
+    /// Resolve sweeps by the per-child reference walk instead; for the pins
+    /// that hold the compact resolution to it.
+    #[cfg(test)]
+    pub(super) per_child_reference: bool,
     plan_parent_ts: u64,
     plan_trades: u32,
     fault: Option<TickFault>,
@@ -898,6 +925,10 @@ impl GeneratedSource {
             size_probe: 0,
             plan: Vec::new(),
             cursor: 0,
+            sweep: None,
+            sweep_steps: Vec::new(),
+            #[cfg(test)]
+            per_child_reference: false,
             plan_parent_ts: start_ts,
             plan_trades: 0,
             fault: None,
@@ -1290,12 +1321,133 @@ impl GeneratedSource {
         }))
     }
 
-    /// Step every child of the sweep just begun and append its trade records,
-    /// their quantities left for `decorate`. The sweep is the parent's own: it
-    /// starts and ends inside this call, because a parent always resolves
-    /// whole. Its children's global indices are reserved here, whether or not
-    /// anyone ever reads their sizes.
-    fn emit_children(&mut self, mut burst: SweepBurst) -> Result<(), TickFault> {
+    /// Resolve the sweep just begun without laying out its children: draw its
+    /// level steps, prove its prices representable, advance the clock to its
+    /// last child and apply the end-of-sweep state, leaving the sweep
+    /// described in `sweep` for whoever wants its trades. The sweep is the
+    /// parent's own: it starts and ends inside this call, because a parent
+    /// always resolves whole. Its children's global indices are reserved
+    /// here, whether or not anyone ever reads their sizes.
+    ///
+    /// A refused sweep leaves exactly the state the per-child walk left -
+    /// the clock at the refused child, the end-of-sweep state moved only when
+    /// that child was the last - with one difference nothing can observe:
+    /// every step gap was drawn before the refusal rather than up to it. A
+    /// refusal is terminal, so no later draw reads the stream.
+    fn emit_children(&mut self, burst: &SweepBurst) -> Result<(), TickFault> {
+        #[cfg(test)]
+        if self.per_child_reference {
+            return self.emit_children_per_child(*burst);
+        }
+        self.plan_first_child = self.next_child;
+        self.next_child = self
+            .next_child
+            .checked_add(u64::from(burst.remaining))
+            .expect("the child index space is not exhausted");
+        self.plan_decorated = false;
+        if burst.remaining == 0 {
+            // The per-child walk stepped nothing for an empty sweep: no clock
+            // move, no end-of-sweep state. No sampler draws one.
+            return Ok(());
+        }
+        let mut steps = LevelSteps::new(self.level_step_prob(), burst.remaining, &mut self.rng);
+        steps.drain(&mut self.rng, &mut self.sweep_steps);
+        match resolve_sweep(
+            burst.price_ticks,
+            burst.side,
+            burst.remaining,
+            burst.parent_ts_ns,
+            &self.sweep_steps,
+            self.spec.prices,
+        ) {
+            SweepOutcome::Placed {
+                open_ticks,
+                final_ticks,
+                last_ts,
+            } => {
+                self.clock_ns = last_ts;
+                self.end_sweep(final_ticks);
+                self.sweep = Some(PlacedSweep {
+                    parent_ts: burst.parent_ts_ns,
+                    count: burst.remaining,
+                    side: burst.side,
+                    open_ticks: open_ticks as i64,
+                });
+                Ok(())
+            }
+            SweepOutcome::Refused {
+                fault_ts,
+                last_child_ticks,
+            } => {
+                self.clock_ns = fault_ts;
+                if let Some(ticks) = last_child_ticks {
+                    self.end_sweep(ticks);
+                }
+                Err(TickFault::PriceUnrepresentable { clock_ns: fault_ts })
+            }
+        }
+    }
+
+    /// The end-of-sweep state. The legacy walk remembers where it finished
+    /// (its repeat branch re-prices from here), and both bounce walks
+    /// re-center the drift on the residual between the last printed level
+    /// and the latent mid. `BounceState::next_drift` still takes its
+    /// per-event step, but it no longer accumulates across events - see the
+    /// field comment on `drift_ticks`. The cascade reads neither, so it keeps
+    /// neither.
+    fn end_sweep(&mut self, final_ticks: f64) {
+        let recentred = (DRIFT_RECENTER_FRAC * (final_ticks - self.vol.mid / self.spec.tick_f64))
+            .round() as i64;
+        match &mut self.walk {
+            Walk::Legacy(walk) => {
+                walk.last_event_price_ticks = Some(final_ticks);
+                walk.bounce.drift_ticks = recentred;
+            }
+            Walk::Integrated(walk) => walk.bounce.drift_ticks = recentred,
+            Walk::Cascade(_) | Walk::CascadeBook(_) => {}
+        }
+    }
+
+    /// The resolved sweep's trades, described.
+    fn sweep_trades(&self) -> Option<SweepTrades<'_>> {
+        self.sweep.map(|sweep| {
+            SweepTrades::resolved(
+                sweep.parent_ts,
+                sweep.count,
+                sweep.side,
+                sweep.open_ticks,
+                self.spec.prices.tick_mantissa,
+                INTRA_EVENT_STEP_NS,
+                &self.sweep_steps,
+            )
+        })
+    }
+
+    /// Lay the resolved sweep's trades out into the plan after its quote,
+    /// their quantities left for `decorate`. For the readers that hand out
+    /// records or sized parents.
+    fn expand(&mut self) {
+        let Some(sweep) = self.sweep.take() else {
+            return;
+        };
+        let trades = SweepTrades::resolved(
+            sweep.parent_ts,
+            sweep.count,
+            sweep.side,
+            sweep.open_ticks,
+            self.spec.prices.tick_mantissa,
+            INTRA_EVENT_STEP_NS,
+            &self.sweep_steps,
+        );
+        self.plan.extend(trades.trades().map(Record::Trade));
+    }
+
+    /// The per-child walk `emit_children` replaced, kept as its independent
+    /// reference: every child stepped, floored, stamped and priced in turn,
+    /// its own end-of-sweep update inline in `step_child`. Never the
+    /// production path; selected per source by the equivalence pins.
+    #[cfg(test)]
+    fn emit_children_per_child(&mut self, mut burst: SweepBurst) -> Result<(), TickFault> {
         self.plan_first_child = self.next_child;
         self.next_child = self
             .next_child
@@ -1303,8 +1455,9 @@ impl GeneratedSource {
             .expect("the child index space is not exhausted");
         self.plan_decorated = false;
         let mut steps = LevelSteps::new(self.level_step_prob(), burst.remaining, &mut self.rng);
+        let mut emitted = 0;
         while burst.remaining > 0 {
-            let price_ticks = self.step_child(&mut burst, &mut steps);
+            let price_ticks = self.step_child(&mut burst, &mut emitted, &mut steps);
             let record = Record::Trade(TradeRec {
                 ts: self.clock_ns,
                 px: self.price(price_ticks)?,
@@ -1415,7 +1568,7 @@ impl RiverSource for GeneratedSource {
 
     fn next_record(&mut self) -> Option<Record> {
         if self.cursor == self.plan.len() {
-            self.resolve_parent().ok()?;
+            self.resolve_parent_records().ok()?;
         }
         self.decorate();
         let record = self.plan[self.cursor];
@@ -1448,10 +1601,14 @@ impl RiverSource for GeneratedSource {
             if self.cursor == self.plan.len() {
                 self.resolve_parent().ok()?;
                 if self.clock_ns < start_ts {
+                    // Dropped whole, its sweep never laid out.
                     self.plan.clear();
+                    self.sweep = None;
                     self.cursor = 0;
                     continue;
                 }
+                // Parked inside this parent: the same resolution, laid out.
+                self.expand();
             }
             let record = self.next_record()?;
             if record.ts() >= start_ts {
@@ -1467,7 +1624,7 @@ impl ParentSource for GeneratedSource {
             self.at_parent_boundary(),
             "next_parent called mid-parent, after a partial record read"
         );
-        self.resolve_parent().ok()?;
+        self.resolve_parent_records().ok()?;
         self.decorate();
         // Consumed whole: the next call clears it before resolving.
         self.cursor = self.plan.len();
@@ -1483,11 +1640,14 @@ impl ParentSource for GeneratedSource {
         })
     }
 
-    /// `next_parent` without the size draws. Sizes ride their own
+    /// `next_parent` without the size draws, and with a placed sweep handed
+    /// over described rather than laid out. Sizes ride their own
     /// child-indexed stream, which `decorate` seeks to the parent's first
     /// child before every use, so leaving a parent undecorated moves no draw
     /// of the main stream and no quantity of any later parent: the child
-    /// indices were reserved at resolution either way.
+    /// indices were reserved at resolution either way. The parent is consumed
+    /// whole: the cursor sits at the end of its laid-out prefix, and the next
+    /// resolution clears the described sweep.
     fn next_parent_unsized(&mut self) -> Option<UnsizedParentView<'_>> {
         assert!(
             self.at_parent_boundary(),
@@ -1495,19 +1655,16 @@ impl ParentSource for GeneratedSource {
         );
         self.resolve_parent().ok()?;
         self.cursor = self.plan.len();
-        Some(
-            ParentView {
-                parent_ts: self.plan_parent_ts,
-                records: &self.plan,
-                trades: self.plan_trades,
-                trace: if self.vol_trace_enabled {
-                    self.vol_trace
-                } else {
-                    None
-                },
-            }
-            .unsized_view(),
-        )
+        Some(UnsizedParentView::with_sweep(
+            self.plan_parent_ts,
+            &self.plan,
+            self.sweep_trades(),
+            if self.vol_trace_enabled {
+                self.vol_trace
+            } else {
+                None
+            },
+        ))
     }
 }
 
@@ -1525,6 +1682,38 @@ impl GeneratedSource {
             .iter()
             .filter(|record| matches!(record, Record::Trade(_)))
             .count() as u32
+    }
+
+    /// Everything a parent's resolution moves that a later parent can read:
+    /// the clock, the reopen frontier, the child reservation, the main
+    /// stream's position and its next output, the latent state's bits, and
+    /// the walk's end-of-sweep state. For the pins holding two resolutions
+    /// equal at a parent boundary.
+    #[cfg(test)]
+    pub(super) fn boundary_state(&self) -> String {
+        let mut next = self.rng.clone();
+        let continuation: [u64; 2] = [next.random(), next.random()];
+        let end_of_sweep = match &self.walk {
+            Walk::Legacy(walk) => format!(
+                "{:?} {}",
+                walk.last_event_price_ticks.map(f64::to_bits),
+                walk.bounce.drift_ticks
+            ),
+            Walk::Integrated(walk) => format!("{}", walk.bounce.drift_ticks),
+            Walk::Cascade(_) | Walk::CascadeBook(_) => String::new(),
+        };
+        format!(
+            "clock {} frontier {} child {} word {} next {continuation:?} mid {} sigma2 {} prev {} \
+             fault {:?} end {end_of_sweep}",
+            self.clock_ns,
+            self.reopen_frontier_ns,
+            self.next_child,
+            self.rng.get_word_pos(),
+            self.vol.mid.to_bits(),
+            self.vol.sigma2.to_bits(),
+            self.vol.prev_return.to_bits(),
+            self.fault,
+        )
     }
 
     /// Whether the walk is the discrete-book path, whose parents publish
@@ -1560,30 +1749,43 @@ impl GeneratedSource {
         }
         self.plan.clear();
         self.cursor = 0;
+        self.sweep = None;
+        self.sweep_steps.clear();
         self.plan_trades = 0;
         // A placed sweep clears this as it reserves its children; a
         // discrete-book parent's quantities are written at resolution.
         self.plan_decorated = true;
         match self.begin_event() {
             Ok(()) => {
+                let swept = self.sweep.map_or(0, |sweep| sweep.count);
+                let records = self.plan.len() + swept as usize;
                 assert!(
-                    (1..=MAX_PARENT_RECORDS).contains(&self.plan.len()),
-                    "a parent emitted {} records, outside [1, {MAX_PARENT_RECORDS}]",
-                    self.plan.len()
+                    (1..=MAX_PARENT_RECORDS).contains(&records),
+                    "a parent emitted {records} records, outside [1, {MAX_PARENT_RECORDS}]",
                 );
                 self.plan_trades = self
                     .plan
                     .iter()
                     .filter(|record| matches!(record, Record::Trade(_)))
-                    .count() as u32;
+                    .count() as u32
+                    + swept;
                 Ok(())
             }
             Err(fault) => {
                 self.plan.clear();
+                self.sweep = None;
                 self.fault = Some(fault);
                 Err(fault)
             }
         }
+    }
+
+    /// Resolve the next parent with its sweep laid out, for the readers that
+    /// hand out records or sized parents.
+    fn resolve_parent_records(&mut self) -> Result<(), TickFault> {
+        self.resolve_parent()?;
+        self.expand();
+        Ok(())
     }
 
     /// Advance exactly one parent for the checkpoint extension, reporting how
@@ -1594,8 +1796,9 @@ impl GeneratedSource {
             "skip_parent requires a parent boundary"
         );
         self.resolve_parent()?;
-        let emitted = self.plan.len();
+        let emitted = self.plan.len() + self.sweep.map_or(0, |sweep| sweep.count as usize);
         self.plan.clear();
+        self.sweep = None;
         self.cursor = 0;
         Ok(emitted)
     }
@@ -1618,6 +1821,7 @@ impl GeneratedSource {
             child_stride_ns: INTRA_EVENT_STEP_NS,
         };
         self.plan.clear();
+        self.sweep = None;
         self.cursor = 0;
         Ok(summary)
     }
@@ -1720,9 +1924,8 @@ impl GeneratedSource {
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
-        self.emit_children(SweepBurst {
+        self.emit_children(&SweepBurst {
             remaining: draw.child_count,
-            emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
@@ -1849,9 +2052,8 @@ impl GeneratedSource {
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
-        self.emit_children(SweepBurst {
+        self.emit_children(&SweepBurst {
             remaining: count,
-            emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
@@ -2236,9 +2438,8 @@ impl GeneratedSource {
         // since tape protocol 36; sizes are drawn from their own stream.
         #[cfg(test)]
         self.draw_stages.push("level_steps");
-        self.emit_children(SweepBurst {
+        self.emit_children(&SweepBurst {
             remaining: count,
-            emitted: 0,
             parent_ts_ns: self.clock_ns,
             side: aggressor,
             price_ticks,
@@ -2247,9 +2448,16 @@ impl GeneratedSource {
 
     /// One child of a placed sweep: the level step, the floor, the instant.
     /// Returns the level it prints at. A step landing while the price sits on
-    /// the one-tick floor still counts, and still consumed its draw.
-    fn step_child(&mut self, burst: &mut SweepBurst, steps: &mut LevelSteps) -> f64 {
-        if steps.steps_at(burst.emitted, &mut self.rng) {
+    /// the one-tick floor still counts, and still consumed its draw. The
+    /// per-child reference's step; production resolves the sweep whole.
+    #[cfg(test)]
+    fn step_child(
+        &mut self,
+        burst: &mut SweepBurst,
+        emitted: &mut u32,
+        steps: &mut LevelSteps,
+    ) -> f64 {
+        if steps.steps_at(*emitted, &mut self.rng) {
             match burst.side {
                 AggressorSide::Buyer => burst.price_ticks += 1.0,
                 AggressorSide::Seller => burst.price_ticks -= 1.0,
@@ -2259,10 +2467,10 @@ impl GeneratedSource {
         burst.price_ticks = burst.price_ticks.max(1.0);
         self.clock_ns = burst
             .parent_ts_ns
-            .saturating_add(u64::from(burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
+            .saturating_add(u64::from(*emitted).saturating_mul(INTRA_EVENT_STEP_NS));
         let price_ticks = burst.price_ticks;
         burst.remaining -= 1;
-        burst.emitted += 1;
+        *emitted += 1;
         if burst.remaining == 0 {
             // End of the sweep. The legacy walk remembers where it finished
             // (its repeat branch re-prices from here), and both bounce walks

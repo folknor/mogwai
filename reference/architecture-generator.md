@@ -281,21 +281,29 @@ segment river - stay on the event-facing `TickSource`, where every event
 carries its own symbol and exact decimals, and `EventView` adapts a river into
 that world rather than the reverse.
 
-`GeneratedSource` resolves one whole parent transaction at a time into a
-reused plan of records, and readers drain the plan. Every stochastic stage
-runs in the order it always did; what moved is when the children are
-materialized - all of them at the parent rather than one per read. A parent's
-footprint is therefore known the moment it is drawn, which is what lets a
-seek drop a whole parent that ends before its target without cloning the
-generator to try it, and lets the checkpoint chain advance whole parents only.
-A resolution that fails installs nothing, so a faulted parent publishes no
-prefix. `ParentSource::next_parent` hands a parent-aware reader the whole
+`GeneratedSource` resolves one whole parent transaction at a time. Its quotes,
+and on the discrete-book path its trades, go into a reused plan of records; a
+placed sweep's trades are resolved into a description instead - opening
+level, side, child count and the children that step a level - with no child
+laid out. A sweep's levels run monotonically from its opening level to its
+final one, and the price grid accepts a contiguous range of whole ticks, so
+resolution proves every child's price representable from the two endpoints
+and replays the children one by one only to locate a refusal. Every
+stochastic stage runs in the order it always did. Readers that hand out
+records or sized parents lay the sweep out into the plan; a parent summary, a
+skip, a seek dropping a parent and an unsized parent view never do. A
+parent's footprint is therefore known the moment it is drawn, which is what
+lets a seek drop a whole parent that ends before its target without cloning
+the generator to try it, and lets the checkpoint chain advance whole parents
+only. A resolution that fails installs nothing, so a faulted parent publishes
+no prefix. `ParentSource::next_parent` hands a parent-aware reader the whole
 parent - its instant, its records, its trade count and its volatility trace -
 because quotes are not a parent boundary on every path: the discrete book can
 publish two for one parent, or suppress both. `next_parent_unsized` is the same
 read for a reader that measures no quantity: the generator skips the size
 draws, and the view it returns exposes only a quantity-free projection of the
-records, so an undrawn placeholder size cannot be read as a size. Sizes ride
+records, computing a placed sweep's trades as it is iterated, so an undrawn
+placeholder size cannot be read as a size. Sizes ride
 their own child-indexed stream that every sized read seeks, so skipping them
 leaves every later read exactly as it would have been.
 

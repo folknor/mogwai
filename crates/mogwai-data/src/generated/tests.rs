@@ -13,7 +13,7 @@
 
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
-use crate::{Record, RiverSource, TickEvent, TickFault};
+use crate::{ParentSource, Record, RiverSource, TickEvent, TickFault, UnsizedRecord};
 
 use super::arrival::cadence_base_mean_s;
 use super::checkpoint::MAX_CHECKPOINTS;
@@ -6591,7 +6591,189 @@ fn book_calendar() -> SessionCalendar {
     }
 }
 
+/// The placed walks a sweep resolves on, each fresh from its origin: the
+/// legacy anchor clean and under every regime that moves its clock or mid,
+/// the integrated kernel, and the placed cascade.
+type Fixture = (&'static str, Box<dyn Fn() -> GeneratedSource>);
+
+fn placed_sweep_fixtures() -> Vec<Fixture> {
+    let legacy = |regime: Option<MarketRegime>, origin: u64| {
+        move || {
+            let fp = Fingerprint::from_repo_json();
+            GeneratedSource::new(
+                GeneratorScalars::xbtusd_anchor(&fp),
+                42,
+                origin,
+                &fp,
+                regime,
+            )
+        }
+    };
+    vec![
+        ("legacy", Box::new(legacy(None, 0))),
+        (
+            "storm",
+            Box::new(legacy(Some(MarketRegime::VolStorm { vol_mult: 100.0 }), 0)),
+        ),
+        (
+            "drought",
+            Box::new(legacy(
+                Some(MarketRegime::LiquidityDrought { thin_factor: 50.0 }),
+                0,
+            )),
+        ),
+        (
+            "edge spike",
+            Box::new(legacy(
+                Some(MarketRegime::SessionEdgeSpike {
+                    start_hour: 14,
+                    end_hour: 16,
+                    extra_vol_mult: 90.0,
+                }),
+                SESSION_START_TS + 27 * NS_PER_HOUR / 2,
+            )),
+        ),
+        (
+            "reopen",
+            Box::new(legacy(
+                Some(MarketRegime::ReopenGap {
+                    at_ts: 600_000_000_000,
+                    halt_secs: 3_600,
+                    gap_frac: 0.05,
+                }),
+                0,
+            )),
+        ),
+        (
+            "integrated",
+            Box::new(|| {
+                let fp = Fingerprint::from_repo_json();
+                let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+                scalars.arrival = Some(ArrivalConfig::LogOuCox {
+                    sigma_y: 0.6,
+                    tau_s: 60.0,
+                });
+                GeneratedSource::new(scalars, 91, 0, &fp, None)
+            }),
+        ),
+        (
+            "cascade",
+            Box::new(|| cascade_mnq_source(7, BOOK_START_NS, false)),
+        ),
+    ]
+}
+
+/// The compact sweep resolution against the per-child walk it replaced,
+/// kept in the tree as `emit_children_per_child`. The reference is read a
+/// sized parent at a time; the compact source is read through every reader
+/// in rotation - sized parents, unsized views (each walked twice), parent
+/// summaries, skips, record by record, and a clone taken after an unsized
+/// read - and each parent must agree in what the reader sees and in every
+/// piece of walk state a later parent can read.
+#[test]
+fn compact_sweeps_resolve_as_the_per_child_walk_did() {
+    let unsized_of = |records: &[Record]| -> Vec<UnsizedRecord> {
+        records.iter().map(UnsizedRecord::from).collect()
+    };
+    for (label, fresh) in placed_sweep_fixtures() {
+        let mut reference = fresh();
+        reference.per_child_reference = true;
+        let mut compact = fresh();
+        let mut multi_child = 0;
+        for parent in 0..6_000 {
+            let expected: Vec<Record> = reference
+                .next_parent()
+                .expect("an unbounded walk")
+                .records
+                .to_vec();
+            let trades = expected
+                .iter()
+                .filter(|record| matches!(record, Record::Trade(_)))
+                .count();
+            multi_child += usize::from(trades > 1);
+            match parent % 6 {
+                0 => {
+                    let got = compact.next_parent().expect("an unbounded walk").records;
+                    assert_eq!(got, expected.as_slice(), "{label} parent {parent} sized");
+                }
+                1 | 5 => {
+                    let view = compact.next_parent_unsized().expect("an unbounded walk");
+                    let first: Vec<UnsizedRecord> = view.records().collect();
+                    let second: Vec<UnsizedRecord> = view.records().collect();
+                    assert_eq!(
+                        first,
+                        unsized_of(&expected),
+                        "{label} parent {parent} unsized"
+                    );
+                    assert_eq!(first, second, "{label} parent {parent} walked twice");
+                    assert_eq!(view.first_ts(), expected[0].ts());
+                    if parent % 6 == 5 {
+                        compact = compact.clone();
+                    }
+                }
+                2 => {
+                    let summary = compact.advance_parent().expect("an unbounded walk");
+                    assert_eq!(summary.parent_ts_ns, expected[0].ts(), "{label} {parent}");
+                    assert_eq!(summary.child_count as usize, trades, "{label} {parent}");
+                }
+                3 => {
+                    let emitted = compact.skip_parent().expect("an unbounded walk");
+                    assert_eq!(emitted, expected.len(), "{label} parent {parent} skip");
+                }
+                _ => {
+                    let mut got = vec![RiverSource::next_record(&mut compact).expect("record")];
+                    while !compact.at_parent_boundary() {
+                        got.push(RiverSource::next_record(&mut compact).expect("record"));
+                    }
+                    assert_eq!(got, expected, "{label} parent {parent} records");
+                }
+            }
+            assert_eq!(
+                compact.boundary_state(),
+                reference.boundary_state(),
+                "{label} parent {parent}"
+            );
+        }
+        assert!(multi_child > 100, "{label}: too few multi-child sweeps");
+    }
+}
+
+/// A seek that parks inside a parent lays out that same resolution, and one
+/// that drops whole parents before its target leaves the walk where the
+/// per-child walk left it.
+#[test]
+fn a_compact_seek_lands_where_the_per_child_walk_lands() {
+    for (label, fresh) in placed_sweep_fixtures() {
+        let mut probe = fresh();
+        let target = (0..3_000)
+            .map(|_| RiverSource::next_record(&mut probe).expect("record").ts())
+            .nth(2_500)
+            .expect("a target");
+        let mut reference = fresh();
+        reference.per_child_reference = true;
+        let mut compact = fresh();
+        for _ in 0..300 {
+            assert_eq!(
+                RiverSource::seek_to(&mut compact, target),
+                RiverSource::seek_to(&mut reference, target),
+                "{label}"
+            );
+        }
+        assert_eq!(
+            compact.boundary_state(),
+            reference.boundary_state(),
+            "{label}"
+        );
+    }
+}
+
 fn book_source(seed: u64, start_ts: u64) -> GeneratedSource {
+    cascade_mnq_source(seed, start_ts, true)
+}
+
+/// The book fixture's cascade, with its discrete book or, without one, as a
+/// placed-sweep cascade walk.
+fn cascade_mnq_source(seed: u64, start_ts: u64, with_book: bool) -> GeneratedSource {
     let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::from_fingerprint_medians("MNQ", &fp);
     // A whole-contract instrument: integral grid, tick 0.25.
@@ -6603,7 +6785,7 @@ fn book_source(seed: u64, start_ts: u64) -> GeneratedSource {
     scalars.size_log_sigma = 0.9;
     scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::from(3));
     scalars.cascade = Some(book_cascade_config());
-    scalars.book = Some(book_config());
+    scalars.book = with_book.then(book_config);
     let session = SessionProfile {
         intensity_hour: [1.0 / 24.0; 24],
         vol_hour: [1.0; 24],
@@ -6624,7 +6806,7 @@ fn book_source(seed: u64, start_ts: u64) -> GeneratedSource {
         grid,
         Some(book_calendar()),
     )
-    .expect("a cascade-plus-book MNQ source builds")
+    .expect("a cascade MNQ source builds")
 }
 
 const BOOK_START_NS: u64 = 1_020 * 60 * 1_000_000_000;

@@ -112,9 +112,9 @@ impl SweepShape {
 /// The children of a placed parent still to be stepped. Local to the parent's
 /// resolution: a parent always resolves whole, so no snapshot can ever land
 /// mid-sweep and the sweep is never walk state.
+#[derive(Clone, Copy)]
 pub(super) struct SweepBurst {
     pub(super) remaining: u32,
-    pub(super) emitted: u32,
     pub(super) parent_ts_ns: u64,
     pub(super) side: AggressorSide,
     pub(super) price_ticks: f64,

@@ -9,11 +9,15 @@
 //!
 //! The split is what lets a parent be skipped at the cost of its feedback
 //! draws alone. A skipped parent - a checkpoint extension, `advance_parent`,
-//! a seek dropping a parent before its target - reserves its children's
-//! indices and never draws a size; a parent a reader will see has its sizes
-//! filled from the size stream positioned at its first child. Both give the
-//! same sizes, because a child's size draw does not depend on how its parent
-//! was read.
+//! a seek dropping a parent before its target - and a parent read through an
+//! unsized view reserve their children's indices and never draw a size; a
+//! parent a record reader or a sized view sees has its sizes filled from the
+//! size stream positioned at its first child. Both give the same sizes,
+//! because a child's size draw does not depend on how its parent was read.
+//!
+//! A placed sweep's level steps are drained whole at resolution
+//! ([`LevelSteps::drain`]) and the sweep resolved from them without laying a
+//! child out ([`resolve_sweep`]).
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
@@ -106,7 +110,9 @@ impl LevelSteps {
     }
 
     /// Whether child `child` steps a level, drawing the following gap when
-    /// it does. Asked once per child, in order.
+    /// it does. Asked once per child, in order. The per-child walk the
+    /// reference resolver keeps; production drains instead.
+    #[cfg(test)]
     pub(super) fn steps_at(&mut self, child: u32, rng: &mut ChaCha12Rng) -> bool {
         if child == 0 || self.next != Some(child - 1) {
             return false;
@@ -114,6 +120,101 @@ impl LevelSteps {
         self.advance(rng);
         true
     }
+
+    /// Every child that steps, in order, appended to `out`: trial `t` lands
+    /// on child `t + 1`. Draws exactly the gaps that asking `steps_at` of
+    /// every child in turn draws, in the same order - the gap `new` already
+    /// drew is recorded before the next is drawn, and a step on the last
+    /// trial still advances, which then draws nothing.
+    pub(super) fn drain(&mut self, rng: &mut ChaCha12Rng, out: &mut Vec<u32>) {
+        while let Some(trial) = self.next {
+            out.push(trial + 1);
+            self.advance(rng);
+        }
+    }
+}
+
+/// How a placed sweep resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum SweepOutcome {
+    /// Every child's price is representable. `open_ticks` is the opening
+    /// level after its floor, `final_ticks` the last child's level, and
+    /// `last_ts` the last child's instant.
+    Placed {
+        open_ticks: f64,
+        final_ticks: f64,
+        last_ts: u64,
+    },
+    /// The first child whose price is not representable, at `fault_ts`.
+    /// `last_child_ticks` is that child's level when it is the sweep's last
+    /// child: the per-child walk updates the end-of-sweep state on the last
+    /// child before it checks that child's price, so a refusal there has
+    /// already moved it.
+    Refused {
+        fault_ts: u64,
+        last_child_ticks: Option<f64>,
+    },
+}
+
+/// Resolve a placed sweep of `count` children (at least one) opening at
+/// `open` on `side`, stepping at the children in `steps` (strictly
+/// increasing, inside `1..count`), without laying out a child.
+///
+/// A sweep's levels are monotone from the opening to the final one - a
+/// buyer's rise one tick per step, a seller's fall and floor at one tick -
+/// and the grid accepts a contiguous range of whole ticks, so the two
+/// endpoints decide every child. Where either is refused, the per-child
+/// float walk is replayed to find the first refused child; the closed form
+/// is not trusted there, because near `2^53` repeated unit steps and one
+/// step of `k` need not agree.
+pub(super) fn resolve_sweep(
+    open: f64,
+    side: mogwai_protocol::AggressorSide,
+    count: u32,
+    parent_ts: u64,
+    steps: &[u32],
+    grid: super::numeric::PriceGrid,
+) -> SweepOutcome {
+    use mogwai_protocol::AggressorSide;
+    debug_assert!(count >= 1);
+    let stride = super::consts::INTRA_EVENT_STEP_NS;
+    let child_ts = |child: u32| parent_ts.saturating_add(u64::from(child).saturating_mul(stride));
+    let open_ticks = open.max(1.0);
+    if grid.mantissa(open_ticks).is_some() {
+        let k = steps.len() as f64;
+        let final_ticks = match side {
+            AggressorSide::Buyer => open_ticks + k,
+            AggressorSide::Seller => (open_ticks - k).max(1.0),
+            AggressorSide::NoAggressor => unreachable!("a sweep's side is native"),
+        };
+        if grid.mantissa(final_ticks).is_some() {
+            return SweepOutcome::Placed {
+                open_ticks,
+                final_ticks,
+                last_ts: child_ts(count - 1),
+            };
+        }
+    }
+    let mut ticks = open;
+    let mut next_step = 0_usize;
+    for child in 0..count {
+        if steps.get(next_step) == Some(&child) {
+            next_step += 1;
+            match side {
+                AggressorSide::Buyer => ticks += 1.0,
+                AggressorSide::Seller => ticks -= 1.0,
+                AggressorSide::NoAggressor => unreachable!("a sweep's side is native"),
+            }
+        }
+        ticks = ticks.max(1.0);
+        if grid.mantissa(ticks).is_none() {
+            return SweepOutcome::Refused {
+                fault_ts: child_ts(child),
+                last_child_ticks: (child + 1 == count).then_some(ticks),
+            };
+        }
+    }
+    unreachable!("a refused endpoint is a refused child of a monotone sweep")
 }
 
 /// One child's size draw, before quantization.
@@ -331,6 +432,177 @@ mod tests {
             assert_eq!(rng.get_word_pos() - start, 2 * draws, "seed {seed}");
             assert!(stepped.iter().all(|&c| c > 0 && c < count));
         }
+    }
+
+    /// Draining is asking `steps_at` of every child in turn: the same steps,
+    /// and the stream left at the same position with the same continuation.
+    /// Over random seeds, and over the forced cases a seed reaches only by
+    /// luck: no trials, a certain step and an impossible one, a step on the
+    /// last trial (which ends the draws) and a terminal overshoot.
+    #[test]
+    fn draining_steps_is_asking_every_child() {
+        let walk = |p: f64, count: u32, seed: u64, drain: bool| {
+            let mut rng = ChaCha12Rng::seed_from_u64(seed);
+            let mut steps = LevelSteps::new(p, count, &mut rng);
+            let stepped: Vec<u32> = if drain {
+                let mut out = Vec::new();
+                steps.drain(&mut rng, &mut out);
+                out
+            } else {
+                (0..count)
+                    .filter(|&c| steps.steps_at(c, &mut rng))
+                    .collect()
+            };
+            (stepped, rng.get_word_pos(), rng.random::<u64>())
+        };
+        let mut last_trial = false;
+        let mut overshoot = false;
+        for seed in 0..4_000_u64 {
+            for (p, count) in [
+                (0.37, 1 + (seed % 14) as u32),
+                (0.9, 2 + (seed % 5) as u32),
+                (0.02, 9),
+                (0.0, 9),
+                (1.0, 9),
+                (0.5, 0),
+                (0.5, 1),
+            ] {
+                let drained = walk(p, count, seed, true);
+                assert_eq!(drained, walk(p, count, seed, false), "p {p} count {count}");
+                last_trial |= count > 1 && drained.0.last() == Some(&(count - 1));
+                overshoot |=
+                    count > 1 && p > 0.0 && p < 1.0 && drained.0.last() != Some(&(count - 1));
+            }
+        }
+        assert!(last_trial && overshoot, "both endings were exercised");
+    }
+
+    /// The per-child float walk `resolve_sweep` replaces: the reference its
+    /// closed form is held to.
+    fn per_child(
+        open: f64,
+        side: mogwai_protocol::AggressorSide,
+        count: u32,
+        parent_ts: u64,
+        steps: &[u32],
+        grid: super::super::numeric::PriceGrid,
+    ) -> (Vec<(u64, i64)>, SweepOutcome) {
+        let mut ticks = open;
+        let mut printed = Vec::new();
+        for child in 0..count {
+            if steps.contains(&child) {
+                ticks += match side {
+                    mogwai_protocol::AggressorSide::Buyer => 1.0,
+                    _ => -1.0,
+                };
+            }
+            ticks = ticks.max(1.0);
+            let ts = parent_ts.saturating_add(
+                u64::from(child).saturating_mul(super::super::consts::INTRA_EVENT_STEP_NS),
+            );
+            match grid.mantissa(ticks) {
+                Some(px) => printed.push((ts, px)),
+                None => {
+                    return (
+                        printed,
+                        SweepOutcome::Refused {
+                            fault_ts: ts,
+                            last_child_ticks: (child + 1 == count).then_some(ticks),
+                        },
+                    );
+                }
+            }
+        }
+        (
+            printed,
+            SweepOutcome::Placed {
+                open_ticks: open.max(1.0),
+                final_ticks: ticks,
+                last_ts: parent_ts.saturating_add(
+                    u64::from(count - 1).saturating_mul(super::super::consts::INTRA_EVENT_STEP_NS),
+                ),
+            },
+        )
+    }
+
+    /// `resolve_sweep` decides what the per-child walk decides, and a placed
+    /// sweep's described trades are the per-child walk's prints: through the
+    /// floor, at and across `2^53`, at the mantissa's overflow edge, refused
+    /// on the first child, mid-sweep and on the last child, and at instants
+    /// saturating `u64`.
+    #[test]
+    fn a_resolved_sweep_is_the_per_child_walk() {
+        use mogwai_protocol::AggressorSide::{Buyer, Seller};
+        let limit = 9_007_199_254_740_992.0_f64;
+        let unit = super::super::numeric::PriceGrid { tick_mantissa: 1 };
+        // Overflows i64 past 922 ticks.
+        let wide = super::super::numeric::PriceGrid {
+            tick_mantissa: 10_000_000_000_000_000,
+        };
+        let cases: Vec<(f64, _, u32, u64, Vec<u32>, _)> = vec![
+            (5.0, Buyer, 9, 0, vec![2, 3, 7], unit),
+            (3.0, Seller, 9, 0, vec![1, 2, 3, 4, 5, 8], unit),
+            (1.0, Seller, 4, 0, vec![1, 2, 3], unit),
+            (0.4, Buyer, 3, 0, vec![], unit),
+            (f64::NAN, Seller, 2, 0, vec![1], unit),
+            (limit - 3.0, Buyer, 6, 0, vec![1, 2], unit),
+            (limit - 3.0, Buyer, 6, 0, vec![1, 2, 3], unit),
+            (limit - 3.0, Buyer, 6, 0, vec![1, 2, 3, 4, 5], unit),
+            (limit - 1.0, Buyer, 2, 0, vec![1], unit),
+            (limit, Seller, 3, 0, vec![1, 2], unit),
+            (limit + 2.0, Seller, 4, 0, vec![1, 2, 3], unit),
+            (920.0, Buyer, 5, 0, vec![1, 2, 4], wide),
+            (921.0, Buyer, 3, 0, vec![1], wide),
+            (921.0, Buyer, 3, 0, vec![2], wide),
+            (5.0, Buyer, 4, u64::MAX - 1_500, vec![1, 3], unit),
+            (5.0, Seller, 1, u64::MAX, vec![], unit),
+        ];
+        let (mut placed, mut first, mut mid, mut last) = (0, 0, 0, 0);
+        for (open, side, count, parent_ts, steps, grid) in cases {
+            let (prints, expected) = per_child(open, side, count, parent_ts, &steps, grid);
+            let got = resolve_sweep(open, side, count, parent_ts, &steps, grid);
+            let label = format!("open {open} {side:?} count {count} steps {steps:?}");
+            match (got, expected) {
+                (
+                    SweepOutcome::Placed {
+                        open_ticks,
+                        final_ticks,
+                        last_ts,
+                    },
+                    SweepOutcome::Placed {
+                        final_ticks: want_final,
+                        last_ts: want_last,
+                        ..
+                    },
+                ) => {
+                    placed += 1;
+                    assert_eq!(final_ticks.to_bits(), want_final.to_bits(), "{label}");
+                    assert_eq!(last_ts, want_last, "{label}");
+                    let described: Vec<(u64, i64)> = crate::SweepTrades::resolved(
+                        parent_ts,
+                        count,
+                        side,
+                        open_ticks as i64,
+                        grid.tick_mantissa,
+                        super::super::consts::INTRA_EVENT_STEP_NS,
+                        &steps,
+                    )
+                    .trades()
+                    .map(|trade| (trade.ts, trade.px))
+                    .collect();
+                    assert_eq!(described, prints, "{label}");
+                }
+                (got, expected) => {
+                    assert_eq!(got, expected, "{label}");
+                    match prints.len() {
+                        0 => first += 1,
+                        n if n + 1 == count as usize => last += 1,
+                        _ => mid += 1,
+                    }
+                }
+            }
+        }
+        assert!(placed > 0 && first > 0 && mid > 0 && last > 0);
     }
 
     /// The step frequency per eligible trial is `p`, the law the coins had.

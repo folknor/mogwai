@@ -425,6 +425,7 @@ impl<'a> ParentView<'a> {
         UnsizedParentView {
             parent_ts: self.parent_ts,
             records: self.records,
+            sweep: None,
             trace: self.trace,
         }
     }
@@ -472,6 +473,92 @@ impl From<&Record> for UnsizedRecord {
     }
 }
 
+/// A placed sweep's trades described rather than laid out: `count` children
+/// one stride apart from `parent_ts`, all on one side, opening at
+/// `open_ticks` and moving one tick toward the aggressor at each child in
+/// `steps`, a seller's floored at one tick. Prices are `ticks *
+/// tick_mantissa`.
+///
+/// Only a successful resolution builds one, and that resolution has already
+/// proven every child's price representable: both endpoints passed the
+/// grid's range test, the walk between them is monotone, and `steps` is
+/// strictly increasing inside `1..count`. So the integer walk here is exactly
+/// the float walk the per-child resolver took, and nothing can overflow.
+#[derive(Debug, Clone, Copy)]
+pub struct SweepTrades<'a> {
+    parent_ts: u64,
+    count: u32,
+    side: AggressorSide,
+    open_ticks: i64,
+    tick_mantissa: i64,
+    stride_ns: u64,
+    steps: &'a [u32],
+}
+
+impl<'a> SweepTrades<'a> {
+    /// A resolved sweep. The caller guarantees the invariants in the type's
+    /// documentation; the generator's resolver is the only caller.
+    pub(crate) fn resolved(
+        parent_ts: u64,
+        count: u32,
+        side: AggressorSide,
+        open_ticks: i64,
+        tick_mantissa: i64,
+        stride_ns: u64,
+        steps: &'a [u32],
+    ) -> Self {
+        debug_assert!(steps.windows(2).all(|pair| pair[0] < pair[1]));
+        debug_assert!(steps.iter().all(|&child| child >= 1 && child < count));
+        Self {
+            parent_ts,
+            count,
+            side,
+            open_ticks,
+            tick_mantissa,
+            stride_ns,
+            steps,
+        }
+    }
+
+    /// How many trades the sweep prints.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// The sweep's trades in order, each quantity a placeholder zero. A
+    /// fresh iterator per call, so a view can be walked more than once.
+    pub fn trades(&self) -> impl Iterator<Item = TradeRec> + 'a {
+        let Self {
+            parent_ts,
+            count,
+            side,
+            open_ticks,
+            tick_mantissa,
+            stride_ns,
+            steps,
+        } = *self;
+        let mut ticks = open_ticks;
+        let mut next_step = 0_usize;
+        (0..count).map(move |child| {
+            if steps.get(next_step) == Some(&child) {
+                next_step += 1;
+                ticks = match side {
+                    AggressorSide::Buyer => ticks + 1,
+                    AggressorSide::Seller => (ticks - 1).max(1),
+                    AggressorSide::NoAggressor => unreachable!("a sweep's side is native"),
+                };
+            }
+            TradeRec {
+                ts: parent_ts.saturating_add(u64::from(child).saturating_mul(stride_ns)),
+                px: ticks * tick_mantissa,
+                qty: 0,
+                side,
+            }
+        })
+    }
+}
+
 /// One whole parent with its quantities hidden, from
 /// [`ParentSource::next_parent_unsized`].
 ///
@@ -479,26 +566,55 @@ impl From<&Record> for UnsizedRecord {
 /// view out before it has drawn the trade sizes, leaving each placed trade's
 /// quantity at a placeholder zero; a public slice would let a reader take
 /// that zero for a size. Only the projection in [`UnsizedRecord`] leaves.
+///
+/// A generated placed parent hands its sweep over described, not laid out:
+/// the records are the laid-out prefix (its quote) followed by the sweep's
+/// trades, computed as they are iterated.
 #[derive(Debug, Clone, Copy)]
 pub struct UnsizedParentView<'a> {
     /// The parent's own instant: its first reserved slot.
     pub parent_ts: u64,
     records: &'a [Record],
+    sweep: Option<SweepTrades<'a>>,
     /// The parent's volatility intermediates, when the source traces them.
     pub trace: Option<VolTrace>,
 }
 
-impl UnsizedParentView<'_> {
+impl<'a> UnsizedParentView<'a> {
+    /// A parent whose trades after `records` are the described `sweep`.
+    pub(crate) fn with_sweep(
+        parent_ts: u64,
+        records: &'a [Record],
+        sweep: Option<SweepTrades<'a>>,
+        trace: Option<VolTrace>,
+    ) -> Self {
+        Self {
+            parent_ts,
+            records,
+            sweep,
+            trace,
+        }
+    }
+
     /// Every record the parent emits, in order, quantities left out. Never
-    /// empty.
-    pub fn records(&self) -> impl Iterator<Item = UnsizedRecord> + '_ {
-        self.records.iter().map(UnsizedRecord::from)
+    /// empty. A fresh iterator per call.
+    pub fn records(&self) -> impl Iterator<Item = UnsizedRecord> + 'a {
+        self.records
+            .iter()
+            .map(UnsizedRecord::from)
+            .chain(self.sweep.into_iter().flat_map(|sweep| {
+                sweep.trades().map(|trade| UnsizedRecord::Trade {
+                    ts: trade.ts,
+                    px: trade.px,
+                    side: trade.side,
+                })
+            }))
     }
 
     /// The timestamp of the parent's first record.
     #[must_use]
     pub fn first_ts(&self) -> u64 {
-        self.records[0].ts()
+        self.records().next().expect("a parent emits a record").ts()
     }
 }
 

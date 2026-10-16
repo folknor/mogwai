@@ -226,44 +226,75 @@ Not done from the reports, deliberately:
   are exact only under an ordering contract nobody states, and the forensic
   map is read back by the deferred share and by selection.
 
-## Priority 3. A placed parent as a compact sweep description
+## Priority 3. A placed parent as a compact sweep description (landed)
 
-Report A. Full rewrite of placed-parent internals. Exact for the tape.
+Landed 2026-10-16 (uncommitted at the time of writing), sparred with a fresh
+codex session to consensus and audited by another afterwards. Exact: no tape
+byte moves, so no bump is owed.
 
-Bottleneck. Size decoration is separate from feedback, but feedback is not
-separate from record expansion. `emit_children` walks every child, computes
-its timestamp and price and pushes an undecorated `TradeRec`;
-`advance_parent` then counts and clears them. A consumer wanting only a
-parent's timestamp and count pays for every child record. `LevelSteps`
-already draws a sparse description - geometric gaps between level changes -
-which is then immediately expanded per child.
+What it is now.
 
-Redesign. A resolved parent holds its quote, timestamp and child count, first
-child index, opening level and side, the positions of actual level changes,
-the final level and optional observation data. The serial resolver consumes
-every feedback draw and updates the clock, remembered price and drift without
-expanding the sweep. For a monotone sweep the final price follows from the
-opening level and the number of effective changes, floored at one tick; the
-reserved clock span follows from timestamp, count and fixed stride; legacy
-drift recentering and the repeat state need only the final level. Consumers
-choose what to observe: session-edge resolves feedback and reads the latent
-mid; arrival composition reads timing and count; minute ranges traverse price
-runs, splitting at time boundaries; `realism` generates and quantizes actual
-sizes; the venue reader expands records. One implementation of the stochastic
-parent with several ways to observe it, never a second approximate generator.
-The discrete-book walk keeps its own native result: its quantities and quote
-publications are consequences of execution.
+- `emit_children` drains the sweep's level steps whole
+  (`LevelSteps::drain`, the same gaps in the same order as asking every
+  child) and resolves the sweep with `resolve_sweep` without laying a child
+  out. The levels are monotone and the grid accepts a contiguous range of
+  whole ticks, so the opening and final levels decide every child. On a
+  refusal the children are replayed one by one, in floats, to find the
+  refused child; near `2^53` the closed form is not trusted.
+- A refused sweep leaves the per-child walk's state exactly: the clock at
+  the refused child, and the end-of-sweep state (remembered price, drift)
+  moved only when that child is the last, because `step_child` updated it
+  before checking the last child's price. The one difference is the terminal
+  stream position, since every gap is drawn before the refusal; a refusal is
+  terminal, so nothing reads it.
+- The resolved sweep is a `PlacedSweep` beside the plan. Record readers and
+  sized parent views lay it out (`expand`). `advance_parent`, `skip_parent`
+  and a seek dropping a whole parent never do, and `next_parent_unsized`
+  returns a `SweepTrades`-backed view that computes the trades as it is
+  iterated, each iteration fresh. It is cleared at every resolution attempt.
+- `SweepTrades` is public but built only by a successful resolution, which
+  has proven its invariants.
 
-Payoff. Workloads that do not need children individually move from per-child
-toward per-parent plus actual level changes, and priority 1's quantity-free
-control walk stops paying for record expansion. The plan vector already
-reuses capacity, so the win is expansion and traversal, not allocation.
+The independent reference stays in the tree, test-only: the per-child walk
+(`emit_children_per_child`, `step_child`, `LevelSteps::steps_at`), selected
+per source by a flag. It shares no code with the new resolver. Pins, each
+bite-checked by a text-edit mutation:
+`compact_sweeps_resolve_as_the_per_child_walk_did` (seven fixtures - legacy
+clean, storm, drought, an edge spike, a reopen, the integrated kernel and
+the placed cascade - with 6,000 parents each read through every reader in
+rotation, including a clone after an unsized read, against the reference's
+records and its full boundary state: clock, reopen frontier, child
+reservation, stream position and continuation, latent bits, end-of-sweep
+state); `a_compact_seek_lands_where_the_per_child_walk_lands`;
+`draining_steps_is_asking_every_child` (forced p of 0 and 1, counts 0 and
+1, last-trial steps and terminal overshoots, the stream's continuation as
+well as its position); `a_resolved_sweep_is_the_per_child_walk` (the floor,
+`2^53` from both sides, the mantissa overflow edge, refusals on the first,
+a middle and the last child, saturated instants).
 
-Obligations. Consume the same level-step draws, terminal overshoots included;
-seller behaviour at the floor; child-index reservation and final drift
-recentering; price representability checks and atomic parent refusal;
-boundary-crossing children in minute and window statistics; checkpoint
-replay.
+Measured, release, one binary with the reference flag as the A/B (per
+million parents):
+
+| Walk | `advance_parent`, per-child | compact | unsized view read twice, per-child | compact |
+|---|---|---|---|---|
+| legacy and its regimes | 204 ms | 168 ms | 215 ms | 209 ms |
+| integrated | 220 ms | 184 ms | 230 ms | 224 ms |
+| cascade | 278 ms | 240 ms | 291 ms | 287 ms |
+
+About 35 ns per parent saved, 15 to 18 percent of a parent-skipping walk and
+3 percent of an unsized read; trade-price sums identical between the arms.
+The rest, about 170 ns per parent, is the serial core: the arrival draw,
+the latent update, the side and book, the count and the step gaps. That is
+priority 4's ground. Dev walls barely moved (`realism` 23.8 s,
+`session_edge_spike_lifts_realized_clamp` 8.3 s, the control real-day test
+8.8 s, all single noisy runs): the unoptimized core dominates there.
+
+Not done: report A's run-aware accumulation for the control and 12a
+readers, one update per price run instead of per print. Codex's audit:
+window, lab-halt, session, minute and count-window boundaries can split a
+sweep, and `GeneratedAcc` observes every print forensically, so it needs
+its own design, and at 3 percent of an unsized read the view is not where
+the time is.
 
 ## Priority 4. A serial feedback core with fixed draws per parent, and pure emission
 
