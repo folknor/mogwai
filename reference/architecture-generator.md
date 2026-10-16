@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 35; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 36; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -174,6 +174,20 @@ river's fixed scale (`0.00270000` where it was `0.0027`), the spot lot-snap
 branch that the decimal path never re-rounded now lands on the eight-place
 grid with every other draw, and the fill band's realized volatility reads
 prices through one mantissa-to-float division rather than `Decimal::to_f64`.
+
+Version 36 separates a placed sweep's draws by whether they feed back. The
+level steps do - a sweep's last printed level is what the legacy repeat branch
+re-prices from and what the drift re-centres on - so they stay on the main
+stream, drawn as geometric gaps between steps over the sweep's eligible
+children rather than one coin per child. The sizes and round-lot snaps never
+do, so they leave it: child `i` of a river reads exactly two 64-bit values at
+word position `4 i` of a stream seeded under its own domain tag, the size being the
+lognormal through the normal quantile of an open uniform. Resolution reserves
+every placed parent's child indices; quantities are filled only when a reader
+will see the parent, so checkpoint extensions, `advance_parent` and the
+parents a seek drops draw no size at all, and for a river's fixed size law
+and grid a child's quantity depends on its index alone, not on how its
+parent was read. Every placed tape moves; the discrete-book path is untouched.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

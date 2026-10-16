@@ -239,7 +239,17 @@ pub use trigger::{
 /// `Decimal::to_f64`. No draw moves: every stochastic stage runs in the order
 /// it did. Every generated tape's bytes move, and the protocol-9 oracle is
 /// retired with them.
-pub const TAPE_PROTOCOL_VERSION: u32 = 35;
+/// 36 takes a placed sweep's sizes off the main stream. A child's size and
+/// round-lot snap are, for the river's size law, a function of the seed and the child's global
+/// index, read from a stream of their own (the lognormal through the normal
+/// quantile of an open uniform rather than a rejection sampler), so a parent
+/// nobody reads - a checkpoint extension, `advance_parent`, a seek dropping a
+/// parent short of its target - is skipped at the cost of its feedback draws
+/// alone. The level steps inside a sweep, which do feed back, stay on the main
+/// stream as geometric gaps between steps instead of one coin per child. Every
+/// placed tape moves; a discrete-book parent's draws are untouched, but no
+/// shipped preset carries one.
+pub const TAPE_PROTOCOL_VERSION: u32 = 36;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

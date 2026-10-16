@@ -1331,15 +1331,17 @@ fn clean_regime_is_byte_identical() {
 
     let expected = [
         r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00016711, aggressor: Buyer, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00200000, aggressor: Buyer, ts_event: 1652680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00100000, aggressor: Buyer, ts_event: 1653680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00118992, aggressor: Buyer, ts_event: 1654680 }))"#,
-        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 2085712 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00336870, aggressor: Buyer, ts_event: 1651680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00300000, aggressor: Buyer, ts_event: 1652680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00200000, aggressor: Buyer, ts_event: 1653680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.01494218, aggressor: Buyer, ts_event: 1654680 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 59999.8, ask_px: 59999.9, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1835517 }))"#,
     ];
-    // Re-blessed at tape protocol 35: the same instants, prices, sides and
-    // size values as protocol 34, with sizes now spelled at the river's fixed
-    // eight-place scale (`0.002` reads `0.00200000`).
+    // Re-blessed at tape protocol 36. The first parent's instant, opening
+    // book and child count are the protocol 35 ones, because every stage
+    // that resolves them is unchanged; its level steps and sizes are drawn
+    // differently now, and from the second parent on the main stream carries
+    // neither size draws nor per-child coins, so the walk itself moves.
     let actual: Vec<_> = (0..expected.len())
         .map(|_| format!("{:?}", src.next_tick()))
         .collect();
@@ -1489,7 +1491,6 @@ fn liquidity_drought_imitates_dying_symbol() {
 
 // A 1M-tick walk: see the heavy-walk cfg note at the top of this file.
 #[test]
-#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_localizes() {
     let fp = Fingerprint::from_repo_json();
@@ -2191,22 +2192,24 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     // rather than merely asserted, and this golden keeps it provable across
     // the next edit to either arm.
     //
-    // Compared as values, not as text. Tape protocol 35 records sizes at the
-    // river's fixed scale, so `0.001` now reads `0.00100000`; that is the
-    // spelling moving, and this test's claim is that the draws did not.
+    // Compared as values, not as text. Re-blessed at tape protocol 36, which
+    // replaced the sampler: these are the first twelve children of seed 42's
+    // size stream, so the first four are also the first parent's four sizes
+    // in `clean_regime_is_byte_identical`. The claim kept is that the spot
+    // grid moves no spot draw; the pre-grid values themselves are history.
     const PRE_GRID_HEAD: [&str; 12] = [
-        "0.00289574",
-        "0.00361598",
-        "0.00124550",
-        "0.00334147",
-        "0.001",
-        "0.02185139",
-        "0.002",
-        "0.00272721",
-        "0.00085280",
-        "0.00118992",
-        "0.00643059",
-        "0.003",
+        "0.00336870",
+        "0.00300000",
+        "0.00200000",
+        "0.01494218",
+        "0.00110740",
+        "0.00904890",
+        "0.00085536",
+        "0.00130474",
+        "0.01272536",
+        "0.01969588",
+        "0.00228108",
+        "0.00551194",
     ];
     assert_eq!(default_draws, gridded_draws);
     let pre_grid: Vec<Decimal> = PRE_GRID_HEAD

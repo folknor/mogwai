@@ -37,6 +37,7 @@ mod book;
 mod calendar;
 mod cascade;
 mod checkpoint;
+mod children;
 mod consts;
 mod dynamics;
 mod fingerprint;

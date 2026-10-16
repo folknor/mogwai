@@ -550,6 +550,40 @@ truncation accounting.
 - Not measured: this should move seek, history and checkpoint costs on the
   calendar presets, not the BTCUSDT walls below.
 
+### Priority 4, landed as tape protocol 36
+
+Placed-sweep sizes and lot snaps moved to a size stream addressed by
+global child index (`generated/children.rs`: `SizeStream`, two `u64` per
+child, the lognormal through the AS 241 normal quantile). Per-child
+level-step coins became geometric gaps (`LevelSteps`). Resolution
+reserves child indices; `decorate` fills quantities only before a record
+or parent view is handed out, so skipped, advanced and seek-dropped
+parents draw no size. The discrete-book path is untouched. Sparred with
+codex on the design, the conventions and the diff.
+
+- Re-blessed: the wire-frame oracle, the fill golden (a fresh draw that
+  passes its shape asserts), `clean_regime_is_byte_identical`, the spot
+  size head in `spot_draws_are_bit_identical_across_the_size_grid_change`
+  (its first four draws are the first parent's sizes in the
+  `clean_regime` golden, the cross-check the design predicts), and the
+  Stage A manifest digest. V4 and V5 conformance vectors name the new
+  `level_steps` stage.
+- The gate re-run, 16 seeds per tree in release: every `realism`
+  statistic's seed mean agrees between tapes 35 and 36 to about the third
+  decimal. `realism` itself (seed 42) now fails `abs_return_acf_lag10`
+  at 0.183 against the band's 0.1565 ceiling. That is not this change:
+  the lag-10 seed mean is 0.164 on both tapes, and about half the seeds
+  sit above the ceiling on either. The shipped law sits above its own
+  fingerprint band at lag 10, and seed 42 landed inside it at 35 by
+  chance. Open as fit work; neither the gate nor the band was touched.
+- `the_control_walk_pair_replays_one_tape` became debug-slow. Its pinned
+  day (seed 301) now carries 1.28M parents against 667k at tape 35, while
+  the cost per parent fell. Over seeds 300 to 316 the day count runs from
+  0.50M to 2.37M with a median of 1.21M, so 301 is a typical day; tape
+  35's was a light one. Picking a lighter seed would be choosing a
+  workload, so it is ignored instead.
+- Plain `brokkr check` test time fell from 1m36s to 1m03s.
+
 ### Test changes
 
 - `dwell_is_bounded_across_run_seeds` became eight per-seed tests,
@@ -565,28 +599,32 @@ Each carries an ignore reason beginning `debug-slow:`, so
 debug. `brokkr check --gate` sets `include_ignored`, so the gate still
 runs and times out on these until they are fixed or skip-listed.
 
-| Test | File | Wall | After P1+P2 (tape 35) |
-|---|---|---|---|
-| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 42.0 s | 38.3 s |
-| `session_edge_spike_lifts_realized_clamp` | `crates/mogwai-data/src/generated/tests.rs` | 33.5 s | 27.3 s |
-| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.5 s |
-| `session_edge_spike_localizes` | `crates/mogwai-data/src/generated/tests.rs` | 16.8 s | 13.8 s |
-| `one_walk_serves_every_probe_on_a_symbol` | `crates/mogwai-venue/src/fills.rs` | 34.8 s | 35.8 s |
-| `sweep_pass_walks_only_the_new_span` | `crates/mogwai-venue/src/fills.rs` | 21.0 s | 21.5 s |
+| Test | File | Wall | After P1+P2 (tape 35) | After P3 (f1e0deb) | After P4 (tape 36) |
+|---|---|---|---|---|---|
+| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 42.0 s | 38.3 s | 37.8 s | 35.0 s, and fails (see P4) |
+| `session_edge_spike_lifts_realized_clamp` | `crates/mogwai-data/src/generated/tests.rs` | 33.5 s | 27.3 s | 28.5 s | 24.3 s |
+| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.5 s | 17.3 s | 17.0 s |
+| `session_edge_spike_localizes` | `crates/mogwai-data/src/generated/tests.rs` | 16.8 s | 13.8 s | 14.3 s | 12.5 s, re-enabled |
+| `one_walk_serves_every_probe_on_a_symbol` | `crates/mogwai-venue/src/fills.rs` | 34.8 s | 35.8 s | 36.5 s | 12.5 s, re-enabled |
+| `sweep_pass_walks_only_the_new_span` | `crates/mogwai-venue/src/fills.rs` | 21.0 s | 21.5 s | 21.8 s | 7.5 s, re-enabled |
+| `the_control_walk_pair_replays_one_tape` | `crates/mogwai-lab/src/arrival_control.rs` | - | - | 13.8 s | about 23 s, newly ignored (see P4) |
 
-The re-timing (2026-10-16, one test alone, dev build) says priorities 1 and 2
-did not move these walls much: they are dominated by draws, not by
-materialization. The venue pair walks a day of BTCUSDT from the origin to
-reach `TEST_ORIGIN`, and that reach now resolves every child's draws just as
-before. Priority 4 (counter-addressed sizes off the serial stream, geometric
-level steps) is the lever that reaches them.
+Priorities 1 and 2 did not move these walls much, being dominated by
+draws. Priority 4 took the venue pair under the watchdog: their reach to
+`TEST_ORIGIN` is checkpoint extension, which no longer draws sizes.
 
-`realism` has a measured floor: its 2M parents' draws alone take 22.5 s
-through `advance_parent`, so no materialization fix brings it under the
-watchdog. Its lag-50 autocorrelations need one continuous series, so it
-cannot be split the way the dwell arms were. Options are a split into
-shorter multi-seed arms after measuring their margins, a release sweep
-inside the gate, or priority 4.
+What remains, and why priority 4 cannot reach it:
+
+- `realism` and the two `session_edge_spike` walks read every trade
+  through `next_tick`, so they decorate every child and pay the sizes
+  either way; their floor is the serial GARCH and arrival draws.
+  `realism` also needs one continuous series for its lag-50
+  autocorrelations. The options left are a split into shorter
+  multi-seed arms after measuring their margins, or a release sweep.
+- `shipped_garch_rails_sit_above_the_clean_tail` drives the bare GARCH
+  recursion, 16M updates, with no source walk at all.
+- `the_control_walk_pair_replays_one_tape` walks a full MNQ day twice;
+  sharing one walk between its two passes is the structural fix.
 
 ### Failing under the gate, not timing out
 
@@ -607,13 +645,12 @@ reach) in an unoptimized dev build. Not yet confirmed.
 
 ### Near the watchdog, still enabled
 
-Walls from `brokkr check --timings`, under the check's parallel load:
+Walls from `brokkr check --timings`, under the check's parallel load,
+measured before priority 4 and not re-measured since:
 
-- `arrival_control::tests::the_control_walk_pair_replays_one_tape`
-  (`crates/mogwai-lab/src/arrival_control.rs`): 17.7 s instrumented,
-  17.2 s workspace.
 - `r#gen::tests::protocol9_tape_oracle`
-  (`crates/mogwai-cli/src/gen.rs`): 14.6 s.
+  (`crates/mogwai-cli/src/gen.rs`, now `generated_tape_wire_frame_oracle`):
+  14.6 s.
 - In `crates/mogwai-venue/src/fills.rs`, all between 13.5 s and 14.5 s:
   `a_resident_window_serves_a_miss_walk_free_and_walk_identical`,
   `a_walk_stops_once_every_scan_has_triggered`,

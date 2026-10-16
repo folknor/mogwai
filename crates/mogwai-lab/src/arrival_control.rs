@@ -828,12 +828,16 @@ mod tests {
     /// pins step ordering and needs only that the run reach its gates, whereas
     /// this pin's content is that two passes agree over the tape they walked.
     ///
-    /// It is not `#[ignore]`d and does not want to be: it measures comfortably
-    /// inside the per-test watchdog in every sweep. No number is pinned here on
-    /// purpose - a wall stated in a doc comment has to be re-measured forever to
-    /// stay true, which is the same ground on which a stale cost string was
-    /// once deleted from the tape oracle in `mogwai-cli`'s `gen` module.
+    /// Its cost is proportional to the parents the pinned day carries, and the
+    /// cascade's day count is heavy-tailed: over seeds 300 to 316 at tape
+    /// protocol 36 it runs from about half a million to well over two
+    /// million, and seed 301's day sits at that set's median. It was under
+    /// the per-test watchdog only while the realization gave it a light day,
+    /// so choosing a lighter seed would be choosing a workload, not a pin; it
+    /// is ignored instead, and the gate that includes ignored tests still
+    /// runs it.
     #[test]
+    #[ignore = "debug-slow: two full passes over one MNQ session day; a median-count day exceeds the per-test watchdog in a dev build"]
     fn the_control_walk_pair_replays_one_tape() {
         let binding = GeneratedBinding {
             window_start_ns: 1_782_856_800_000_000_000,

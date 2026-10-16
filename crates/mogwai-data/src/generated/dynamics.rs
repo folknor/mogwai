@@ -291,7 +291,7 @@ pub(super) struct BounceState {
     /// Same-direction on-grid drift, in ticks, applied on top of the latent mid
     /// in `next_price`. `next_drift` steps it by one tick inside the high
     /// regime, exactly as before the raw-fill cadence rewrite, but it is no
-    /// longer an unbounded accumulation: `GeneratedSource::next_child` resets
+    /// longer an unbounded accumulation: `GeneratedSource::step_child` resets
     /// it at the end of every parent sweep to `DRIFT_RECENTER_FRAC` of the
     /// residual between the sweep's last printed level and the latent mid. The
     /// long-run un-tethering the print-layer generator documented here is

@@ -37,7 +37,7 @@ use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, decimal_to_f64
 use rand::distr::{Bernoulli, OpenClosed01};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
+use rand_distr::{ChiSquared, Distribution, Normal, Weibull};
 use rust_decimal::Decimal;
 
 use crate::record::{
@@ -54,6 +54,7 @@ use super::calendar::{CompiledCalendar, SessionCalendar};
 use super::cascade::{
     CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
 };
+use super::children::{LevelSteps, SizeStream};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -110,7 +111,6 @@ struct RiverSpec {
     duration_dist: Weibull<f64>,
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
-    size_dist: LogNormal<f64>,
     prices: PriceGrid,
     sizes: SizeQuantizer,
     /// The configured top-of-book sizes and the size increment as quantity
@@ -197,6 +197,26 @@ pub struct GeneratedSource {
     /// Whether any parent has been resolved or attempted. Sticky, so a source
     /// that has drawn can never read as fresh; `with_surge` refuses one.
     resolved_any: bool,
+    /// The global index of the next placed child. Advanced at resolution by
+    /// every placed parent's child count, on every path - emitted, skipped or
+    /// dropped - and never by decoration, so a child's index, and so its
+    /// size, does not depend on how the parent was read.
+    next_child: u64,
+    /// The resolved parent's first child index, and whether its trade
+    /// quantities have been filled. A placed plan resolves undecorated; a
+    /// discrete-book plan carries its own quantities and resolves decorated.
+    plan_first_child: u64,
+    plan_decorated: bool,
+    /// The size decoration's stream. For the river's fixed size law, a
+    /// child's size draw is a function of the seed and its index, so where this stream happens to sit is never
+    /// state the tape depends on - `decorate` positions it at each parent's
+    /// first child - and keeping it here only saves repositioning it between
+    /// consecutive decorated parents.
+    size_stream: SizeStream,
+    /// Test-only cursor for `next_size`, which samples the river's size law
+    /// from indices of its own.
+    #[cfg(test)]
+    size_probe: u64,
     /// The resolved parent's records, in emission order, and how many a
     /// reader has taken. Reused across parents, so its capacity is the
     /// high-water parent footprint and never more than `MAX_PARENT_RECORDS`.
@@ -314,51 +334,28 @@ pub struct VolTrace {
     pub mid_after: f64,
 }
 
-/// The per-child and per-parent coins whose probabilities are fixed for a
-/// source's life, built once. `random_bool(p)` is `Bernoulli::new(p)` plus
-/// one sample, so sampling these draws exactly what the per-call form drew.
-/// The level-step coins are the three values `step_child` selects between,
-/// each computed by the expression that used to run per child.
+/// The probabilities fixed for a source's life, built once: the legacy
+/// walk's price-repeat coin, and the three level-step probabilities a placed
+/// sweep selects between, each computed by the expression that used to run
+/// per child.
 #[derive(Clone, Copy)]
 struct ChildCoins {
-    size_snap: Bernoulli,
     price_repeat: Bernoulli,
-    level_step_cascade: Bernoulli,
-    level_step_high: Bernoulli,
-    level_step_low: Bernoulli,
+    level_step_cascade: f64,
+    level_step_high: f64,
+    level_step_low: f64,
 }
 
 impl ChildCoins {
-    fn new(size_round_frac: f64, level_step_prob: f64) -> Self {
-        let coin = |p: f64| Bernoulli::new(p).expect("probability validated into [0, 1]");
+    fn new(level_step_prob: f64) -> Self {
         Self {
-            size_snap: coin(size_round_frac),
-            price_repeat: coin(EVENT_PRICE_REPEAT_PROB),
-            level_step_cascade: coin(level_step_prob),
-            level_step_high: coin((level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)),
-            level_step_low: coin(level_step_prob * LOW_REGIME_LEVEL_STEP_MULT),
+            price_repeat: Bernoulli::new(EVENT_PRICE_REPEAT_PROB)
+                .expect("probability validated into [0, 1]"),
+            level_step_cascade: level_step_prob,
+            level_step_high: (level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0),
+            level_step_low: level_step_prob * LOW_REGIME_LEVEL_STEP_MULT,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-struct SizeDraw {
-    base: f64,
-    lot_snap: bool,
-}
-
-/// Everything one child print needs, captured at the instant the child is
-/// stochastically resolved.
-///
-/// `price_ticks` is carried rather than re-read from `self.burst` after the
-/// fact. The two agree today only because `step_child`'s tail happens not to
-/// touch `price_ticks`, and a future change to that tail - the sweep-end
-/// re-centring is already there and already writes neighbouring fields - would
-/// otherwise silently move every child's printed price by one step.
-#[derive(Clone, Copy)]
-struct ChildDraw {
-    size: SizeDraw,
-    price_ticks: f64,
 }
 
 impl SizeGrid {
@@ -769,8 +766,12 @@ impl GeneratedSource {
         // mixing quote currency with contracts, that made a field called
         // "typical" denote the arithmetic mean of a strongly skewed law.
         let size_median = decimal_to_f64(scalars.latent_size_median).max(f64::MIN_POSITIVE);
-        let size_dist =
-            LogNormal::new(size_median.ln(), scalars.size_log_sigma).expect("valid lognormal");
+        let size_stream = SizeStream::new(
+            seed,
+            size_median,
+            scalars.size_log_sigma,
+            scalars.size_round_frac,
+        );
         let shape = SweepShape::new(
             scalars.children_mean,
             scalars.children_single_frac,
@@ -791,7 +792,7 @@ impl GeneratedSource {
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         let tick_f64 = decimal_to_f64(scalars.modal_tick);
-        let coins = ChildCoins::new(scalars.size_round_frac, shape.level_step_prob);
+        let coins = ChildCoins::new(shape.level_step_prob);
         let sizes = SizeQuantizer::new(
             scale.size_dp(),
             size_grid.integral,
@@ -873,7 +874,6 @@ impl GeneratedSource {
             duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
-            size_dist,
             prices: PriceGrid { tick_mantissa },
             sizes,
             top_bid_units,
@@ -889,6 +889,12 @@ impl GeneratedSource {
             rng,
             clock_ns: start_ts,
             resolved_any: false,
+            next_child: 0,
+            plan_first_child: 0,
+            plan_decorated: true,
+            size_stream,
+            #[cfg(test)]
+            size_probe: 0,
             plan: Vec::new(),
             cursor: 0,
             plan_parent_ts: start_ts,
@@ -1210,22 +1216,36 @@ impl GeneratedSource {
         (side, book)
     }
 
-    fn draw_size(&mut self) -> SizeDraw {
-        let base = self
-            .spec
-            .size_dist
-            .sample(&mut self.rng)
-            .max(f64::MIN_POSITIVE);
-        let lot_snap = self.rng.sample(self.spec.coins.size_snap);
-        SizeDraw { base, lot_snap }
-    }
-
+    /// One size from the river's size law, at test-only indices of its own,
+    /// for the gates that pin the sampler.
     #[cfg(test)]
     pub(super) fn next_size(&mut self) -> Decimal {
-        let draw = self.draw_size();
+        let mut stream = self.size_stream.clone();
+        stream.seek(self.size_probe);
+        self.size_probe += 1;
+        let draw = stream.draw();
         self.spec
             .scale
             .size(self.spec.sizes.quantize(draw.base, draw.lot_snap))
+    }
+
+    /// Fill the resolved plan's placed-trade quantities from the size
+    /// stream, positioned at the parent's first child, once. Every reader
+    /// that hands out a record or a parent view calls it first, so no
+    /// undecorated trade escapes; a discrete-book plan resolves decorated
+    /// and is never touched, its quantities being the book's own.
+    fn decorate(&mut self) {
+        if self.plan_decorated {
+            return;
+        }
+        self.size_stream.seek(self.plan_first_child);
+        for record in &mut self.plan {
+            if let Record::Trade(trade) = record {
+                let draw = self.size_stream.draw();
+                trade.qty = self.spec.sizes.quantize(draw.base, draw.lot_snap);
+            }
+        }
+        self.plan_decorated = true;
     }
 
     /// A price coordinate in ticks as a record mantissa, or the terminal
@@ -1269,21 +1289,54 @@ impl GeneratedSource {
         }))
     }
 
-    /// Step every child of the sweep just begun and append its trade records.
-    /// The sweep is the parent's own: it starts and ends inside this call,
-    /// because a parent always resolves whole.
+    /// Step every child of the sweep just begun and append its trade records,
+    /// their quantities left for `decorate`. The sweep is the parent's own: it
+    /// starts and ends inside this call, because a parent always resolves
+    /// whole. Its children's global indices are reserved here, whether or not
+    /// anyone ever reads their sizes.
     fn emit_children(&mut self, mut burst: SweepBurst) -> Result<(), TickFault> {
+        self.plan_first_child = self.next_child;
+        self.next_child = self
+            .next_child
+            .checked_add(u64::from(burst.remaining))
+            .expect("the child index space is not exhausted");
+        self.plan_decorated = false;
+        let mut steps = LevelSteps::new(self.level_step_prob(), burst.remaining, &mut self.rng);
         while burst.remaining > 0 {
-            let draw = self.step_child(&mut burst);
+            let price_ticks = self.step_child(&mut burst, &mut steps);
             let record = Record::Trade(TradeRec {
                 ts: self.clock_ns,
-                px: self.price(draw.price_ticks)?,
-                qty: self.spec.sizes.quantize(draw.size.base, draw.size.lot_snap),
+                px: self.price(price_ticks)?,
+                qty: 0,
                 side: burst.side,
             });
             self.plan.push(record);
         }
         Ok(())
+    }
+
+    /// The level-step probability of the sweep about to be placed. The bounce
+    /// regime never steps on the cascade path, so its low multiplier would pin
+    /// the level step at a third of the fitted probability for good; the
+    /// cascade takes the solved probability as it is (tape protocol 33). A
+    /// real multi-print parent on CME is a multi-level parent nine times in
+    /// ten, because a trade summary is one print per level. On the bounce
+    /// walks the regime is fixed for the whole sweep: it moves once per
+    /// parent, in `next_side`, before the sweep begins.
+    fn level_step_prob(&self) -> f64 {
+        let coins = &self.spec.coins;
+        match &self.walk {
+            Walk::Cascade(_) => coins.level_step_cascade,
+            Walk::Legacy(LegacyWalk { bounce, .. })
+            | Walk::Integrated(IntegratedWalk { bounce, .. }) => {
+                if bounce.high_regime {
+                    coins.level_step_high
+                } else {
+                    coins.level_step_low
+                }
+            }
+            Walk::CascadeBook(_) => unreachable!("the discrete book places no sweep"),
+        }
     }
 }
 
@@ -1363,6 +1416,7 @@ impl RiverSource for GeneratedSource {
         if self.cursor == self.plan.len() {
             self.resolve_parent().ok()?;
         }
+        self.decorate();
         let record = self.plan[self.cursor];
         #[cfg(test)]
         {
@@ -1413,6 +1467,7 @@ impl ParentSource for GeneratedSource {
             "next_parent called mid-parent, after a partial record read"
         );
         self.resolve_parent().ok()?;
+        self.decorate();
         // Consumed whole: the next call clears it before resolving.
         self.cursor = self.plan.len();
         Some(ParentView {
@@ -1479,6 +1534,9 @@ impl GeneratedSource {
         self.plan.clear();
         self.cursor = 0;
         self.plan_trades = 0;
+        // A placed sweep clears this as it reserves its children; a
+        // discrete-book parent's quantities are written at resolution.
+        self.plan_decorated = true;
         match self.begin_event() {
             Ok(()) => {
                 assert!(
@@ -2147,6 +2205,10 @@ impl GeneratedSource {
         let quote = self.placed_quote(&book)?;
         self.plan.push(quote);
         legacy(&mut self.walk).last_book = Some(book);
+        // The sweep's level-step gaps, the last main-stream stage of a parent
+        // since tape protocol 36; sizes are drawn from their own stream.
+        #[cfg(test)]
+        self.draw_stages.push("level_steps");
         self.emit_children(SweepBurst {
             remaining: count,
             emitted: 0,
@@ -2156,28 +2218,11 @@ impl GeneratedSource {
         })
     }
 
-    /// One child of a placed sweep: the level step, the instant, the size.
-    fn step_child(&mut self, burst: &mut SweepBurst) -> ChildDraw {
-        // The bounce regime never steps on the cascade path, so its low
-        // multiplier would pin the level step at a third of the fitted
-        // probability for good; the cascade takes the solved probability as
-        // it is (tape protocol 33). A real multi-print parent on CME is a
-        // multi-level parent nine times in ten, because a trade summary is
-        // one print per level.
-        let coins = &self.spec.coins;
-        let level_step = match &self.walk {
-            Walk::Cascade(_) => coins.level_step_cascade,
-            Walk::Legacy(LegacyWalk { bounce, .. })
-            | Walk::Integrated(IntegratedWalk { bounce, .. }) => {
-                if bounce.high_regime {
-                    coins.level_step_high
-                } else {
-                    coins.level_step_low
-                }
-            }
-            Walk::CascadeBook(_) => unreachable!("the discrete book places no sweep"),
-        };
-        if burst.emitted > 0 && self.rng.sample(level_step) {
+    /// One child of a placed sweep: the level step, the floor, the instant.
+    /// Returns the level it prints at. A step landing while the price sits on
+    /// the one-tick floor still counts, and still consumed its draw.
+    fn step_child(&mut self, burst: &mut SweepBurst, steps: &mut LevelSteps) -> f64 {
+        if steps.steps_at(burst.emitted, &mut self.rng) {
             match burst.side {
                 AggressorSide::Buyer => burst.price_ticks += 1.0,
                 AggressorSide::Seller => burst.price_ticks -= 1.0,
@@ -2188,10 +2233,7 @@ impl GeneratedSource {
         self.clock_ns = burst
             .parent_ts_ns
             .saturating_add(u64::from(burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
-        let draw = ChildDraw {
-            size: self.draw_size(),
-            price_ticks: burst.price_ticks,
-        };
+        let price_ticks = burst.price_ticks;
         burst.remaining -= 1;
         burst.emitted += 1;
         if burst.remaining == 0 {
@@ -2214,6 +2256,6 @@ impl GeneratedSource {
                 Walk::Cascade(_) | Walk::CascadeBook(_) => {}
             }
         }
-        draw
+        price_ticks
     }
 }

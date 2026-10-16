@@ -1,17 +1,17 @@
 {
-  "blessed_at_tape_protocol_version": 35,
+  "blessed_at_tape_protocol_version": 36,
   "entries": {
     "BTCUSDT-42": {
-      "fnv1a64": "deb071ae8fd149e0",
-      "records": 1231078
+      "fnv1a64": "dee97891ff50a883",
+      "records": 1170466
     },
     "BTCUSDT-42-surged": {
-      "fnv1a64": "28e901320564213c",
-      "records": 1432015
+      "fnv1a64": "cd41fa6436be912b",
+      "records": 1375756
     },
     "BTCUSDT-7": {
-      "fnv1a64": "bc9a94409d9b20f2",
-      "records": 1181037
+      "fnv1a64": "92c7fed4890f0812",
+      "records": 1216779
     }
   },
   "hash": "fnv1a64 over the concatenated RecordScale::write_frame VenueMessage JSON frames, one per record drawn by next_record",
