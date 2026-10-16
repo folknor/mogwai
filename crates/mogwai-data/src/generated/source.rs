@@ -85,9 +85,10 @@ use super::session::SessionModulator;
 /// it.
 pub const MAX_PARENT_RECORDS: usize = CHILD_CAP as usize + 2;
 
-/// The main stream's domain: every walk's feedback draws come from the
-/// river's [`TapeRng`] in this domain, beside the cadence, size, step, book
-/// and reporting domains, each at counter addresses of its own.
+/// The main stream's domain: the bounce walks' feedback draws come from the
+/// river's [`TapeRng`] in this domain, beside the cadence, size, step, book,
+/// reporting and cascade domains, each at counter addresses of its own. The
+/// cascade reads none of it (tape protocol 39).
 const MAIN_STREAM_TAG: u64 = 0x6D61_696E_7374_7233;
 
 /// Everything about a river that is fixed once it is built: the config, the
@@ -224,9 +225,9 @@ pub struct GeneratedSource {
     /// first child - and keeping it here only saves repositioning it between
     /// consecutive decorated parents.
     size_stream: SizeStream,
-    /// The bounce walks' level-step gaps, addressed by child index like the
-    /// sizes, so the main stream takes a fixed number of words per parent.
-    /// The cascade still draws its steps from the main stream.
+    /// Every placed walk's level-step gaps, addressed by child index like the
+    /// sizes, so no walk's per-parent draw depends on its sweep: the bounce
+    /// walks since tape protocol 37, the cascade since 39.
     step_stream: StepStream,
     /// Test-only cursor for `next_size`, which samples the river's size law
     /// from indices of its own.
@@ -801,18 +802,17 @@ impl GeneratedSource {
             drift_dir: 1,
             drift_hot: false,
         };
-        let mut rng = TapeRng::new(seed, MAIN_STREAM_TAG);
-        // The walk's mode, in `begin_event`'s old dispatch order. The
-        // cascade's components start from their stationary law, which costs
-        // main-stream draws only on a cascade source: a calendar-less source
-        // takes exactly the draws it always did. The discrete book takes no
-        // main-stream draw: its streams are derived from the seed under their
-        // own domain tags, so a book preset's cascade realization is
+        let rng = TapeRng::new(seed, MAIN_STREAM_TAG);
+        // The walk's mode, in `begin_event`'s old dispatch order. The cascade
+        // reads none of the main stream (tape protocol 39): its draws live in
+        // domains of their own, its components' stationary start included.
+        // The discrete book's streams are derived from the seed under their
+        // own domain tags too, so a book preset's cascade realization is
         // byte-identical to the same preset without a book. The book opens
         // around the start-price anchor at the first phase row's knobs.
         let walk = match (&cascade, &scalars.book, cadence.kernel) {
             (Some(tables), book, _) => {
-                let state = CascadeState::new(tables, &mut rng, start_ts);
+                let state = CascadeState::new(tables, seed, start_ts);
                 match book {
                     Some(config) => {
                         let anchor_ticks = decimal_to_f64(scalars.start_price) / tick_f64;
@@ -1294,14 +1294,8 @@ impl GeneratedSource {
             return Ok(());
         }
         let p = self.level_step_prob();
-        if self.steps_on_main_stream() {
-            let rng = &mut self.rng;
-            let mut word = || rng.random::<u64>();
-            LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
-        } else {
-            let mut word = self.step_stream.from(self.plan_first_child);
-            LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
-        }
+        let mut word = self.step_stream.from(self.plan_first_child);
+        LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
         match resolve_sweep(
             burst.price_ticks,
             burst.side,
@@ -1405,16 +1399,9 @@ impl GeneratedSource {
             .expect("the child index space is not exhausted");
         self.plan_decorated = false;
         // The gaps' word source, taken out for the walk so `step_child` can
-        // take `self` whole; a main stream taken out is put back after it.
-        let on_main = self.steps_on_main_stream();
-        let mut main = self.rng.clone();
+        // take `self` whole.
         let p = self.level_step_prob();
-        let step_words = self.step_stream.from(self.plan_first_child);
-        let mut word: Box<dyn FnMut() -> u64 + '_> = if on_main {
-            Box::new(|| main.random::<u64>())
-        } else {
-            Box::new(step_words)
-        };
+        let mut word = self.step_stream.from(self.plan_first_child);
         let mut steps = LevelSteps::new(p, burst.remaining, &mut word);
         let mut emitted = 0;
         let mut outcome = Ok(());
@@ -1433,17 +1420,7 @@ impl GeneratedSource {
                 }
             }
         }
-        drop(word);
-        if on_main {
-            self.rng = main;
-        }
         outcome
-    }
-
-    /// Whether this walk's level-step gaps are drawn from the main stream:
-    /// the cascade's are; the bounce walks' come from the step stream.
-    fn steps_on_main_stream(&self) -> bool {
-        matches!(self.walk, Walk::Cascade(_))
     }
 
     /// The level-step probability of the sweep about to be placed. The bounce
@@ -1947,14 +1924,14 @@ impl GeneratedSource {
                 vol_mult: self.regime.vol_mult(self.clock_ns),
             };
             if let Err(CascadeRefusal::ClockExhausted) =
-                state.fill_next_bucket(tables, &mut self.rng, self.clock_ns, modifiers)
+                state.fill_next_bucket(tables, self.clock_ns, modifiers)
             {
                 return Err(TickFault::CascadeClockExhausted {
                     clock_ns: self.clock_ns,
                 });
             }
         }
-        let parent = state.draw_parent(tables, &mut self.rng, self.clock_ns);
+        let parent = state.draw_parent(tables, self.clock_ns);
         self.clock_ns = parent.ts_ns;
         let mut log_move = parent.log_move;
         // An armed `ReopenGap` is the unscheduled jump on top of the
@@ -2031,10 +2008,14 @@ impl GeneratedSource {
         );
         let aggressor = parent.side;
         let price_ticks = placed_trade_ticks(&book, aggressor, self.spec.trade_bounce_ticks);
+        // The sweep's count from the parent packet's two words. A surge
+        // rescales the mixture on a local shape, whose accounting is its own,
+        // as the scaled draw always kept it.
+        let [branch, geometric] = parent.count_words;
         let count = if children_mult == 1.0 {
-            self.shape.next_count(&mut self.rng)
+            mixture_count(&mut self.shape, branch, geometric)
         } else {
-            self.shape.next_count_scaled(children_mult, &mut self.rng)
+            mixture_count(&mut self.shape.scaled(children_mult), branch, geometric)
         };
         self.plan_parent_ts = self.clock_ns;
         let quote = self.placed_quote(&book)?;

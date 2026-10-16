@@ -364,8 +364,7 @@ enable, below. Still open:
 - A cheaper main-stream generator: landed as priority 4b below, for the
   dev-build cost rather than the release one.
 - Parallel size decoration for `realism`.
-- The cascade's fixed-draw core: its t draw has configurable degrees of
-  freedom, so it needs the gamma path for odd ones.
+- The cascade's fixed-draw core: landed as priority 4c below.
 
 ## Priority 4b. One counter-based generator for every tape stream (landed)
 
@@ -439,6 +438,85 @@ Found on the way, open:
   ziggurat-plus-gamma t(4) through `draw_student_t`, not the fixed-word
   `student_t4` the bounce walks ship. Same law, different sampler; worth
   aligning when that harness is next touched.
+
+## Priority 4c. The cascade's fixed-draw core (landed)
+
+Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 39.
+Designed in a codex spar, two rounds to consensus, and audited by a fresh
+session afterwards; the audit found no production defect and four test and
+comment gaps, all closed.
+
+What it is now. The cascade reads no main-stream word. Its draws live in
+seven `TapeRng` domains: init, component step, window, jump, immigrant,
+offspring and parent. Each unit reads a fixed number of words from its own
+domain, so its position is an allocation count:
+
+- a component step reads `K + 1 + 2L` words, on every one-second step and
+  every closure crossing;
+- an evaluated window reads two, empty or not, jumps declared or not;
+- a jump reads two;
+- an immigrant reads one, per staging, not per parent;
+- an offspring reads one, dropped ones included;
+- a parent reads a fixed packet, every word drawn whatever branch runs: one
+  count per kernel, the t words, the gap pair, the repeat coin, the slot,
+  the renewal side and Pareto, and the sweep's branch and geometric words.
+
+Every transform is rejection-free (`draws.rs`):
+
+- normals are the AS 241 quantile;
+- Poisson counts invert one uniform: from zero below a rate of 30, outward
+  from the mode above it, using Loader's saddle-point pmf;
+- the old `min(Poisson, 1e6)` law is kept, with a shortcut to the ceiling
+  where a Chernoff bound puts the rest below `1e-30`, subnormal tails
+  retired, and a mode residual rule;
+- the t takes an integer `student_df` in 3 to 64. That is a contract
+  change: a fractional value is now refused. MNQ ships 4.
+
+The cascade's level steps moved to the step stream, and the discrete-book
+path leaves the sweep words unread. Two contracts were settled in the spar.
+An armed halt still does not age the components; that is now stated at
+`reset_bucket` and pinned. Counters are allocations, never rewound.
+
+Pins, each bite-checked by a text-edit mutation:
+
+- `every_unit_allocates_its_fixed_stride`: words against units counted at
+  the call sites, at df 4 and 5, jumps on and off;
+- `a_clone_mid_walk_continues_exactly`;
+- `a_reset_spends_and_rewinds_nothing`;
+- `student_df_is_an_integer_in_its_range`;
+- `poisson_inversion_partitions_the_unit_interval_by_the_law`: grid
+  partition against an independent pmf, both search orders, the threshold,
+  and the ceiling fold;
+- `poisson_inversion_handles_its_edges`;
+- `integer_t_has_its_variance`: variance and symmetry, df 9 and 10.
+
+Every cascade statistical test passes on the new draws: the mean rate,
+closures, sign memory, propagator and gap tests in `cascade.rs`, and the
+MNQ preset and lab tests in the plain lane. The bounce walks are
+byte-identical: the BTCUSDT oracle and the fill golden did not move.
+Re-blessed: the cascade hashes and the stage-A manifest.
+
+Measured, `advance_parent` per million MNQ cascade parents, one binary
+each, tape 38 against tape 39:
+
+| Build | Tape 38 | Tape 39 |
+|---|---|---|
+| release | 350 ms | 364 ms |
+| dev | 1.68 s | 1.86 s |
+
+Break-even to slightly slower, as tape 37 was for the bounce walks. The
+fixed packet draws words a parent does not use, and the gain is in the
+batching the fixed addresses now permit, not taken here by owner
+instruction. The near-watchdog `fills.rs` and boatyard tests measured
+about 1.3 s each in dev on the new tree, so that stale list has cleared.
+
+Found on the way, open:
+
+- `arrival_screen_layer1_reproduces_the_committed_12a_generated_blocks`
+  (gate lane) fails with a `projected_child_inside_closed_halt_segment`
+  screen refusal at seed 1. It fails identically at tape 37, 38 and 39, so
+  it predates this work. It compares against `analysis/mnq-measure-12a.json`,
+  last regenerated 2026-08-06. Filed in `notes/todo.md`.
 
 The reports' original framing, kept for the open items:
 

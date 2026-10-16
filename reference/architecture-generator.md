@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 38; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 39; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -228,6 +228,34 @@ a legacy parent's 4.15 microseconds, and that kept the heavy test walks past
 the per-test watchdog. Every generated tape moves, the cascade presets
 included, and `ARRIVAL_KERNEL_VERSION` went to 4 with the cadence stream. The
 session-segment composer still draws from ChaCha12 and does not move.
+
+Version 39 gives the activity cascade the fixed-word core the bounce walks
+got at 37. The cascade reads no main-stream word any more. Its draws live
+in seven `TapeRng` domains of the river - initialisation, component steps,
+windows, jumps, immigrants, offspring and parents - and each unit of work
+reads a fixed number of words from its own domain. So a unit's words sit at
+a position decided by how many units of its kind came before. That count
+is an allocation count along the trajectory: an empty window, an offspring
+dropped past the heap ceiling and a staged immigrant a halt discards all
+keep their words spent, and no counter is rewound. Every transform is free
+of rejection:
+
+- a normal is the AS 241 quantile of an open uniform;
+- a Poisson count is one uniform inverted in a fixed enumeration order,
+  from zero below a rate of 30 and outward from the mode (Loader's
+  saddle-point probability there) above it;
+- the old `min(Poisson, 1e6)` law is kept, with a shortcut to the ceiling
+  at rates where the Chernoff bound puts the rest below `1e-30`;
+- the Student-t needs an integer `student_df` from 3 to 64, so a fractional
+  one is now refused, and is a normal over the root of `-2` times a sum of
+  logs of uniforms, plus a squared normal when the degrees are odd.
+
+A parent's packet draws every word whether or not its branch runs - the gap
+pair, the slot renewal, the sweep's two count words - and the discrete-book
+path, which sizes its parents its own way, leaves the count words unread.
+The cascade's level steps move to the child-indexed step stream. An armed
+halt still does not age the components, and that is now stated where it
+happens. Every MNQ and MES tape moves; the bounce walks are byte-identical.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

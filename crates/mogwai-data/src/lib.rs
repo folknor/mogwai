@@ -271,7 +271,20 @@ pub use trigger::{
 /// random rotations of one sequence. Every generated tape moves, cascade
 /// presets included; the session-segment composer keeps its ChaCha stream
 /// and does not move.
-pub const TAPE_PROTOCOL_VERSION: u32 = 38;
+/// 39 gives the activity cascade a fixed-word core. Its draws leave the main
+/// stream for seven `TapeRng` domains of their own - initialisation,
+/// component steps, windows, jumps, immigrants, offspring and parents - each
+/// unit reading a fixed number of words at a position its allocation count
+/// decides, every transform free of rejection: normals as the quantile of an
+/// open uniform, Poisson counts by inversion of one uniform (capped at the
+/// old ceiling), the Student-t from an integer `student_df` as a normal over
+/// the root of `-2` times a sum of logs, plus a squared normal when the
+/// degrees are odd. A parent's packet draws every word whether or not its
+/// branch runs - the gap pair, the slot renewal, the sweep's count words -
+/// and the cascade's level steps move to the child-indexed step stream. A
+/// fractional `student_df` is refused. Every MNQ and MES tape moves; the
+/// bounce walks are byte-identical.
+pub const TAPE_PROTOCOL_VERSION: u32 = 39;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

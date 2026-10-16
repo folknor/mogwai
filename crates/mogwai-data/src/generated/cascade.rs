@@ -78,15 +78,14 @@ use std::collections::BinaryHeap;
 
 use crate::TapeRng;
 use mogwai_protocol::AggressorSide;
-use rand::RngExt;
-use rand_distr::{ChiSquared, Distribution, Normal, Poisson};
 use serde::Deserialize;
 
 use std::sync::Arc;
 
 use super::calendar::CompiledCalendar;
+use super::children::{half_open_unit, normal_quantile, open_unit};
 use super::consts::INTRA_EVENT_STEP_NS;
-use super::dynamics::draw_student_t;
+use super::draws::{POISSON_CEILING, coin, poisson_inverse, student_t_integer, unit_exponential};
 use super::fingerprint::ScalarError;
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
@@ -97,8 +96,32 @@ const MINUTES_PER_WEEK: u64 = 7 * 24 * 60;
 pub const MAX_CASCADE_COMPONENTS: usize = 8;
 /// Ceiling on the parents drawn into one second. A rate this high is a
 /// misconfiguration, not a market; the cap keeps a runaway texture draw from
-/// owing a million-child second to the venue.
-const MAX_PARENTS_PER_SECOND: f64 = 1_000_000.0;
+/// owing a million-child second to the venue. It is also the Poisson draws'
+/// own ceiling, so the rate clamp and the count clamp are one number.
+const MAX_PARENTS_PER_SECOND: f64 = POISSON_CEILING;
+/// The supported Student-t degrees of freedom: integers, so the chi-squared
+/// is a fixed number of uniforms with no rejection (tape protocol 39). The
+/// lower end keeps the variance finite; the upper bounds the parent packet.
+const STUDENT_DF_RANGE: std::ops::RangeInclusive<u32> = 3..=64;
+
+/// The cascade's [`TapeRng`] domains (tape protocol 39). Each unit of work
+/// reads a fixed number of words from its own domain, so where a unit's
+/// words sit is a pure function of how many units of its kind came before:
+/// an allocation count along the trajectory, not wall time and not the
+/// printed-parent index. Work drawn and later discarded - an empty window,
+/// an offspring past the heap ceiling, a staged immigrant a halt drops -
+/// keeps its words spent; no counter is ever rewound.
+const INIT_DOMAIN: u64 = 0x6361_7369_6E69_7439;
+const COMPONENT_DOMAIN: u64 = 0x6361_7363_6F6D_7039;
+const WINDOW_DOMAIN: u64 = 0x6361_7377_696E_6439;
+const JUMP_DOMAIN: u64 = 0x6361_736A_756D_7039;
+const IMMIGRANT_DOMAIN: u64 = 0x6361_7369_6D6D_6939;
+const OFFSPRING_DOMAIN: u64 = 0x6361_736F_6666_7339;
+const PARENT_DOMAIN: u64 = 0x6361_7370_6172_6E39;
+
+/// The longest parent packet: four kernels, the t words at the largest
+/// supported degrees of freedom, and the eight fixed words.
+const MAX_PARENT_WORDS: usize = MAX_EXCITATION_KERNELS + 1 + 32 + 1 + 8;
 /// Bound on a single parent's log move, jump and gap included. Twenty
 /// percent in one event is far outside anything the fitted tails produce and
 /// keeps the mid finite under any declared configuration.
@@ -317,8 +340,13 @@ impl CascadeConfig {
             return Err(ScalarError::detailed("cascade", "event_log_sigma"));
         }
         // The innovation is standardised by sqrt(df / (df - 2)), which needs
-        // a finite variance.
-        if !self.student_df.is_finite() || self.student_df <= 2.0 {
+        // a finite variance, and drawn from a fixed number of uniforms, which
+        // needs an integer. A fractional value is refused, never rounded.
+        if !self.student_df.is_finite()
+            || self.student_df.fract() != 0.0
+            || !(f64::from(*STUDENT_DF_RANGE.start())..=f64::from(*STUDENT_DF_RANGE.end()))
+                .contains(&self.student_df)
+        {
             return Err(ScalarError::detailed("cascade", "student_df"));
         }
         if !finite_nonnegative(self.gap_median_ratio) || !finite_nonnegative(self.gap_log_sd) {
@@ -375,6 +403,10 @@ pub(super) struct CascadeParent {
     /// The propagator's move for this parent, in ticks: its own kick less
     /// the decay of what earlier parents left in the transient register.
     pub(super) impact_ticks: f64,
+    /// The sweep's child-count words, branch then geometric, from the
+    /// parent's own packet. The placed path turns them into its count; the
+    /// discrete book sizes its parent its own way and leaves them unread.
+    pub(super) count_words: [u64; 2],
 }
 
 /// Why the cascade cannot draw another parent.
@@ -413,9 +445,29 @@ pub(super) struct CascadeTables {
     /// minute's log return, the unit gaps and jumps are stated in.
     reference_log_sd: f64,
     student_scale: f64,
-    normal: Normal<f64>,
-    chi_squared: ChiSquared<f64>,
+    /// `student_df` as the integer the validation proved it is.
+    student_df: u32,
     one_second: OneSecondSteps,
+}
+
+impl CascadeTables {
+    /// Words one component step reads: every texture component, the fast
+    /// one, every level and every sigma-extra component. The steps read them
+    /// one per component; this is the stride the allocation pin checks.
+    #[cfg(test)]
+    fn component_words(&self) -> usize {
+        self.texture_tau_s.len() + 1 + 2 * self.level_tau_s.len()
+    }
+
+    /// Words one parent reads, in packet order: a count per excitation
+    /// kernel; the t numerator, `df / 2` chi-squared words and an odd word
+    /// when `df` is odd; the gap normal and sign; the repeat coin, the slot,
+    /// the renewal side and the renewal Pareto; the sweep's branch and
+    /// geometric words. Every word is drawn whether or not its branch runs.
+    fn parent_words(&self) -> usize {
+        let df = self.student_df as usize;
+        self.config.excitation_ratio.len() + 1 + df / 2 + df % 2 + 8
+    }
 }
 
 /// Every component's `ar1_coefficients` at a one-second step, the step the
@@ -520,10 +572,7 @@ impl CascadeTables {
             session_seconds: minutes as f64 * 60.0,
             reference_log_sd: config.event_log_sigma * (parents_per_second * 60.0).sqrt(),
             student_scale,
-            normal: Normal::new(0.0, 1.0)
-                .map_err(|_| ScalarError::detailed("cascade", "unit normal"))?,
-            chi_squared: ChiSquared::new(config.student_df)
-                .map_err(|_| ScalarError::detailed("cascade", "student_df"))?,
+            student_df: config.student_df as u32,
         })
     }
 }
@@ -566,22 +615,64 @@ pub(super) struct CascadeState {
     last_side: AggressorSide,
     /// The propagator's transient register: the decayed sum of past signs.
     impact_register: f64,
+    /// Where each kind of work reads its words. Their positions are the
+    /// allocation counters, so they clone with the walk and a checkpoint
+    /// resumes every one of them where the lead was.
+    streams: CascadeStreams,
+    /// Component steps, evaluated windows and jumps, counted where each
+    /// happens and apart from any word read, so the allocation pin can hold
+    /// the words consumed against the units that consumed them.
+    #[cfg(test)]
+    units: [u64; 3],
+}
+
+/// The cascade's per-kind streams, one [`TapeRng`] per domain of the river.
+#[derive(Clone)]
+struct CascadeStreams {
+    component: TapeRng,
+    window: TapeRng,
+    jump: TapeRng,
+    immigrant: TapeRng,
+    offspring: TapeRng,
+    parent: TapeRng,
+}
+
+impl CascadeStreams {
+    fn new(seed: u64) -> Self {
+        Self {
+            component: TapeRng::new(seed, COMPONENT_DOMAIN),
+            window: TapeRng::new(seed, WINDOW_DOMAIN),
+            jump: TapeRng::new(seed, JUMP_DOMAIN),
+            immigrant: TapeRng::new(seed, IMMIGRANT_DOMAIN),
+            offspring: TapeRng::new(seed, OFFSPRING_DOMAIN),
+            parent: TapeRng::new(seed, PARENT_DOMAIN),
+        }
+    }
+}
+
+/// A standard normal from one word: the normal quantile of an open uniform.
+fn normal_word(rng: &mut TapeRng) -> f64 {
+    normal_quantile(open_unit(rng.next_word()))
 }
 
 impl CascadeState {
-    pub(super) fn new(tables: &CascadeTables, rng: &mut TapeRng, start_ts: u64) -> Self {
-        let draw = |rng: &mut TapeRng, n: usize| -> Vec<f64> {
-            (0..n).map(|_| tables.normal.sample(rng)).collect()
-        };
-        let texture = draw(rng, tables.texture_tau_s.len());
-        let level = draw(rng, tables.level_tau_s.len());
-        let sigma_extra = draw(rng, tables.level_tau_s.len());
-        let fast = tables.normal.sample(rng);
+    /// The walk at `start_ts` for the river seeded `seed`. The components
+    /// start from their stationary law and the sign slots from theirs, all
+    /// read from the river's initialisation domain, so no other stream is
+    /// touched by construction.
+    pub(super) fn new(tables: &CascadeTables, seed: u64, start_ts: u64) -> Self {
+        let mut init = TapeRng::new(seed, INIT_DOMAIN);
+        let mut draw = |n: usize| -> Vec<f64> { (0..n).map(|_| normal_word(&mut init)).collect() };
+        let texture = draw(tables.texture_tau_s.len());
+        let level = draw(tables.level_tau_s.len());
+        let sigma_extra = draw(tables.level_tau_s.len());
+        let fast = normal_word(&mut init);
         let slots = (0..tables.config.sign_slots)
             .map(|_| {
+                let side = coin_side(init.next_word());
                 (
-                    random_side(rng),
-                    metaorder_prints(rng, tables.config.sign_alpha),
+                    side,
+                    metaorder_prints(init.next_word(), tables.config.sign_alpha),
                 )
             })
             .collect();
@@ -605,12 +696,23 @@ impl CascadeState {
             slots,
             last_side: AggressorSide::Buyer,
             impact_register: 0.0,
+            streams: CascadeStreams::new(seed),
+            #[cfg(test)]
+            units: [0; 3],
         }
     }
 
     /// Forget the current bucket: the clock has been moved past it by
     /// something outside the cascade (an armed halt). Children owed before
     /// the new clock would have printed inside the halt, so they are gone.
+    ///
+    /// The components do not evolve across the halt: the next fill starts at
+    /// the new clock with the values they had, and no component step is
+    /// allocated for the jump. That is the halt model as it stands, not an
+    /// accident of the addressing; a halt that should age the activity would
+    /// need its own transition and its own component step. A staged immigrant
+    /// is dropped with its word spent; the window's unplaced immigrants were
+    /// never allocated and cost nothing.
     pub(super) fn reset_bucket(&mut self, clock_ns: u64) {
         self.remaining = 0;
         self.staged_immigrant_ns = None;
@@ -640,35 +742,47 @@ impl CascadeState {
         }
     }
 
-    fn step_components(&mut self, tables: &CascadeTables, rng: &mut TapeRng, elapsed_s: f64) {
+    /// One component step over `elapsed_s`: one allocation of
+    /// `component_words` words, one per component in a fixed order.
+    fn step_components(&mut self, tables: &CascadeTables, elapsed_s: f64) {
+        #[cfg(test)]
+        {
+            self.units[0] += 1;
+        }
         let coefficients = |tau: f64| ar1_coefficients(elapsed_s, tau);
+        let rng = &mut self.streams.component;
         for (y, tau) in self.texture.iter_mut().zip(&tables.texture_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), tables, rng);
+            *y = ar1_step(*y, coefficients(*tau), rng);
         }
         let fast = coefficients(tables.config.fast_texture_tau_s);
-        self.fast = ar1_step(self.fast, fast, tables, rng);
+        self.fast = ar1_step(self.fast, fast, rng);
         for (y, tau) in self.level.iter_mut().zip(&tables.level_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), tables, rng);
+            *y = ar1_step(*y, coefficients(*tau), rng);
         }
         for (y, tau) in self.sigma_extra.iter_mut().zip(&tables.level_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), tables, rng);
+            *y = ar1_step(*y, coefficients(*tau), rng);
         }
     }
 
     /// `step_components(.., 1.0)` over the coefficients the tables solved
     /// once for a one-second step, which is every step but a closure's.
-    /// Draw order and arithmetic are the general step's.
-    fn step_components_one_second(&mut self, tables: &CascadeTables, rng: &mut TapeRng) {
-        let one = &tables.one_second;
-        for (y, c) in self.texture.iter_mut().zip(&one.texture) {
-            *y = ar1_step(*y, *c, tables, rng);
+    /// Word order and arithmetic are the general step's.
+    fn step_components_one_second(&mut self, tables: &CascadeTables) {
+        #[cfg(test)]
+        {
+            self.units[0] += 1;
         }
-        self.fast = ar1_step(self.fast, one.fast, tables, rng);
+        let one = &tables.one_second;
+        let rng = &mut self.streams.component;
+        for (y, c) in self.texture.iter_mut().zip(&one.texture) {
+            *y = ar1_step(*y, *c, rng);
+        }
+        self.fast = ar1_step(self.fast, one.fast, rng);
         for (y, c) in self.level.iter_mut().zip(&one.level) {
-            *y = ar1_step(*y, *c, tables, rng);
+            *y = ar1_step(*y, *c, rng);
         }
         for (y, c) in self.sigma_extra.iter_mut().zip(&one.level) {
-            *y = ar1_step(*y, *c, tables, rng);
+            *y = ar1_step(*y, *c, rng);
         }
     }
 
@@ -710,7 +824,6 @@ impl CascadeState {
     pub(super) fn fill_next_bucket(
         &mut self,
         tables: &CascadeTables,
-        rng: &mut TapeRng,
         clock_ns: u64,
         modifiers: SecondModifiers,
     ) -> Result<(), CascadeRefusal> {
@@ -720,7 +833,7 @@ impl CascadeState {
                 let Some(next) = self.second_ns.checked_add(NS_PER_SECOND) else {
                     return Err(CascadeRefusal::ClockExhausted);
                 };
-                self.step_components_one_second(tables, rng);
+                self.step_components_one_second(tables);
                 self.second_ns = next;
             }
             self.filled = true;
@@ -730,7 +843,7 @@ impl CascadeState {
                     return Err(CascadeRefusal::ClockExhausted);
                 }
                 let elapsed_s = (reopen - self.second_ns) as f64 / NS_PER_SECOND as f64;
-                self.step_components(tables, rng, elapsed_s);
+                self.step_components(tables, elapsed_s);
                 // Children owed inside the closure would print into it;
                 // the closure wins and they are dropped.
                 self.drop_children_before(reopen);
@@ -769,10 +882,22 @@ impl CascadeState {
                     .exp();
             let rate = base_rate * modifiers.rate_mult / modifiers.arrival_thin;
             let window_s = (window_end - window_start) as f64 / NS_PER_SECOND as f64;
+            // The window's two words, the immigrant count and the jump count,
+            // allocated for every window evaluated here, empty or not, and
+            // whether or not the preset declares jumps.
+            #[cfg(test)]
+            {
+                self.units[1] += 1;
+            }
+            let count_word = self.streams.window.next_word();
+            let jump_word = self.streams.window.next_word();
             // The immigrants: the branching fills the rest of the rate with
             // children, so the mean count stays on the envelope.
             let immigrant_rate = rate * (1.0 - config.branching_ratio());
-            let count = poisson(rng, (immigrant_rate * window_s).min(MAX_PARENTS_PER_SECOND));
+            let count = poisson_inverse(
+                half_open_unit(count_word),
+                (immigrant_rate * window_s).min(MAX_PARENTS_PER_SECOND),
+            );
             let level_sigma = self.level_sigma(tables);
             self.second_sigma = config.event_log_sigma
                 * tables.sigma_shape[minute]
@@ -781,7 +906,7 @@ impl CascadeState {
             if config.jumps_per_session > 0.0 {
                 let jump_rate = config.jumps_per_session * slow_rate * window_s
                     / (tables.parents_per_second * tables.session_seconds);
-                let jumps = poisson(rng, jump_rate);
+                let jumps = poisson_inverse(half_open_unit(jump_word), jump_rate);
                 // The minute sd where the jump lands, against the reference
                 // minute at the same sigma level; the jump follows the ratio
                 // to the declared power, so a night jump is smaller than a
@@ -790,15 +915,22 @@ impl CascadeState {
                 let local_minute_sd = self.second_sigma * (60.0 * base_rate).sqrt();
                 let local_scale = (local_minute_sd / reference_sd).powf(config.jump_local_exponent);
                 for _ in 0..jumps {
-                    let draw = tables
-                        .normal
-                        .sample(rng)
+                    #[cfg(test)]
+                    {
+                        self.units[2] += 1;
+                    }
+                    // A jump's two words, its size normal and its sign.
+                    let draw = normal_word(&mut self.streams.jump)
                         .clamp(-config.jump_log_clamp_sd, config.jump_log_clamp_sd);
                     let magnitude = config.jump_size
                         * reference_sd
                         * local_scale
                         * (config.jump_log_sd * draw).exp();
-                    let sign = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+                    let sign = if coin(self.streams.jump.next_word(), 0.5) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     self.pending_jump += sign * magnitude;
                     // The volume the news brings, as excitement in the two
                     // fastest texture components: the following seconds and
@@ -824,15 +956,17 @@ impl CascadeState {
     /// The next immigrant's instant inside the current second, staged so a
     /// child landing earlier can print first without disturbing the order
     /// statistics that place the immigrants.
-    fn stage_immigrant(&mut self, rng: &mut TapeRng) -> Option<u64> {
+    fn stage_immigrant(&mut self) -> Option<u64> {
         if self.staged_immigrant_ns.is_none() && self.remaining > 0 {
             // Sequential order statistics: with n parents left in the
             // window, the next lands after a fraction 1 - u^(1/n) of what
-            // remains.
+            // remains, written as -expm1(ln(u) / n) so a large n does not
+            // cancel. One immigrant word per staging, never per parent: a
+            // child printing first leaves the staged instant in place.
             let n = f64::from(self.remaining);
             let span = self.window_end_ns.saturating_sub(self.next_from_ns) as f64;
-            let u: f64 = rng.random();
-            let offset = span * (1.0 - u.powf(1.0 / n));
+            let u = open_unit(self.streams.immigrant.next_word());
+            let offset = span * -(u.ln() / n).exp_m1();
             let ts_ns = self.next_from_ns.saturating_add(offset as u64);
             self.next_from_ns = ts_ns;
             self.remaining -= 1;
@@ -842,15 +976,16 @@ impl CascadeState {
     }
 
     /// Spawn the children a parent at `ts_ns` owes: Poisson(`n_j`) per
-    /// kernel at exponential offsets. Children past the heap ceiling are
-    /// dropped, which only a runaway kernel reaches.
-    fn spawn_children(&mut self, tables: &CascadeTables, rng: &mut TapeRng, ts_ns: u64) {
+    /// kernel, from the parent packet's one word per kernel, at exponential
+    /// offsets, one offspring word each. Children past the heap ceiling are
+    /// dropped, which only a runaway kernel reaches; their words stay spent.
+    fn spawn_children(&mut self, tables: &CascadeTables, count_words: &[u64], ts_ns: u64) {
         let config = &tables.config;
-        for (ratio, tau) in config.excitation_ratio.iter().zip(&config.excitation_tau_s) {
-            let count = poisson(rng, *ratio);
+        let kernels = config.excitation_ratio.iter().zip(&config.excitation_tau_s);
+        for ((ratio, tau), word) in kernels.zip(count_words) {
+            let count = poisson_inverse(half_open_unit(*word), *ratio);
             for _ in 0..count {
-                let u: f64 = rng.random();
-                let offset_s = -tau * (1.0 - u).ln();
+                let offset_s = tau * unit_exponential(self.streams.offspring.next_word());
                 let offset_ns = (offset_s * NS_PER_SECOND as f64).round();
                 if !offset_ns.is_finite() || self.children.len() >= MAX_PENDING_CHILDREN {
                     continue;
@@ -876,17 +1011,22 @@ impl CascadeState {
             - config.impact_transient_ticks * (1.0 - decay) * previous
     }
 
-    /// The parent's aggressor side under the order-splitting model.
-    fn draw_side(&mut self, tables: &CascadeTables, rng: &mut TapeRng) -> AggressorSide {
+    /// The parent's aggressor side under the order-splitting model, from the
+    /// packet's four side words: the repeat coin, the slot, and the renewal
+    /// side and print count, which are read only when the slot is exhausted.
+    /// A repeat leaves every slot untouched.
+    fn draw_side(&mut self, tables: &CascadeTables, words: [u64; 4]) -> AggressorSide {
         let config = &tables.config;
-        if config.sign_repeat > 0.0 && rng.random_bool(config.sign_repeat) {
+        let [repeat, slot, renew_side, renew_prints] = words;
+        if coin(repeat, config.sign_repeat) {
             return self.last_side;
         }
-        let k = rng.random_range(0..self.slots.len());
+        let slots = self.slots.len();
+        let k = ((half_open_unit(slot) * slots as f64) as usize).min(slots - 1);
         let (side, remaining) = &mut self.slots[k];
         if *remaining == 0 {
-            *side = random_side(rng);
-            *remaining = metaorder_prints(rng, config.sign_alpha);
+            *side = coin_side(renew_side);
+            *remaining = metaorder_prints(renew_prints, config.sign_alpha);
         }
         *remaining -= 1;
         self.last_side = *side;
@@ -894,15 +1034,36 @@ impl CascadeState {
     }
 
     /// Draw the next parent of the current second. Requires `has_parent`.
-    pub(super) fn draw_parent(
-        &mut self,
-        tables: &CascadeTables,
-        rng: &mut TapeRng,
-        clock_ns: u64,
-    ) -> CascadeParent {
+    ///
+    /// Every call allocates one parent packet of `parent_words` words, read
+    /// whole up front whichever branches the parent takes, immigrant or
+    /// child: the kernels' counts, the t words, the gap pair, the four side
+    /// words and the two sweep words, in that order.
+    pub(super) fn draw_parent(&mut self, tables: &CascadeTables, clock_ns: u64) -> CascadeParent {
         debug_assert!(self.has_parent(), "draw_parent needs a filled bucket");
         let config = &tables.config;
-        let immigrant = self.stage_immigrant(rng);
+        let mut packet = [0_u64; MAX_PARENT_WORDS];
+        let packet = &mut packet[..tables.parent_words()];
+        for word in packet.iter_mut() {
+            *word = self.streams.parent.next_word();
+        }
+        let (kernel_words, rest) = packet.split_at(config.excitation_ratio.len());
+        let df = tables.student_df as usize;
+        let (t_words, rest) = rest.split_at(1 + df / 2 + df % 2);
+        let [
+            gap_normal,
+            gap_sign,
+            repeat,
+            slot,
+            renew_side,
+            renew_prints,
+            branch,
+            geometric,
+        ] = *rest
+        else {
+            unreachable!("the packet's fixed tail is eight words")
+        };
+        let immigrant = self.stage_immigrant();
         let child = self.next_child_ns().filter(|ts| *ts < self.window_end_ns);
         let raw_ns = match (immigrant, child) {
             (Some(i), Some(c)) if c <= i => {
@@ -920,10 +1081,18 @@ impl CascadeState {
             (None, None) => unreachable!("has_parent held"),
         };
         let ts_ns = raw_ns.max(clock_ns.saturating_add(INTRA_EVENT_STEP_NS));
-        self.spawn_children(tables, rng, ts_ns);
+        self.spawn_children(tables, kernel_words, ts_ns);
 
-        let innovation =
-            draw_student_t(rng, &tables.normal, &tables.chi_squared) / tables.student_scale;
+        let (numerator, chi) = t_words
+            .split_first()
+            .expect("the t words open with the numerator");
+        let (chi_words, odd_word) = if df % 2 == 1 {
+            let (odd, even) = chi.split_last().expect("an odd df has its odd word");
+            (even, Some(*odd))
+        } else {
+            (chi, None)
+        };
+        let innovation = student_t_integer(*numerator, chi_words, odd_word) / tables.student_scale;
         let mut log_move = self.second_sigma * innovation;
         if self.pending_jump != 0.0 {
             log_move += self.pending_jump;
@@ -931,19 +1100,17 @@ impl CascadeState {
         }
         if self.pending_gap {
             self.pending_gap = false;
-            let draw = tables
-                .normal
-                .sample(rng)
+            let draw = normal_quantile(open_unit(gap_normal))
                 .clamp(-config.gap_log_clamp_sd, config.gap_log_clamp_sd);
             let magnitude = config.gap_median_ratio
                 * tables.reference_log_sd
                 * self.level_sigma(tables)
                 * (config.gap_log_sd * draw).exp();
-            let sign = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+            let sign = if coin(gap_sign, 0.5) { 1.0 } else { -1.0 };
             log_move += sign * magnitude;
         }
         self.started = true;
-        let side = self.draw_side(tables, rng);
+        let side = self.draw_side(tables, [repeat, slot, renew_side, renew_prints]);
         let impact_ticks = self.impact_move(tables, side);
         CascadeParent {
             ts_ns,
@@ -952,6 +1119,7 @@ impl CascadeState {
             innovation,
             sigma: self.second_sigma,
             impact_ticks,
+            count_words: [branch, geometric],
         }
     }
 }
@@ -964,13 +1132,8 @@ fn ar1_coefficients(elapsed_s: f64, tau: f64) -> (f64, f64) {
     (rho, (1.0 - rho * rho).sqrt())
 }
 
-fn ar1_step(
-    y: f64,
-    (rho, innovation_scale): (f64, f64),
-    tables: &CascadeTables,
-    rng: &mut TapeRng,
-) -> f64 {
-    rho * y + innovation_scale * tables.normal.sample(rng)
+fn ar1_step(y: f64, (rho, innovation_scale): (f64, f64), rng: &mut TapeRng) -> f64 {
+    rho * y + innovation_scale * normal_word(rng)
 }
 
 fn sign_of(side: AggressorSide) -> f64 {
@@ -981,36 +1144,27 @@ fn sign_of(side: AggressorSide) -> f64 {
     }
 }
 
-fn random_side(rng: &mut TapeRng) -> AggressorSide {
-    if rng.random_bool(0.5) {
+/// A side from one word: buyer on an even coin.
+fn coin_side(word: u64) -> AggressorSide {
+    if coin(word, 0.5) {
         AggressorSide::Buyer
     } else {
         AggressorSide::Seller
     }
 }
 
-/// A metaorder's print count: discrete Pareto, `P(L >= l) = l^-alpha`.
-fn metaorder_prints(rng: &mut TapeRng, alpha: f64) -> u32 {
-    let u: f64 = rng.random();
+/// A metaorder's print count from one word: discrete Pareto,
+/// `P(L >= l) = l^-alpha`, by inversion of a half-open uniform.
+fn metaorder_prints(word: u64, alpha: f64) -> u32 {
+    let u = half_open_unit(word);
     let draw = (1.0 - u).powf(-1.0 / alpha).floor();
     draw.clamp(1.0, MAX_METAORDER_PRINTS) as u32
-}
-
-fn poisson(rng: &mut TapeRng, lambda: f64) -> u32 {
-    if !lambda.is_finite() || lambda <= 0.0 {
-        return 0;
-    }
-    let draw: f64 = Poisson::new(lambda)
-        .expect("a positive finite rate is a valid Poisson parameter")
-        .sample(rng);
-    draw.clamp(0.0, MAX_PARENTS_PER_SECOND) as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::generated::calendar::{SessionCalendar, SessionEnvelope, WeeklyWindow};
-    use rand::SeedableRng;
 
     /// The tables over a calendar compiled for the purpose, as the
     /// generator compiles its own.
@@ -1146,13 +1300,12 @@ mod tests {
         config.gap_log_clamp_sd = 1.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(&config, &calendar, 0.08).unwrap();
-        let mut rng = TapeRng::seed_from_u64(7);
         // Thursday 1970-01-01 is local day 4. Start ten seconds before the
         // Thursday 16:00 close so parents certainly land before it (a
         // single second can draw an empty count under a low texture) and
         // the walk then crosses the maintenance hour.
         let start = 959 * NS_PER_MINUTE + 50 * NS_PER_SECOND;
-        let mut state = CascadeState::new(&tables, &mut rng, start);
+        let mut state = CascadeState::new(&tables, 7, start);
         let modifiers = SecondModifiers {
             rate_mult: 1.0,
             arrival_thin: 1.0,
@@ -1166,11 +1319,9 @@ mod tests {
         // and the closure sits between them and the first reopened one.
         while parents.iter().filter(|p| p.ts_ns >= reopen_ns).count() < 2 {
             if !state.has_parent() {
-                state
-                    .fill_next_bucket(&tables, &mut rng, clock, modifiers)
-                    .unwrap();
+                state.fill_next_bucket(&tables, clock, modifiers).unwrap();
             }
-            let parent = state.draw_parent(&tables, &mut rng, clock);
+            let parent = state.draw_parent(&tables, clock);
             clock = parent.ts_ns;
             parents.push(parent);
         }
@@ -1193,12 +1344,239 @@ mod tests {
         assert!(parents.iter().all(|p| calendar.is_open(p.ts_ns)));
     }
 
+    /// The positions of every cascade stream, in a fixed order.
+    fn positions(state: &CascadeState) -> [u64; 6] {
+        let s = &state.streams;
+        [
+            s.component.position(),
+            s.window.position(),
+            s.jump.position(),
+            s.immigrant.position(),
+            s.offspring.position(),
+            s.parent.position(),
+        ]
+    }
+
+    /// Every unit of work allocates its fixed stride and nothing else: a
+    /// parent its packet, an offspring one word per child its packet's
+    /// kernel words count, an immigrant one word exactly when one is staged
+    /// (never when a child prints ahead of a staged immigrant), a window its
+    /// pair, a jump its pair and a component step its full set. The
+    /// per-second units are held against counts taken where each unit
+    /// happens; the per-parent ones against what the packet says. Checked
+    /// call by call over walks that cross closures, jumps, children printing
+    /// ahead of staged immigrants and windows that owe nothing, at an even
+    /// and an odd `student_df` and with jumps on and off. Not covered here:
+    /// the initialisation domain, which nothing reads twice, and the heap
+    /// ceiling's drop, which only a runaway kernel reaches.
+    #[test]
+    fn every_unit_allocates_its_fixed_stride() {
+        for (jumps_per_session, student_df) in [(200.0, 4.0), (0.0, 5.0)] {
+            check_unit_strides(jumps_per_session, student_df);
+        }
+    }
+
+    fn check_unit_strides(jumps_per_session: f64, student_df: f64) {
+        let mut config = config();
+        config.jumps_per_session = jumps_per_session;
+        config.student_df = student_df;
+        let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
+        let tables = build_tables(&config, &calendar, 0.08).unwrap();
+        let start = 959 * NS_PER_MINUTE;
+        let mut state = CascadeState::new(&tables, 11, start);
+        let modifiers = SecondModifiers {
+            rate_mult: 1.0,
+            arrival_thin: 1.0,
+            vol_mult: 1.0,
+        };
+        let component = tables.component_words() as u64;
+        let packet = tables.parent_words() as u64;
+        let (mut reused, mut staged, mut children_first) = (0, 0, 0);
+        let mut clock = start;
+        for parent_index in 0..60_000_u64 {
+            if !state.has_parent() {
+                let before = positions(&state);
+                state.fill_next_bucket(&tables, clock, modifiers).unwrap();
+                let after = positions(&state);
+                let [steps, windows, jumps] = state.units;
+                assert_eq!(after[0], steps * component, "component words against steps");
+                assert_eq!(after[1], 2 * windows, "window words against windows");
+                assert_eq!(after[2], 2 * jumps, "jump words against jumps");
+                assert!(after[1] > before[1], "a fill evaluated no window");
+                assert_eq!(after[3..], before[3..], "a fill touched per-parent streams");
+            }
+            // The kernel counts this parent's packet will produce, read from
+            // a clone of its stream before the draw.
+            let mut peek = state.streams.parent.clone();
+            let expected_offspring: u64 = config
+                .excitation_ratio
+                .iter()
+                .map(|ratio| u64::from(poisson_inverse(half_open_unit(peek.next_word()), *ratio)))
+                .sum();
+            let will_stage = state.staged_immigrant_ns.is_none() && state.remaining > 0;
+            let had_staged = state.staged_immigrant_ns.is_some();
+            let before = positions(&state);
+            let parent = state.draw_parent(&tables, clock);
+            let after = positions(&state);
+            assert_eq!(after[5] - before[5], packet, "parent {parent_index}");
+            assert_eq!(
+                after[4] - before[4],
+                expected_offspring,
+                "parent {parent_index}"
+            );
+            assert_eq!(
+                after[3] - before[3],
+                u64::from(will_stage),
+                "parent {parent_index}"
+            );
+            assert_eq!(
+                after[..3],
+                before[..3],
+                "a parent touched per-second streams"
+            );
+            staged += u64::from(will_stage);
+            reused += u64::from(had_staged);
+            children_first += u64::from(state.staged_immigrant_ns.is_some());
+            clock = parent.ts_ns;
+        }
+        assert_eq!(
+            positions(&state)[3],
+            staged,
+            "immigrant words are one per staging"
+        );
+        assert!(reused > 0, "no staged immigrant was ever reused");
+        assert!(
+            children_first > 0,
+            "no child ever printed ahead of a staged immigrant"
+        );
+        assert_eq!(
+            state.units[2] > 0,
+            jumps_per_session > 0.0,
+            "jumps were drawn exactly when declared"
+        );
+        assert!(state.units[0] > 0 && state.units[1] > 0);
+    }
+
+    /// A clone taken with a staged immigrant and children pending continues
+    /// exactly as the original, parent for parent and position for position.
+    #[test]
+    fn a_clone_mid_walk_continues_exactly() {
+        let config = config();
+        let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
+        let tables = build_tables(&config, &calendar, 0.08).unwrap();
+        let start = 1_020 * NS_PER_MINUTE;
+        let mut state = CascadeState::new(&tables, 5, start);
+        let modifiers = SecondModifiers {
+            rate_mult: 1.0,
+            arrival_thin: 1.0,
+            vol_mult: 1.0,
+        };
+        let mut clock = start;
+        let step = |state: &mut CascadeState, clock: &mut u64| {
+            if !state.has_parent() {
+                state.fill_next_bucket(&tables, *clock, modifiers).unwrap();
+            }
+            let parent = state.draw_parent(&tables, *clock);
+            *clock = parent.ts_ns;
+            (
+                parent.ts_ns,
+                parent.log_move.to_bits(),
+                parent.side,
+                parent.count_words,
+                parent.impact_ticks.to_bits(),
+                parent.innovation.to_bits(),
+                parent.sigma.to_bits(),
+                positions(state),
+            )
+        };
+        let found = (0..100_000).any(|_| {
+            step(&mut state, &mut clock);
+            state.staged_immigrant_ns.is_some() && !state.children.is_empty()
+        });
+        assert!(
+            found,
+            "no instant with a staged immigrant and pending children"
+        );
+        let mut twin = state.clone();
+        let mut twin_clock = clock;
+        for _ in 0..5_000 {
+            assert_eq!(
+                step(&mut state, &mut clock),
+                step(&mut twin, &mut twin_clock)
+            );
+        }
+    }
+
+    /// A reset drops the staged immigrant with its word spent, rewinds no
+    /// stream and steps no component: across a halt of several seconds the
+    /// components keep their values until the next fill steps them once.
+    #[test]
+    fn a_reset_spends_and_rewinds_nothing() {
+        let config = config();
+        let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
+        let tables = build_tables(&config, &calendar, 0.08).unwrap();
+        let start = 1_020 * NS_PER_MINUTE;
+        let mut state = CascadeState::new(&tables, 9, start);
+        let modifiers = SecondModifiers {
+            rate_mult: 1.0,
+            arrival_thin: 1.0,
+            vol_mult: 1.0,
+        };
+        let mut clock = start;
+        let found = (0..100_000).any(|_| {
+            if !state.has_parent() {
+                state.fill_next_bucket(&tables, clock, modifiers).unwrap();
+            }
+            clock = state.draw_parent(&tables, clock).ts_ns;
+            state.staged_immigrant_ns.is_some()
+        });
+        assert!(found, "no immigrant was ever staged");
+        let before = positions(&state);
+        let components = (state.texture.clone(), state.level.clone(), state.fast);
+        let halted = clock + 5 * NS_PER_SECOND;
+        state.reset_bucket(halted);
+        assert_eq!(positions(&state), before);
+        assert_eq!(state.units[0] * tables.component_words() as u64, before[0]);
+        assert_eq!(
+            (state.texture.clone(), state.level.clone(), state.fast),
+            components,
+            "the halt aged the components"
+        );
+        assert!(state.staged_immigrant_ns.is_none());
+        // The halted second is filled without a step first, as the origin
+        // second is; only a window that owes nothing steps on from it.
+        let windows = state.units[1];
+        state.fill_next_bucket(&tables, halted, modifiers).unwrap();
+        let after = positions(&state);
+        assert_eq!(after[3], before[3], "a fill allocated an immigrant");
+        assert_eq!(
+            state.units[0] - before[0] / tables.component_words() as u64,
+            state.units[1] - windows - 1,
+            "a step for each window after the halted one, none for the halt"
+        );
+    }
+
+    /// The t's degrees of freedom are integers from 3 to 64; a fractional
+    /// value is refused rather than rounded.
+    #[test]
+    fn student_df_is_an_integer_in_its_range() {
+        for df in [3.0, 4.0, 5.0, 64.0] {
+            let mut fine = config();
+            fine.student_df = df;
+            assert!(fine.validate().is_ok(), "{df}");
+        }
+        for df in [2.0, 2.5, 4.5, 65.0, f64::NAN, f64::INFINITY] {
+            let mut bad = config();
+            bad.student_df = df;
+            assert!(bad.validate().is_err(), "{df}");
+        }
+    }
+
     /// Walk parents from `start` until `end`, returning them in order.
     fn walk(config: &CascadeConfig, seed: u64, start: u64, end: u64) -> Vec<CascadeParent> {
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(config, &calendar, 0.08).unwrap();
-        let mut rng = TapeRng::seed_from_u64(seed);
-        let mut state = CascadeState::new(&tables, &mut rng, start);
+        let mut state = CascadeState::new(&tables, seed, start);
         let modifiers = SecondModifiers {
             rate_mult: 1.0,
             arrival_thin: 1.0,
@@ -1208,11 +1586,9 @@ mod tests {
         let mut parents = Vec::new();
         loop {
             if !state.has_parent() {
-                state
-                    .fill_next_bucket(&tables, &mut rng, clock, modifiers)
-                    .unwrap();
+                state.fill_next_bucket(&tables, clock, modifiers).unwrap();
             }
-            let parent = state.draw_parent(&tables, &mut rng, clock);
+            let parent = state.draw_parent(&tables, clock);
             if parent.ts_ns >= end {
                 break;
             }
@@ -1374,10 +1750,9 @@ mod tests {
         config.sigma_level_log_sd = 0.0;
         let calendar = calendar(vec![1.0; 1_380], vec![1.0; 1_380]);
         let tables = build_tables(&config, &calendar, 0.08).unwrap();
-        let mut rng = TapeRng::seed_from_u64(3);
         let start = 1_020 * NS_PER_MINUTE;
         let end = start + 600 * NS_PER_MINUTE;
-        let mut state = CascadeState::new(&tables, &mut rng, start);
+        let mut state = CascadeState::new(&tables, 3, start);
         let modifiers = SecondModifiers {
             rate_mult: 1.0,
             arrival_thin: 1.0,
@@ -1387,11 +1762,9 @@ mod tests {
         let mut count = 0_u64;
         loop {
             if !state.has_parent() {
-                state
-                    .fill_next_bucket(&tables, &mut rng, clock, modifiers)
-                    .unwrap();
+                state.fill_next_bucket(&tables, clock, modifiers).unwrap();
             }
-            let parent = state.draw_parent(&tables, &mut rng, clock);
+            let parent = state.draw_parent(&tables, clock);
             if parent.ts_ns >= end {
                 break;
             }

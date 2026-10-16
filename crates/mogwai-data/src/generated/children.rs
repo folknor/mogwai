@@ -5,9 +5,9 @@
 //! apart: the level steps, which feed back into the walk and are drawn as
 //! geometric gaps ([`LevelSteps`]), and the sizes, which never feed back and,
 //! for a river's fixed size law, are a pure function of the seed and a
-//! child's global index ([`SizeStream`]). Since protocol 37 the bounce walks'
-//! gaps are words addressed by child index ([`StepStream`]); the cascade's
-//! are still drawn from its main stream.
+//! child's global index ([`SizeStream`]). The gaps are words addressed by
+//! child index ([`StepStream`]): the bounce walks' since protocol 37, the
+//! cascade's since 39.
 //!
 //! The split is what lets a parent be skipped at the cost of its feedback
 //! draws alone. A skipped parent - a checkpoint extension, `advance_parent`,
@@ -73,8 +73,8 @@ pub(super) struct LevelSteps {
 impl LevelSteps {
     /// The steps of a sweep of `count` children at probability `p`, with the
     /// first gap already drawn. `word` yields one raw `u64` per call and is
-    /// called only for a gap: the cascade passes its main stream, the bounce
-    /// walks their counter-based step words.
+    /// called only for a gap: every placed walk passes its counter-based
+    /// step words.
     pub(super) fn new(p: f64, count: u32, word: &mut impl FnMut() -> u64) -> Self {
         let mut steps = Self {
             p,

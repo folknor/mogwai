@@ -6884,8 +6884,8 @@ fn a_bounce_parent_draws_a_fixed_main_stream_stride() {
 /// The placed cascade's and the discrete book's records, hashed: the oracle
 /// in `mogwai-cli` covers only the crypto lineage, so this is what says a
 /// change to shared sweep code left the MNQ-shaped walks' bytes alone. Both
-/// were re-blessed at tape protocol 38, which moved every stream from ChaCha12
-/// to `TapeRng`. A change that moves either re-blesses it knowingly.
+/// were re-blessed at tape protocol 39, which gave the cascade its fixed-word
+/// core. A change that moves either re-blesses it knowingly.
 #[test]
 fn the_cascade_walks_hash_to_their_blessed_bytes() {
     let digest = |mut src: GeneratedSource| {
@@ -6918,7 +6918,7 @@ fn the_cascade_walks_hash_to_their_blessed_bytes() {
     let book = digest(cascade_mnq_source(7, BOOK_START_NS, true));
     assert_eq!(
         (placed.as_str(), book.as_str()),
-        ("21ac9c8df62c9642", "e7e7325fdedd5d52")
+        ("93850ec355949135", "87d288a010e7bccc")
     );
 }
 

@@ -820,6 +820,16 @@ classes.
 
 ## Tests and tooling
 
+- **`arrival_screen_layer1_reproduces_the_committed_12a_generated_blocks`
+  is red under the gate.** Seed 1's shipped `EventMarkov { switch_rate: 0.1 }`
+  projection refuses with `projected_child_inside_closed_halt_segment`, at
+  tape 37, 38 and 39 alike, so before the block comparison against
+  `analysis/mnq-measure-12a.json` (regenerated 2026-08-06) is reached. Two
+  questions, in order: whether the refusal is a projection defect, a
+  child placed into a halt the generator would never print into, or a
+  realization that legitimately reaches one; and then whether the committed
+  generated blocks are owed a regeneration under the current tape.
+
 - **`mogwai arrival-control` cannot complete against the shipped MNQ
   preset.** Its corrected arm re-centres `session.intensity_hour`, but the
   preset's calendar carries an activity envelope, which replaces the hourly

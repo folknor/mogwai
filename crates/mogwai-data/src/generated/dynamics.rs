@@ -108,10 +108,15 @@ impl SweepShape {
     /// kernel owns a cloned shape, so its accounting is intentionally separate
     /// from the generated source's diagnostics.
     pub(super) fn next_count_scaled(&self, multiplier: f64, rng: &mut TapeRng) -> u32 {
+        self.scaled(multiplier).next_count(rng)
+    }
+
+    /// The same mixture after an arrival-side child multiplier, as a fresh
+    /// shape with its own accounting.
+    pub(super) fn scaled(&self, multiplier: f64) -> Self {
         let children_mean = self.q + (1.0 - self.q) * self.m;
         let single_frac = self.q + (1.0 - self.q) / self.m;
-        let mut scaled = Self::new(children_mean * multiplier, single_frac, 1.0);
-        scaled.next_count(rng)
+        Self::new(children_mean * multiplier, single_frac, 1.0)
     }
 }
 
@@ -216,13 +221,17 @@ impl GarchVol {
     }
 }
 
-/// One raw, unstandardized Student-t innovation, drawn in the order the walk
-/// draws it: normal first, chi-squared second. Its variance is
-/// `df / (df - 2)`, not 1 - callers feeding the GARCH recursion must divide by
-/// [`super::consts::STUDENT_T_UNIT_SCALE`] first, which
-/// [`draw_standardized_innovation`] does. Kept raw and separate so the
-/// second-moment instrumentation can demonstrate the unstandardized variance
-/// against the standardized one using the same shipped draw.
+/// One raw, unstandardized Student-t(4) innovation through the rejection
+/// samplers, normal first and chi-squared second. Its variance is
+/// `df / (df - 2)`, not 1 - callers feeding the GARCH recursion divide by
+/// [`super::consts::STUDENT_T_UNIT_SCALE`] first.
+///
+/// No walk draws through it any more: the bounce walks have used the
+/// fixed-word `draws::student_t4` since tape protocol 37 and the cascade the
+/// fixed-word `draws::student_t_integer` since 39. It remains for the rail
+/// sizing and second-moment harnesses, which sample the same law; aligning
+/// them with the shipped fixed-word sampler is open work.
+#[cfg(test)]
 pub(super) fn draw_student_t(
     rng: &mut TapeRng,
     normal: &rand_distr::Normal<f64>,
@@ -233,13 +242,6 @@ pub(super) fn draw_student_t(
     let chi = chi_squared.sample(rng).max(f64::MIN_POSITIVE);
     z / (chi / STUDENT_T_DF).sqrt()
 }
-
-// The former `draw_standardized_innovation` wrapper is inlined at its one
-// call site in `next_latent_mid`: the walk draws raw via `draw_student_t`
-// and divides by `STUDENT_T_UNIT_SCALE` in two named steps, numerically
-// identical, so the observation-only trace can carry both innovations
-// without a second draw. `GarchVol::new`'s `a0` derivation remains correct
-// only against the standardized form.
 
 /// Everything one call to [`GarchVol::step`] computed.
 ///
