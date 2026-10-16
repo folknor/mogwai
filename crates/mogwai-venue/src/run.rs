@@ -584,7 +584,7 @@ pub(crate) struct Run {
     venue_arms: Mutex<VenueArms>,
     /// The account a connection that names none is served under. It exists for
     /// the ephemeral single-consumer venue, where making the one consumer name an
-    /// id would be ceremony; it is NOT the venue's one account.
+    /// id would be ceremony; it is not the venue's only account.
     default_account_id: mogwai_protocol::AccountId,
     /// Whether a returning consumer is handed a clean ledger instead of its own.
     /// See the config key of the same name; the readiness record reports it, so
@@ -792,7 +792,7 @@ impl Run {
     /// The account trading under `account_id`, created on first sight.
     ///
     /// Creation is the whole lifecycle: an account outlives the connection that
-    /// named it, so a second connection presenting the same id gets the SAME
+    /// named it, so a second connection presenting the same id gets that very
     /// ledger, with its positions and order history intact. That is what a
     /// reconnect is from the venue's side, and it is indistinguishable from a
     /// stranger claiming the id, which is why nothing here tries to tell them

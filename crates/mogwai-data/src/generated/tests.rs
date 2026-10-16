@@ -3079,7 +3079,7 @@ fn empty_hour_stats_match_the_shared_conformance_fixture() {
     }
 }
 
-/// The slice-shaped front is what `measure` does NOT use, so it gets its own
+/// The slice-shaped front is what `measure` does not use, so it gets its own
 /// check that it buckets and brackets a timestamp slice the same way.
 #[test]
 fn empty_hour_stats_bucket_a_timestamp_slice() {
@@ -4361,7 +4361,7 @@ fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
 //   test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven --timeout 280
 // `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
 // is refused when the name matches more than one test. 280 is a hard cap. See
-// AGENTS.md for the runner these arguments belong to.
+// `reference/technical-implementation-spec.md` for the runner.
 #[test]
 #[ignore = "spread decomposition report; run deliberately with an extended timeout"]
 fn synthetic_spread_decomposition_at_protocol_seven() {

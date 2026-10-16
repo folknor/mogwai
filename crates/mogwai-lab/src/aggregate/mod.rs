@@ -7,9 +7,10 @@
 //! Amendment-D family envelopes, the 5.2 count substitution, the gap
 //! closures, the forensic subchecks and the fail-closed 6.2 ladder.
 //!
-//! The Python reference is the retired Python fit implementation and the binding contract is
-//! `notes/protocol-12a-measurement-spec.md` revision 12. Where the two
-//! disagree the Python wins - it produced the committed
+//! The Python reference is the retired Python fit implementation and the
+//! contract was revision 12 of the protocol-12a measurement spec, deleted
+//! when the measure-and-fit arc closed (git history holds it). Where the two
+//! disagreed the Python won - it produced the committed
 //! `analysis/mnq-measure-12a.json` that the parity gate compares against.
 //!
 //! ## What this module owns, and what it does not

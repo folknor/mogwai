@@ -76,8 +76,9 @@ pub use trigger::{
 };
 
 /// Identity of the tape generation process, not of any one path. Two runs are
-/// comparable only if their venues report the same value. `AGENTS.md` carries
-/// the obligation to bump this for every tape-determinism change.
+/// comparable only if their venues report the same value. Every
+/// tape-determinism change owes a bump, unconditionally: nothing can detect a
+/// change that should have bumped and did not.
 ///
 /// 12 was the protocol-12b arrival-frame calibration repair (integrated
 /// families take the bare mean): it changes outputs for `(config, seed)`

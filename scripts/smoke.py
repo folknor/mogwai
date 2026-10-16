@@ -219,7 +219,7 @@ class Venue:
             command.extend(["--config", config])
         if duration:
             command.extend(["--duration", duration])
-        # The readiness record is one JSON line on STDOUT, so capturing it needs
+        # The readiness record is one JSON line on stdout, so capturing it needs
         # no inherited pipe and no fd bookkeeping - the venue cannot be told the
         # wrong number because it is never told a number.
         self.child = subprocess.Popen(
@@ -228,7 +228,7 @@ class Venue:
             stderr=subprocess.PIPE,
             text=True,
         )
-        # A launcher that CAPTURES the child's stderr must also DRAIN it. The
+        # A launcher that captures the child's stderr must also drain it. The
         # venue logs to stderr by design (decision 5), a pipe holds only about
         # 64 KiB, and a full pipe blocks the writer - so an undrained capture
         # wedges the whole venue mid-run, which reads exactly like a hung
@@ -440,7 +440,7 @@ def check_common(venue: Venue) -> None:
         == venue.record["data_origin_ns"]
     ), "data_origin_ns = run_start_ns - warmup_ns"
 
-    # The declared warmup is MATERIALIZED, not merely declared: the earliest
+    # The declared warmup is materialized, not merely declared: the earliest
     # servable instant answers with trades the moment readiness lands.
     floor = venue.record["data_origin_ns"]
     warm = venue.http(f"/operator/trades?symbol={venue.symbol}&start={floor}&limit=20")
@@ -525,10 +525,10 @@ def mode_default(venue: Venue) -> str:
         # No Subscribe frame is sent, and none exists to send: the venue pushes
         # the run's one tape on upgrade.
         #
-        # DRAINED, not asserted on the NEXT frame. This used to require the very
+        # The stream is drained rather than asserted on its next frame. This used to require the very
         # first market frame to be the BBO snapshot and flaked on it twice in one
-        # day. Snapshot-first is NOT a wire contract and the venue never claimed
-        # it was: `Tape::subscribe_with_snapshot` returns an OPTION, and a boat
+        # day. Snapshot-first is no wire contract and the venue never claimed
+        # it was: `Tape::subscribe_with_snapshot` returns an `Option`, and a boat
         # that has not yet published a quote has no BBO to hand over, so a socket
         # binding in the instant between the tape's first trade and its first
         # quote legitimately sees the trade first. There is no stale-BBO hole
@@ -565,7 +565,7 @@ def mode_default(venue: Venue) -> str:
         #
         # So the claim is bracketed, not exact: a market buy crosses the ask at
         # SOME instant in that window, and every ask in it is a candidate, so
-        # the buy must fill at or above the LOWEST ask in the window. That
+        # the buy must fill at or above the lowest ask in the window. That
         # catches a fill inside the spread by more than the market moved, which
         # is the defect the crossing path exists to remove; asserting against
         # the last quote alone reads as exact and is simply flaky, because the
@@ -720,7 +720,7 @@ def mode_admission(venue: Venue) -> str:
     ws = WsClient(venue.addr, venue.symbol)
     try:
         # A shrunk held-lane budget puts the refusal a few orders away instead
-        # of twelve thousand. What is under test is the REFUSAL, which is the
+        # of twelve thousand. What is under test is the refusal, which is the
         # shipped branch either way.
         for index in range(400):
             ws.send(order(f"ADMIT-{index}", venue.symbol))
@@ -796,13 +796,13 @@ def mode_band(venue: Venue) -> str:
         assert accepted["type"] == "OrderAccepted", accepted
         # It must REST rather than fill on submit. Priced AT the last print, no
         # draw can put its trigger above the market, and u = 0 still needs a
-        # print strictly THROUGH the price, which the submit instant by
+        # print strictly through the price, which the submit instant by
         # definition does not have. The `OrderAccepted` just asserted IS that
         # property: had the submit path filled, the answer to the submit would
         # have been an `OrderFilled`.
         #
-        # The venue-truth query that follows is a SECOND round trip, and it
-        # RACES the sweep - which is the point of the widened acceptance below
+        # The venue-truth query that follows is a second round trip, and it
+        # races the sweep - which is the point of the widened acceptance below
         # rather than a flake being tolerated. The sweep runs every 50 ms under
         # smoke-band.toml, the raw-fill tape prints tens of times a second, and
         # the calibrated `fill_band_vol_mult = 0.005` displaces the trigger by
@@ -813,9 +813,9 @@ def mode_band(venue: Venue) -> str:
         # cross that the query always won; it encoded the mis-calibration, not
         # the model.
         #
-        # So the query asserts the DISJUNCTION that is actually true of a
+        # So the query asserts the disjunction that is actually true of a
         # correctly resting order: it is either still open, or it left the book
-        # by being filled UNSOLICITED by the run's sweep. What it still rules
+        # by being filled unsolicited by the run's sweep. What it still rules
         # out is the order vanishing - filled on the submit path, rejected after
         # acceptance, or silently dropped.
         ws.send({"type": "QueryOrders", "request_id": "BAND-Q", "open_only": True})
@@ -875,10 +875,10 @@ def mode_band_swept(venue: Venue) -> str:
             )
             assert accepted and accepted["type"] == "OrderAccepted", accepted
             # The half the old 1.5x-through construction could not make: it did
-            # NOT fill on the submit path, so whatever fills it later is the
+            # not fill on the submit path, so whatever fills it later is the
             # venue's own sweep and nothing else. The `OrderAccepted` above is
             # what establishes that; the venue-truth query below only corroborates
-            # it, and it cannot be required to find the order STILL open.
+            # it, and it cannot be required to find the order still open.
             #
             # This config runs at speed 100 with a 50 ms sweep, so a simulated
             # five seconds elapse per wall second, and the calibrated
@@ -888,7 +888,7 @@ def mode_band_swept(venue: Venue) -> str:
             # old clamp-saturated `0.5` band, under which crossing 200 ticks took
             # long enough that the query always won the race.
             #
-            # So an already-delivered fill SATISFIES this mode rather than
+            # So an already-delivered fill satisfies this mode rather than
             # failing it: the point of the mode is that the fill arrives
             # unsolicited from the run, and a fill that beat the query is still a
             # fill the consumer never asked for.
@@ -906,7 +906,7 @@ def mode_band_swept(venue: Venue) -> str:
                     row["client_order_id"] == client_order_id for row in fill["orders"]
                 ), "the band-swept order filled on submit instead of resting"
                 # Bounded by the accelerated tape's dwell allowance, not by the
-                # sweep timer: the fill waits on the next PRINT.
+                # sweep timer: the fill waits on the next print.
                 fill = ws.until(
                     lambda frame: frame.get("type") == "OrderFilled"
                     and frame.get("client_order_id") == client_order_id,
@@ -971,7 +971,7 @@ def mode_stop(venue: Venue) -> str:
 
     ws = WsClient(venue.addr, venue.symbol)
     try:
-        # The loop exists for ONE residual case: a stop already through its
+        # The loop exists for a single residual case: a stop already through its
         # trigger at the acceptance instant proves triggering and adverse
         # filling but not resting, and so is not accepted as a pass. Each
         # attempt re-establishes its own position, because the sell stop is
@@ -1034,13 +1034,13 @@ def mode_stop(venue: Venue) -> str:
 
             # Nothing is interposed between here and the two events this mode
             # exists to observe. A venue-truth query issued at this point is a
-            # second round trip that RACES the sweep, and `until` discards every
+            # second round trip that races the sweep, and `until` discards every
             # frame it passes over - so a stop that triggered and filled before
             # the snapshot came back had its `OrderTriggered` and `OrderFilled`
             # thrown away by the very read meant to corroborate them. That is
             # what made this mode fail about half the time. The query is now
-            # asked AFTER the events, where it cannot consume them, and asked
-            # about ONE id, which the venue answers whatever its status.
+            # asked after the events, where it cannot consume them, and asked
+            # about a single id, which the venue answers whatever its status.
             triggered = ws.until(
                 lambda frame: frame.get("type") == "OrderTriggered"
                 and frame.get("client_order_id") in triggers,

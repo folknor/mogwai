@@ -85,7 +85,7 @@ fn summary(topic: ManTopic) -> &'static str {
 
 /// The bundled markdown for a topic, compiled into the binary. Each topic maps
 /// to exactly one durable document: five under `docs/` and two under
-/// `reference/`, per the split the `ManTopic` doc above states. It is NOT
+/// `reference/`, per the split the `ManTopic` doc above states. It is not
 /// `reference/*.md` throughout, which this comment claimed until 2026-08-20 -
 /// most of what an operator needs is `docs/`, which is the folder that
 /// documents how the venue is USED.

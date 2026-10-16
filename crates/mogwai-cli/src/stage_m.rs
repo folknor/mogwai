@@ -823,7 +823,7 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
     // Stage M Amendment 1 added per-fold training provenance to every score
     // (training_dropped, training_count, training_retained). The committed
     // July reference predates it; the backcheck equality is on statistical
-    // content, and provenance fields are projected away on BOTH sides.
+    // content, and provenance fields are projected away on both sides alike.
     fn strip_amendment1_provenance(scores: &serde_json::Value) -> serde_json::Value {
         let mut scores = scores.clone();
         if let Some(items) = scores.as_array_mut() {

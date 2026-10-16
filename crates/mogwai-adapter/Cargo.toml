@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
+autotests = false
 
 # This is the sole mogwai crate that imports nautilus. The broker core crates
 # stay protocol-native; this adapter is the host-facing client pair and
@@ -46,6 +47,14 @@ nautilus-network = { version = "0.66.0", default-features = false }
 
 [dev-dependencies]
 serde_urlencoded = "0.7"
+
+# Every integration test compiles into the one `all` target below, which
+# `autotests = false` in [package] makes the only one. Cargo's default links a
+# binary per `tests/*.rs` file; a new test file is declared as a module in
+# `tests/all.rs`, never added as a target of its own.
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [lints]
 workspace = true

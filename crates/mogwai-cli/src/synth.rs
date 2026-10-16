@@ -170,7 +170,7 @@ pub(crate) fn run_cadence_feasible(args: CadenceFeasibleArgs) -> anyhow::Result<
         return Ok(());
     }
 
-    // The Python's default path does NOT stop at the structural verdict: it
+    // The Python's default path does not stop at the structural verdict: it
     // re-simulates the arrival clock and exits non-zero when the realized
     // density misses the feasibility bands. Skipping it made this subcommand
     // exit 0 where the script it ports exits 1.

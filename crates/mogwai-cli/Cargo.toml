@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
+autotests = false
 
 # The binary is `mogwai`, not the package name `mogwai-cli`. The target name is
 # load-bearing well beyond convenience: `brokkr run mogwai`, the shipped
@@ -35,8 +36,8 @@ owo-colors = "4"
 pulldown-cmark = "0.13"
 
 [dev-dependencies]
-# THE SAME DEPENDENCY AS ABOVE, WITH ONE FEATURE ADDED, and the placement is
-# the whole mechanism: the dirty-tree unit tests in `fit`, `arrival_control`,
+# This is the very dependency declared above with one feature added, and its
+# placement here is the whole mechanism: the dirty-tree unit tests in `fit`, `arrival_control`,
 # `arrival_screen` and `minute_range_envelope` install a scripted tree reader,
 # and that reader must not exist in the binary this crate ships. Under
 # resolver 3 a dev-dependency's features are unified only into builds that
@@ -49,6 +50,14 @@ serde_json.workspace = true
 tungstenite = "0.30.0"
 tokio-tungstenite = "0.30.0"
 nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
+
+# Every integration test compiles into the one `all` target below, which
+# `autotests = false` in [package] makes the only one. Cargo's default links a
+# binary per `tests/*.rs` file; a new test file is declared as a module in
+# `tests/all.rs`, never added as a target of its own.
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [lints]
 workspace = true

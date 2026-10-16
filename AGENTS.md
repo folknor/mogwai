@@ -266,13 +266,14 @@ two are kept in sync, so what you read in `research/` is what compiles.
 Use `brokkr` (not `cargo`) for check/test. Output is never capped or scoped: every diagnostic prints every time, and errors in files with unstaged changes are listed first.
 
 - `brokkr check` - gremlins + clippy + all tests. Does not
-  run the four socket-backed adapter test binaries (`adapter_smoke`,
-  `data_client_transport`, `havoc`, `reconciliation`): they are `#[ignore]`d
+  run the socket-backed adapter tests (the `adapter_smoke`,
+  `data_client_transport`, `havoc` and `reconciliation` modules of
+  `mogwai-adapter`'s integration test binary): they are `#[ignore]`d
   because they bind real loopback listeners, so an environment without sockets
   would fail them for reasons unrelated to the code. Fast and sandbox-safe, and
-  blind to roughly 30 tests.
+  blind to every one of them.
 - `brokkr check -p <crate>` - scope to one package (e.g. `-p mogwai-engine`). You generally do not want to run this; a single `brokkr check` is faster than 2-3 `-p` runs
-- `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)
+- `brokkr check -- --test <target>` - forward args to `cargo test` (args after the second `--` go to the test binary). Each crate with integration tests builds exactly one test target, `all` (`tests/all.rs`, with `autotests = false` in its `Cargo.toml`); a former test file is a module of it, so select one with a test-name filter such as `havoc::` rather than `--test havoc`. A new test file is declared as a module in `tests/all.rs`, never added as a target of its own.
 - `brokkr test -p <crate> <NAME>` - focused single-test runner. Always passes `--include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Builds dev by default (`[test] debug = true`); pass `--release` where optimization is what is measured. Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time. Defaults to `--all-features`.
   - `-p, --package <PKG>` - cargo package. Required in this workspace - no default package.
   - `-N, --repeat <N>` - run the test N times per sweep (flaky-test hunting).

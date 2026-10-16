@@ -30,7 +30,7 @@ anyhow.workspace = true
 nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
 
 [dev-dependencies]
-# `test-util` for the paused clock. The history slot gate now WAITS up to
+# `test-util` for the paused clock. The history slot gate now waits up to
 # `HISTORY_SLOT_WAIT`, and its deadline test has to reach that instant
 # without the suite actually sleeping through it.
 tokio = { workspace = true, features = ["test-util"] }

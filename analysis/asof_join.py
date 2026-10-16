@@ -112,7 +112,7 @@ def update_ids_monotonic(quotes):
     as such - the alternative is picking one silently and calling it data.
     """
     # Sorted by (transaction_time, update_id), not by time alone: a time-only
-    # sort leaves ties in INPUT order, which would make this answer depend on
+    # sort leaves ties in input order, which would make this answer depend on
     # how the caller happened to stack the file.
     ordered = sorted(quotes, key=lambda q: (q.transaction_time, q.update_id))
     return all(a.update_id < b.update_id for a, b in zip(ordered, ordered[1:]))
@@ -170,7 +170,7 @@ def asof_join(trades, quotes, coverage=None, max_age=None):
 # Adversarial contract test.
 #
 # Values are chosen so that every off-by-one and every wrong-column choice
-# produces a DIFFERENT answer: transaction and event times differ, quote ages
+# produces a different answer: transaction and event times differ, quote ages
 # are all distinct, update ids are far from timestamps, and bids and asks are
 # unique per quote. A fixture where two mistakes agree teaches nothing.
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ def selftest():
     quotes = _fixture()
     print("as-of join contract")
 
-    # Equality at the boundary is ACCEPTED.
+    # Equality at the boundary is accepted.
     m = asof_join([Trade(2000, 1.0, 1.0, False)], quotes)[0]
     _check("equality at boundary accepted", m.quote.update_id, 7002)
     _check("age is zero at exact boundary", m.quote_age, 0)
@@ -215,12 +215,12 @@ def selftest():
     _check("future quote never selected", m.quote.update_id, 7002)
     _check("age measured from transaction time", m.quote_age, 999)
 
-    # The NEWEST eligible quote wins, not the first or the nearest by event time.
+    # The newest eligible quote wins, not the first or the nearest by event time.
     m = asof_join([Trade(4999, 1.0, 1.0, False)], quotes)[0]
     _check("newest eligible wins", m.quote.update_id, 7003)
     _check("age from newest eligible", m.quote_age, 1999)
 
-    # Eligibility uses TRANSACTION time. Quote 7002 published at 2900; a trade at
+    # Eligibility uses transaction time, not event time. Quote 7002 published at 2900; a trade at
     # 2500 must still see it, because the venue matched it at 2000.
     m = asof_join([Trade(2500, 1.0, 1.0, False)], quotes)[0]
     _check("eligibility on transaction not event time", m.quote.update_id, 7002)
@@ -272,7 +272,7 @@ def selftest():
     _check("quoted spread", round(quoted_spread(q), 6), 0.06)
     _check("effective at ask", round(effective_spread(buyer_taker, q), 6), 0.06)
     _check("effective at bid", round(effective_spread(seller_taker, q), 6), 0.06)
-    # Price improvement inside the mid gives a NEGATIVE effective spread, and it
+    # Price improvement inside the mid gives a negative effective spread, and it
     # is reported rather than clamped.
     improved = Trade(3000, 300.05, 1.0, False)
     _check("negative effective not clamped", round(effective_spread(improved, q), 6), -0.02)

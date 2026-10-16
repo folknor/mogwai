@@ -314,7 +314,7 @@ pub fn run_summary_walk(
         profile.scalars.clone(),
         seed as u64,
         walk_start as u64,
-        mogwai_venue::source::fingerprint(),
+        mogwai_data::Fingerprint::repo(),
         &profile.session,
         None,
         mogwai_data::SizeGrid::from_def(&profile.def),

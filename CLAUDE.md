@@ -60,8 +60,8 @@ never do, so the rules were dead weight in the file both of you read.
 
 - Always run `brokkr fmt` before a commit.
 - Run `brokkr check --gate`, not plain `brokkr check`, before a commit that
-  touches `mogwai-adapter`. The plain check cannot see the four socket-backed
-  adapter test binaries; two regressions have shipped red through that gap.
+  touches `mogwai-adapter`. The plain check cannot see the socket-backed
+  adapter tests, which are `#[ignore]`d; two regressions have shipped red through that gap.
 - Never commit markdown changes alone. Bundle them with upcoming code commits.
 - When committing other changes: always tag along markdown files if dirty.
 - Write substantive engineering-focused commit messages.

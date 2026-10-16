@@ -127,7 +127,7 @@ where
                 count_windows_s,
             ));
         }
-        // The trade range covers ALL structurally valid prints - unsided rows
+        // The trade range covers every structurally valid prints - unsided rows
         // and invalid books included - by the print's own timestamp.
         if let Some(acc) = state.as_mut() {
             acc.push_print(ts, row.price);

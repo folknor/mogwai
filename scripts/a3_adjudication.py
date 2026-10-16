@@ -40,7 +40,7 @@ measure = json.load(open("analysis/mnq-measure-12a.json"))
 
 # ---------------------------------------------------------------- panel 1
 
-# Observed uncertainty by resampling whole SESSIONS, never seconds: the
+# Observed uncertainty by resampling whole sessions, never seconds: the
 # within-session dependence is exactly what a per-second bootstrap would destroy.
 sessions = measure["observed"]["per_session"]
 per_session_zero = {h: [] for h in GATED}

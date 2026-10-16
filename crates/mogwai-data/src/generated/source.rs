@@ -86,7 +86,7 @@ pub struct GeneratedSource {
     // the state is the walk's own and clones with it.
     cascade: Option<Arc<CascadeTables>>,
     cascade_state: Option<CascadeState>,
-    // The discrete book (`notes/book-dynamics-spec.md`), present when the
+    // The discrete book (see the `book` module), present when the
     // scalars carry `book` beside `cascade`. Its rng streams are its own,
     // derived from the seed under domain tags, so book parameters leave the
     // cascade realization untouched.
@@ -203,7 +203,7 @@ pub struct ParentSummary {
 }
 
 /// One parent transaction resolved into its wire records, on the discrete
-/// book path (`notes/book-dynamics-spec.md`). Immutable data: the schedule
+/// book path (see the `book` module). Immutable data: the schedule
 /// is fixed at resolution time, and the source consumes it front to back.
 /// `next_tick` pops one record; `advance_for_checkpoint` drains the whole
 /// deque. Suppressed quotes are absent from `records` but their instants
@@ -1517,7 +1517,7 @@ impl GeneratedSource {
         };
     }
 
-    /// One parent on the discrete-book path (`notes/book-dynamics-spec.md`).
+    /// One parent on the discrete-book path (see the `book` module).
     /// The cascade still owns the clock and the external move (diffusion,
     /// jump, gap); everything the touch does - the spread, the depletion, the
     /// impact, the printed prices and sizes - is the book's, resolved into an

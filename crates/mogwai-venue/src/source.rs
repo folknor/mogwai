@@ -200,7 +200,7 @@ impl InstrumentProfiles {
     pub fn iter(&self) -> impl Iterator<Item = &InstrumentProfile> {
         self.configured.values().map(AsRef::as_ref)
     }
-    /// Every symbol an operator configured, sorted. NOT "every symbol this run
+    /// Every symbol an operator configured, sorted - not "every symbol this run
     /// can serve" - resolution is total, so that set is every wire-legal
     /// string. Sorted because a human reads it and a test diffs it; `HashMap`
     /// order is neither.
@@ -1582,7 +1582,7 @@ mod river_tests {
 
     /// A river nothing warmed answers an instant a long way from the origin.
     ///
-    /// This does NOT bite on removing the `reach_river` call in
+    /// This does not bite on removing the `reach_river` call in
     /// `history_source`: `CheckpointIndex::try_source_before_target` extends a
     /// non-live index itself, and `MAX_EXTEND_TICKS` is far above any distance a
     /// test can walk, so positioning alone would answer here too. What the

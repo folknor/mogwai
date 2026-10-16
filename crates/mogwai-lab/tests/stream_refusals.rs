@@ -75,7 +75,7 @@ fn a_malformed_integer_is_refused_rather_than_panicking() {
     );
 }
 
-/// Both fixtures carry ONE well-formed row ahead of the bad one, so a refusal
+/// Both fixtures carry exactly one well-formed row ahead of the bad one, so a refusal
 /// cannot be coming from the header or from the first data row. Without this,
 /// a reader that refused everything would pass both tests above.
 #[test]

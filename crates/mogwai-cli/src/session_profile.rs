@@ -44,7 +44,7 @@ pub(crate) struct SessionProfileArgs {
     /// How historical labels are read. Civil is the default because it lands
     /// CST and CDT observations on the same canonical session phase, so no
     /// season disproportionately supplies the boundary buckets.
-    // NOT A DOC COMMENT: this is for the next maintainer, not the operator
+    // Deliberately a plain comment rather than a doc comment: this is for the next maintainer, not the operator
     // reading `--help`. The default is the lab's
     // `MODEL_CLOCK_ALIGNMENT_DEFAULT` rather than a second declaration of it -
     // the alignment the model runs on is the lab's fact. Until 2026-08-20 it

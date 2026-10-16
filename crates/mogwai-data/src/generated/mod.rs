@@ -19,7 +19,7 @@
 //!   leaves every other preset on `dynamics`.
 //! - `book` - the discrete book beside the cascade: spread state, effective
 //!   depletion, the frozen ladder and the projection against the latent
-//!   anchor (`notes/book-dynamics-spec.md`). Pure state and transitions;
+//!   anchor. Pure state and transitions;
 //!   the emission plan and the wire stay in `source`.
 //! - `numeric` - small numeric helpers (range checks, saturating decimal
 //!   conversion, round-lot snapping).

@@ -49,7 +49,7 @@ use crate::{
 };
 
 /// The engine-state facts a reservation must know to bound a command's output.
-/// Read from the engine under the SAME lock that will then process the command,
+/// Read from the engine under the very lock that will then process the command,
 /// so the shape cannot drift between the reservation and the production it
 /// covers.
 #[derive(Debug, Clone, Copy)]

@@ -18,7 +18,7 @@ use crate::subcontract::{
 };
 
 /// `(UTC hour, UTC day-of-week with Sun=0)` - the runtime's own keying,
-/// NOT the exchange-local hour the legacy session-curve diagnostics use.
+/// not the exchange-local hour the legacy session-curve diagnostics use.
 #[must_use]
 pub fn utc_hour_dow(ts_ns: i64) -> (usize, usize) {
     let s = ts_ns.div_euclid(1_000_000_000);

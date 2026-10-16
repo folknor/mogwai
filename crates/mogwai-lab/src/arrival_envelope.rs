@@ -659,7 +659,7 @@ pub fn simulate_candidate_month(
                 scalars,
                 seed,
                 grid.start_ns,
-                mogwai_venue::source::fingerprint(),
+                mogwai_data::Fingerprint::repo(),
                 &profile.session,
                 None,
                 SizeGrid::from_def(&profile.def),

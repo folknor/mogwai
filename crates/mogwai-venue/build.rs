@@ -6,85 +6,44 @@
 //!
 //! Composes semver (from `CARGO_PKG_VERSION`) with the short git hash and the
 //! UTC commit time into `MOGWAI_LONG_VERSION`, e.g.
-//! `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. Kept dependency-light: shells
-//! `git` directly rather than pulling crates, and falls back to `unknown`
-//! outside a checkout (e.g. a `cargo install` tarball with no `.git`) so a
-//! release never fails to build for lack of git metadata.
+//! `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. The hash carries `-dirty`
+//! when the repository had any uncommitted change, untracked files included.
+//!
+//! Every value arrives ready-made in `MOGWAI_SOURCE_IDENTITY`, which the
+//! workspace's build runner computes with `scripts/source_identity.py` before
+//! every cargo invocation, and the script reruns only when that value changes.
+//! This workspace is only ever built through that runner, so there is no git
+//! fallback: a build without the variable stamps `unknown`.
 //!
 //! Every stamped value is a function of the tree, never of the moment the
 //! script ran, so two builds of one tree state print one version string.
-//! A rerun still recompiles this crate and its dependents whatever it emits,
-//! which is why the watched set is kept to the files that move the hash or
-//! the dirty flag.
 
-use std::process::Command;
+const IDENTITY_VAR: &str = "MOGWAI_SOURCE_IDENTITY";
 
-/// Run `cmd args`, returning trimmed stdout, or `None` on failure / empty
-/// output (so a missing `git` or a non-repo build degrades cleanly).
-/// `TZ=UTC` makes `--date=format-local` render in UTC whatever the host zone.
-fn capture(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd)
-        .env("TZ", "UTC")
-        .args(args)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if s.is_empty() { None } else { Some(s) }
+/// The short hash (with `-dirty`) and commit time from the identity line,
+/// `<sha> <clean|dirty> <commit time>`. Anything else, including the script's
+/// own `unknown`, reads as `None` and stamps `unknown`.
+fn from_identity(identity: &str) -> Option<(String, String)> {
+    let (sha, rest) = identity.split_once(' ')?;
+    let (flag, commit_time) = rest.split_once(' ')?;
+    let short = sha.get(..9)?;
+    let hash = match flag {
+        "clean" => short.to_owned(),
+        "dirty" => format!("{short}-dirty"),
+        _ => return None,
+    };
+    Some((hash, commit_time.to_owned()))
 }
 
 fn main() {
-    let hash =
-        capture("git", &["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rerun-if-env-changed={IDENTITY_VAR}");
 
-    // A non-empty porcelain status means the tree carried uncommitted changes at
-    // build time - flag it so a `-dirty` build is never mistaken for one off a
-    // clean commit. `git status` is repo-wide regardless of this crate subdir.
-    let hash = if capture("git", &["status", "--porcelain"]).is_some() {
-        format!("{hash}-dirty")
-    } else {
-        hash
-    };
-
-    let commit_time = capture(
-        "git",
-        &[
-            "log",
-            "-1",
-            "--date=format-local:%Y-%m-%d %H:%M:%S UTC",
-            "--format=%cd",
-        ],
-    )
-    .unwrap_or_else(|| "unknown".to_owned());
+    let (hash, commit_time) = std::env::var(IDENTITY_VAR)
+        .ok()
+        .and_then(|identity| from_identity(&identity))
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
 
     let semver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned());
 
     println!("cargo:rustc-env=MOGWAI_LONG_VERSION={semver} ({hash} {commit_time})");
-
-    // Re-run when the checked-out commit or the index moves so the hash and the
-    // dirty flag stay honest. The workspace `.git` is two levels up from this
-    // crate. `.git/HEAD` alone is not enough: on a branch it holds
-    // `ref: refs/heads/<name>` and only changes on a checkout, while a commit
-    // moves the ref file it names, or `packed-refs` once refs are packed.
-    watch("../../.git/HEAD");
-    watch("../../.git/index");
-    watch("../../.git/packed-refs");
-    if let Some(r) = std::fs::read_to_string("../../.git/HEAD")
-        .ok()
-        .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_owned()))
-    {
-        watch(&format!("../../.git/{r}"));
-    }
-}
-
-/// Watch `path` only if it exists. Cargo treats a missing rerun-if-changed
-/// path as always stale, so watching an absent `packed-refs` reran this script
-/// and rebuilt every dependent on every invocation. Nothing is lost: packing
-/// refs deletes the loose ref file being watched, and a deletion triggers.
-fn watch(path: &str) {
-    if std::path::Path::new(path).exists() {
-        println!("cargo:rerun-if-changed={path}");
-    }
 }

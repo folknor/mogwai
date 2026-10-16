@@ -59,7 +59,7 @@ async fn sleep_until_wall(deadline: Instant) {
 /// Apply the filter to one inbound `msg` and queue each resulting wire message
 /// for timed delivery through [`spawn_latency_pump`], anchoring every message's
 /// release deadline at its arrival. Unlike the inline-sleep `dispatch_havoc`,
-/// this does NOT block on the delay - the enqueue is immediate, so the caller's
+/// this does not block on the delay - the enqueue is immediate, so the caller's
 /// select loop stays responsive to pings/commands and a burst pipelines instead
 /// of serializing. A dropped receiver (the pump gone) discards the
 /// message, which only happens during teardown.

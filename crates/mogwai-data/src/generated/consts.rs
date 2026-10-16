@@ -12,12 +12,13 @@
 // explicit (persistence, feedback, weibull_shape, relax_mean_cal) tuples and
 // its best candidate still produced median 13 fills/sec against a measured 4,
 // and 17% empty seconds against a measured 13.4% - a process-shape miss, not a
-// calibration one. Section 4.4b of `notes/spec-trade-cadence.md` permits
+// calibration one. The owner's ruling on the trade-cadence rewrite permitted
 // replacing the family on exactly that evidence, so the ACD clock is gone and
 // arrivals are drawn from a two-state (quiet/active) Markov-modulated Weibull
 // clock instead. Every constant below is fitted, not derived, and the whole
-// block is module-level process shape - deliberately not per-instrument, per
-// section 10's stopping rule.
+// block is module-level process shape - deliberately not per-instrument: that
+// rewrite scoped per-instrument process constants out as an open empirical
+// question rather than something to fit here.
 //
 // The chain is parameterized by its stationary quiet share and a persistence,
 // so the two transition probabilities in `ArrivalClock` fall out as

@@ -33,7 +33,7 @@
 //! tape falsifies. Sharing four venues to save 40 ms is not worth an
 //! order-dependence class nothing in this tree would detect.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 
@@ -2769,9 +2769,9 @@ async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
     // eight-level placeholder ladder displays eight satoshi. Anything larger
     // partially fills and cancels the rest for insufficient displayed depth,
     // which would make this a test of the exhaustion path rather than of the
-    // touch. Sized to the placeholder deliberately, and the cliff itself is
-    // filed in `notes/todo.md` against the calibration brick rather than
-    // papered over here.
+    // touch. Sized to the placeholder deliberately: the depth cliff on every
+    // preset without fitted `top_sizes` is a calibration gap in the presets,
+    // not something to paper over here.
     for (side, id, qty) in [
         ("Buy", "MKT-BOOK-BUY", "0.00000004"),
         ("Sell", "MKT-BOOK-SELL", "0.00000002"),

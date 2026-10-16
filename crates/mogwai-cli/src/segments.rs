@@ -5,10 +5,11 @@
 //!
 //! `cut` carves session slices out of a delivered TBBO month into a returns-space
 //! segment library; `compose` realizes that library as an endless single-session
-//! river and dumps it as CSV for charting. Together they are Slice 1 of
-//! `notes/segment-sampler.md`: cut, re-anchor, loop, chart.
+//! river and dumps it as CSV for charting. Together they are the first slice
+//! of the session-segment sampler (endless Asia from resampled real
+//! segments): cut, re-anchor, loop, chart.
 //!
-//! The bars dump deliberately emits the SAME header `mogwai gen --type bars`
+//! The bars dump deliberately emits the identical header `mogwai gen --type bars`
 //! does, so `analysis/plot_tape.py --csv <file>` charts a composed river and a
 //! generated one with one tool and no flags in between. Comparing the two in
 //! the same viewer is the eyeball gate this whole direction is judged by.
@@ -327,7 +328,7 @@ fn write_trades(
 /// Bars over the composed river, in the header `mogwai gen --type bars` emits so
 /// `analysis/plot_tape.py` charts both without a flag.
 ///
-/// Unlike the generator's writer this does NOT fill empty windows: a composed
+/// Unlike the generator's writer this does not fill empty windows: a composed
 /// endless river has no calendar and therefore no scheduled desert to render -
 /// every gap in it is a real dwell inside a real session slice, or the seam,
 /// and both are bounded. A fill rule here would invent bars rather than expose

@@ -358,7 +358,7 @@ fn hour_vol(rep: &Value) -> Vec<f64> {
             1.0
         } else {
             // `statistics.fmean`, which on CPython 3.14 is `fsum(data) / n` -
-            // Shewchuk exact summation, NOT the Neumaier-compensated builtin
+            // Shewchuk exact summation, not the Neumaier-compensated builtin
             // `sum` used for `ssq` a few lines above. The same Python function
             // uses both, so the two must stay distinct here.
             crate::kernel::py_fsum(positive.iter().copied()) / positive.len() as f64

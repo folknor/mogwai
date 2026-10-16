@@ -324,7 +324,7 @@ fn generated_evidence(per_seed_summaries: &[Value]) -> LabResult<Evidence> {
         (0..24).filter(|h| *h != 21).map(|h| (h, full[h])).collect();
 
     // Per-seed normalized curves, nearest-rank median across seeds per hour;
-    // the across-seed curve is NOT renormalized.
+    // the across-seed curve is never renormalized.
     let central =
         |pick: &dyn Fn(&SeedRec) -> &Option<BTreeMap<usize, f64>>| -> Option<BTreeMap<usize, f64>> {
             if seeds.iter().any(|s| pick(s).is_none()) {

@@ -282,7 +282,7 @@ pub fn simulate_markov(
 ///
 /// The retired Python cadence-feasibility implementation calls
 /// `statistics.pvariance(gaps)` with no
-/// explicit `mu`, which does NOT subtract a rounded mean before squaring. It
+/// explicit `mu`, which does not subtract a rounded mean before squaring. It
 /// evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
 /// binary64 inputs and rounds once at the end. The obvious port - `py_fsum` over
 /// squared deviations from the rounded mean - is not a last-bit difference from

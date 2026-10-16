@@ -8,7 +8,7 @@
 //! These tests are therefore as much about what is never sent under a signal as
 //! about what is sent at the deadline.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

@@ -5,7 +5,7 @@
 # tape so a connection sees frames immediately rather than waiting out real
 # inter-trade gaps.
 
-# Pinned so two venues launched from this file serve the SAME realization,
+# Pinned so two venues launched from this file serve one identical realization,
 # which is what the reproduction gate asserts. fast-alt.toml is the same file
 # at a different seed; fast-random.toml is the same file with none.
 seed = 42

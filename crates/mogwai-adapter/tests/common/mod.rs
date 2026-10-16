@@ -3,10 +3,11 @@
 
 //! Shared test-support harness for the ignored adapter integration tests.
 //!
-//! All three adapter test binaries (`adapter_smoke`, `data_client_transport`,
-//! `havoc`) drive the public adapter path against a self-contained HTTP +
-//! WebSocket stub that speaks just enough of the mogwai protocol. The stub used
-//! to be copy-pasted across the three files with subtle mismatches (only the
+//! Every adapter test module (`adapter_smoke`, `data_client_transport`,
+//! `havoc`, `reconciliation`) drives the public adapter path against a
+//! self-contained HTTP + WebSocket stub that speaks just enough of the mogwai
+//! protocol. The stub used to be copy-pasted across three files with subtle
+//! mismatches (only the
 //! havoc copy parsed `Content-Length`, `respond_json` had two different
 //! signatures, `serve_ws` was fixed-frame in two and data-driven in one). This
 //! module is the single, most-capable variant; each test still drives its own
@@ -71,13 +72,13 @@
 //!   the stronger phrasing that stood here ("the only thing in the crate") is
 //!   false and misleadingly so: `config`'s own
 //!   `both_legs_default_to_the_same_process_callsign` fails too, and it is a unit
-//!   test, so cargo stops after the lib target and the four socket binaries
-//!   never run at all. Anyone repeating that bite-check has to name this test
+//!   test, so cargo stops after the lib target and the socket-backed `all`
+//!   binary never runs at all. Anyone repeating that bite-check has to name this test
 //!   directly, or the sweep reports a failure that says nothing about the wire.
 
-// A shared test-support module: every item is `pub` so the three test binaries
-// can use it, but nothing is reachable outside the crate, so both lints fire
-// here by construction rather than flagging real issues.
+// A shared test-support module: every item is `pub` so the sibling test
+// modules can use it, but nothing is reachable outside the crate, so both lints
+// fire here by construction rather than flagging real issues.
 #![allow(dead_code, unreachable_pub)]
 
 use std::{

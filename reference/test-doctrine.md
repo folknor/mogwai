@@ -7,8 +7,8 @@ production-code ones, closed 2026-08-20, then a five-document production
 bug-hunt arc - protocol and CLI, venue serving, venue mechanics, engine,
 adapter - closed 2026-08-26. Each arc's round-by-round
 carry-forward was deleted once this distillation landed; a live arc keeps a
-live carry-forward (`notes/bug-loop-carry-forward.md` existing is the normal
-state during an arc), and it is deleted when that arc closes and whatever
+live carry-forward under `notes/` (one existing is the normal state during
+an arc), and it is deleted when that arc closes and whatever
 still binds has been folded in here.
 
 This document is binding. Read it before laying, bite-checking or judging any

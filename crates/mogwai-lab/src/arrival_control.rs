@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Protocol 12b brick N: the deterministic hourly re-centring negative
-//! control. The mechanism is `notes/protocol-12b-arrival-composition-spec.md`
-//! section 5.5 and brick N; gates B1 to B7 are that document's section 10.2,
-//! verbatim. Every constant here is lifted, never chosen.
+//! control. The mechanism is family 5 (hourly re-centring) and brick N of the
+//! protocol 12b arrival-composition spec, and gates B1 to B7 are its
+//! simultaneous hard gates, verbatim. That spec was deleted when the
+//! measure-and-fit arc closed and git history holds it; every constant here
+//! is lifted from it, never chosen, and the code is now the record.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -359,7 +361,7 @@ pub fn control_generated_pass(
         profile.scalars.clone(),
         seed,
         walk_start,
-        mogwai_venue::source::fingerprint(),
+        mogwai_data::Fingerprint::repo(),
         &profile.session,
         None,
         mogwai_data::SizeGrid::from_def(&profile.def),

@@ -144,8 +144,7 @@ sweep: the level step inside a multi-print sweep takes its solved
 probability, where the bounce regime's low multiplier, which never stepped
 on this path, had pinned it at a third; a multi-print parent now spans more
 than one level nine times in ten, as a CME trade summary does. Every knob's
-provenance is in the MNQ preset; the fit and its comparison tables are in
-`notes/synthetic-tape-micro.md`. Every MNQ and MES tape moves;
+provenance is in the MNQ preset. Every MNQ and MES tape moves;
 calendar-less presets are byte-identical.
 
 Version 34 gives a parent an impact on the mid, a propagator. The real
@@ -162,7 +161,7 @@ mid is therefore not a martingale, as the real one is not (the real
 variance ratio from fifteen seconds to fifteen minutes is 1.18); from a
 minute up it is, as before. The variance the term supplies over a minute
 is given up by `event_log_sigma`. The fit is `analysis/tape-v2/
-proto_impact.py` and the comparison is in `notes/synthetic-tape-micro.md`.
+proto_impact.py`.
 Every MNQ and MES tape moves; calendar-less presets are byte-identical.
 
 Not every bump moves every tape, and the record for the crypto lineage is

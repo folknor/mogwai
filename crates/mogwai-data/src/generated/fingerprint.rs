@@ -526,7 +526,7 @@ pub struct GeneratorScalars {
     /// for byte.
     #[serde(default)]
     pub cascade: Option<super::cascade::CascadeConfig>,
-    /// The discrete book beside the cascade (`notes/book-dynamics-spec.md`):
+    /// The discrete book beside the cascade (the `book` module):
     /// spread state, effective depletion and the frozen ladder. Present, it
     /// replaces the placed constant-width book and the trade bounce on the
     /// cascade path; absent, every cascade preset keeps the placed book byte

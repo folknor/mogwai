@@ -54,12 +54,13 @@ the one the project has already settled.
    the exact command to run - copy-pasteable, flags and all, not "run the
    relevant tests". The commands that exist today are:
    - `brokkr check` - gremlins, clippy and the tests, in the DEV profile and
-     scoped to changed files. It does not run the four `#[ignore]`d
-     socket-backed adapter binaries (`adapter_smoke`,
-     `data_client_transport`, `havoc`, `reconciliation`), and two
-     regressions have shipped red through that gap.
+     scoped to changed files. It does not run the `#[ignore]`d
+     socket-backed adapter tests (the `adapter_smoke`,
+     `data_client_transport`, `havoc` and `reconciliation` modules of the
+     adapter's integration test binary), and two regressions have shipped red
+     through that gap.
    - `brokkr check --gate` - the complete answer and the only invocation that
-     runs those four. A spec touching `mogwai-adapter` names this one.
+     runs them. A spec touching `mogwai-adapter` names this one.
    - `brokkr test -p <package> <NAME>` - a focused run with
      `--include-ignored`, building dev by default (`[test] debug = true`;
      pass `--release` where optimization is what is measured), which is how

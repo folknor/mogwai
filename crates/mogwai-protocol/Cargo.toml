@@ -46,7 +46,7 @@ name = "tag_decode_probe"
 # `Symbol` table, which refused that change. No `required-features` for exactly
 # the same reason as above: it wraps the global allocator too, so an
 # instrumented build would count the profiler's allocator rather than serde's.
-# It is deliberately NOT a `brokkr mogwai` target either - `brokkr.toml` records
+# Nor is it a `brokkr mogwai` target, deliberately - `brokkr.toml` records
 # why beside the other non-registrations.
 [[example]]
 name = "symbol_decode_probe"

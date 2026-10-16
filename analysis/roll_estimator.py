@@ -71,7 +71,7 @@ def roll_in_stratum(prices, change_vol, boundaries, stratum, tick, min_pairs):
 def conformance():
     with open(FIXTURE) as fh:
         spec = json.load(fh)
-    # FIRST STATEMENT AFTER THE PARSE, matching the Rust half's `assert_eq!`.
+    # The very first statement after the parse, matching the Rust half's `assert_eq!`.
     # The Rust half asserts this; printing it is not the same thing. A schema
     # bump that ADDS a gated field leaves this runner green while reading the
     # fixture under rules it was never re-read against, so the two halves would

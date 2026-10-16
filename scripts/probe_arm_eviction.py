@@ -62,7 +62,7 @@ def partial(client_order_id: str) -> dict:
 def main() -> None:
     with Venue(config=None, duration=None) as venue:
         # Board before arming, and stay boarded for the whole walk. The armed
-        # queue whose cap this probes lives on an ACCOUNT's engine, and accounts
+        # queue whose cap this probes lives on an account's engine, and accounts
         # are minted when a socket presents one - so a probe that armed against
         # a venue nobody had connected to was arming into the run's replay
         # record and no engine at all. `Run::arm` reports an eviction only from

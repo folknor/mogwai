@@ -14,8 +14,8 @@ pub struct RunSeeds {
 // Changing this derivation or either domain changes generated tape identity and
 // therefore requires a `mogwai_data::TAPE_PROTOCOL_VERSION` bump in the same
 // commit. The constant lives in the downstream crate because mogwai-protocol
-// deliberately has no workspace dependencies; see the repository versioning
-// rule in AGENTS.md.
+// deliberately has no workspace dependencies; the bump rule is
+// unconditional because nothing can detect a missed one.
 //
 // Domain separation rather than `seed` and `seed + 1`, so adjacent run seeds do
 // not alias one another's streams. Little-endian is the one free choice in "the

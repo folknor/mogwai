@@ -1,5 +1,15 @@
 project = "mogwai"
 
+# The source identity the venue and lab build scripts stamp, computed once
+# before every cargo call. With it set, neither script runs git or watches
+# `.git`; they rerun only when this value changes. Before, the venue script
+# watched `.git/index`, which moves on every stage and every index refresh, and
+# rebuilt venue and cli each time. Nothing builds this workspace without
+# brokkr, so the scripts carry no git fallback and stamp `unknown` without it.
+# Build input only: tests must not read it.
+[cargo_env]
+MOGWAI_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
+
 # The default shape: every crate with no feature on. That is the shipped shape
 # and the one every consumer builds - `mogwai-data` and `mogwai-lab` each carry
 # `hotpath`/`hotpath-alloc`, and both are optional dependencies precisely so
@@ -18,7 +28,9 @@ name = "workspace"
 # count and is always the slow one), and if `claims` reads 1-1 the pole
 # binary needs a bigger budget (see brokkr man config parallel). The
 # socket-backed tests all bind 127.0.0.1:0 (checked 2026-09-02), so
-# concurrent binaries cannot collide on a port.
+# concurrent tests cannot collide on a port. The budget was measured when each
+# integration test file was its own binary; each crate now has one, so it is
+# owed a re-measure.
 parallel = { budget = 8 }
 
 # The instrumented shape. It exists because a feature nothing compiles is a
@@ -112,14 +124,17 @@ curated = true
 # the source-level convention phases that are meant to fail before anything
 # compiles. `--no-deps` documents this workspace's own crates only, which is what
 # the lints are about; the dependencies are already compiled by the time this
-# runs, so the marginal cost is rustdoc over seven crates.
+# runs, so the marginal cost is rustdoc over this workspace's crates.
+# `--keep-going` because without it cargo stops scheduling after the first crate
+# that fails to document, and rot in several crates then costs one round trip
+# per crate to drain.
 #
 # The sentinel is cargo's own "Generated <path>" line, which it prints on
 # success and not on a lint failure, and it goes to stderr like the rest of
 # cargo's progress output.
 [[script_check]]
 name = "rustdoc-links"
-command = "cargo doc --no-deps --workspace"
+command = "cargo doc --no-deps --workspace --keep-going"
 expect = "Generated"
 match = "contains"
 stream = "both"
@@ -180,6 +195,32 @@ expect = "spread conformance: all cases passed"
 match = "contains"
 stream = "stdout"
 stage = "pre-test"
+
+# The Document folders rules from AGENTS.md: nothing durable - `docs/`,
+# `reference/`, a crate README, a code comment under `crates/` - may cite a
+# document under `notes/`, and the relative links and backticked repository
+# paths in `docs/` and `reference/` must resolve. Root convention files are
+# exempt, as AGENTS.md says. `pre-clippy` because it reads text and builds
+# nothing. The sentinel prints last and only when every rule is clean.
+[[script_check]]
+name = "doc-links"
+command = "python3 scripts/check_doc_links.py"
+expect = "document conventions ok"
+match = "last-line"
+stream = "stdout"
+stage = "pre-clippy"
+
+# A test whose body neither asserts nor calls anything cannot fail, and it
+# counts toward the suite total all the same - the shape a deletion leaves
+# when it guts a test instead of removing it. The scanner self-tests before
+# reading the tree and reports nothing about the tree if that fails.
+[[script_check]]
+name = "test-assertions"
+command = "python3 scripts/check_test_assertions.py"
+expect = "test assertions ok"
+match = "last-line"
+stream = "stdout"
+stage = "pre-clippy"
 
 [test]
 gate_profile = "gate"
@@ -244,8 +285,9 @@ include_ignored = true
 # `brokkr check --gate` - the complete answer, and the only invocation that
 # runs the adapter's socket-backed integration tests.
 #
-# Those four binaries (`adapter_smoke`, `data_client_transport`, `havoc`,
-# `reconciliation`) are `#[ignore]`d because they bind real loopback listeners,
+# Those tests (the `adapter_smoke`, `data_client_transport`, `havoc` and
+# `reconciliation` modules of the adapter's `all` test binary) are `#[ignore]`d
+# because they bind real loopback listeners,
 # which not every environment allows - a sandbox without sockets fails them for
 # reasons that have nothing to do with the code. So plain `brokkr check` stays
 # as it was: fast, sandbox-safe, and blind to them.
@@ -576,7 +618,7 @@ except = [
     '\b(?:env!|env::var(?:_os)?|getenv|environ)',
     #   URLs, and a bare HTTP request line.
     'https?://',
-    '^\s*(?://[/!]?|\*|#+)?\s*(?:GET|PUT|POST|PATCH|DELETE|HEAD|OPTIONS)\s+/',
+    '^\s*(?://[/!]?|\*|#+)?\s*(?:GET|PUT|POST|PATCH|DELETE|HEAD|OPTIONS)\s+/',  # shout-ok: pattern text
     #
     # SCREAMING_SNAKE_CASE needs no entry at all: `\b` does not break at `_`,
     # so no run of 5+ caps in `REQUEST_TIMEOUT_SECS` is ever whole-word and
@@ -584,7 +626,7 @@ except = [
     # the three rules above cover how those are actually written.
 
     # -- Idiomatic section markers, not emphasis. --------------------------
-    '^\s*(?://[/!]?|\*|#+)?\s*(?:SAFETY|PANICS|ERRORS|INVARIANT|WARNING|DEPRECATED)\b',
+    '^\s*(?://[/!]?|\*|#+)?\s*(?:SAFETY|PANICS|ERRORS|INVARIANT|WARNING|DEPRECATED)\b',  # shout-ok: pattern text
 
     # -- Acronyms and proper nouns that are legitimately 5+ letters. -------
     # Short by design: prose acronyms are mostly 2-4 letters and clear the
@@ -642,6 +684,106 @@ name = "no-brokkr-in-rust-source"
 pattern = 'brokkr'
 paths = ["crates/**/*.rs"]
 message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
+
+# The short shouted words the 5+ letter rule cannot see. Kept to the words
+# people actually shout in prose; widen it one word at a time, sweeping the
+# tree first. The leading run of complete backtick pairs exempts a word inside
+# a code span, the same parity argument as the preset's first `except`.
+[[textlint]]
+name = "no-short-shouting-rust"
+preset = "no-shouting"
+pattern = '^[^`]*(?:`[^`]*`[^`]*)*\b(?:ALL|BOTH|MUST|NEVER|NOT|ONE|ONLY|SAME)\b'
+paths = ["crates/**/*.rs"]
+region = "comment"
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
+
+[[textlint]]
+name = "no-short-shouting-markdown"
+preset = "no-shouting"
+pattern = '^[^`]*(?:`[^`]*`[^`]*)*\b(?:ALL|BOTH|MUST|NEVER|NOT|ONE|ONLY|SAME)\b'
+paths = ["**/*.md"]
+# The agent instruction files are the owner's to word.
+exclude = ["research/**", "AGENTS.md", "CLAUDE.md"]
+except = ['^ {4,}\S', '^\t']
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
+
+# Hash-comment files: the Python under scripts/ and analysis/, and the TOML the
+# Rust-only `region` tokenizer cannot reach. Line-based, so the pattern itself
+# requires the shout to sit after a `#`.
+[[textlint]]
+name = "no-shouting-hash-comments"
+preset = "no-shouting"
+pattern = '#[^`]*(?:`[^`]*`[^`]*)*\b(?:[A-Z]{5,}|ALL|BOTH|MUST|NEVER|NOT|ONE|ONLY|SAME)\b'
+paths = ["scripts/**/*.py", "analysis/**/*.py", "crates/**/*.toml", "Cargo.toml", "brokkr.toml"]
+# `deshout_toml.py` is the one-off that de-shouted this file, so its string
+# table is shouting by construction.
+exclude = ["scripts/deshout_toml.py"]
+# Line-based, so a `#` inside a Python string reads as a comment opener; a line
+# whose first `#` sits after an opening quote is string text, not prose.
+except = ['^[^#]*["\x27][^"\x27]*#']
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
+
+# Test data lives in the project, never in the host's temp directory: a test
+# that writes there leaks across runs and hosts and cannot be inspected after
+# a failure.
+[[textlint]]
+name = "no-host-temp-dir"
+pattern = '\btemp_dir\s*\('
+paths = ["crates/**/*.rs"]
+region = "code"
+message = "site test data under the project's target directory, never the host's temp_dir()"
+
+# A code comment outlives the convention file it would cite, and those files
+# are instructions to agents rather than reference. State the reason in place,
+# or cite reference/ or docs/.
+[[textlint]]
+name = "code-does-not-cite-agent-instructions"
+pattern = '\b(?:AGENTS|CLAUDE)\.md\b'
+paths = ["crates/**/*.rs", "crates/**/Cargo.toml", "Cargo.toml"]
+message = "code does not cite AGENTS.md or CLAUDE.md; state the reason in place or cite reference/ or docs/"
+
+# The broker core never imports nautilus; `mogwai-adapter` is the one,
+# deliberate exception. A forbid list fails open for a nautilus crate not named
+# here, so a new nautilus dependency of the adapter is added to this list too.
+[[dependency_rule]]
+name = "nautilus-only-in-the-adapter"
+from = "*"
+except = ["mogwai-adapter"]
+forbid = [
+    "nautilus-common",
+    "nautilus-core",
+    "nautilus-live",
+    "nautilus-model",
+    "nautilus-network",
+]
+
+# The wire types are the leaf both ends serialize against.
+[[dependency_rule]]
+name = "protocol-is-the-leaf"
+from = "mogwai-protocol"
+forbid = [
+    "mogwai-engine",
+    "mogwai-data",
+    "mogwai-venue",
+    "mogwai-lab",
+    "mogwai-cli",
+    "mogwai-adapter",
+]
+
+# The offline method library is reached only through the binary; nothing in
+# the serving path may depend back on it.
+[[dependency_rule]]
+name = "lab-only-under-the-cli"
+from = "*"
+except = ["mogwai-lab", "mogwai-cli"]
+forbid = "mogwai-lab"
+
+# The adapter and the binary are the tops of the graph.
+[[dependency_rule]]
+name = "adapter-and-cli-have-no-dependents"
+from = "*"
+except = ["mogwai-adapter", "mogwai-cli"]
+forbid = ["mogwai-adapter", "mogwai-cli"]
 
 # ---------------------------------------------------------------------------
 # The benchmark registry: targets and their feature shapes, plus out-of-git

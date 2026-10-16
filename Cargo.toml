@@ -17,7 +17,7 @@ mogwai-venue = { path = "crates/mogwai-venue" }
 mogwai-lab = { path = "crates/mogwai-lab" }
 
 serde = { version = "1", features = ["derive", "rc"] }
-# `float_roundtrip` is NOT optional dressing here. serde_json's default float
+# `float_roundtrip` is not optional dressing here. serde_json's default float
 # parser is a fast approximation that can land one ULP off the correctly
 # rounded value: `from_str("12.344540150041679")` produces a different f64
 # than `str::parse` (and than Python's `float()`). The protocol-12a parity
@@ -56,7 +56,7 @@ anyhow = "1"
 criterion = { version = "0.8", default-features = false, features = [
     "cargo_bench_support",
 ] }
-# Function-level profiling for the layer-2 optimization harnesses. An OPTIONAL
+# Function-level profiling for the layer-2 optimization harnesses. An optional
 # dependency of the two crates that use it, never a plain one: with neither
 # crate feature on it must not appear in a consumer's dependency graph at all,
 # which "inert when off" does not achieve. Its own `hotpath` feature is what
@@ -88,7 +88,7 @@ variant_size_differences = "deny"
 # code it constrains. The `rustdoc-links` script-check in `brokkr.toml` is what
 # runs rustdoc, since a lint nothing invokes is a lint that is off.
 broken_intra_doc_links = "deny"
-# `private_intra_doc_links` is deliberately NOT denied. It fires on a public
+# `private_intra_doc_links` is deliberately left undenied. It fires on a public
 # item's doc linking a private one, and this tree does that everywhere on
 # purpose: the doc comments are written for whoever changes the code, so
 # `valuation_at` naming `position_unrealized_checked` and the engine's module

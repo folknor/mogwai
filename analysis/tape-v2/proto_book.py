@@ -107,7 +107,7 @@ SIZE_REP = [1, 2, 3, 4, 5, 7, 15, 35, 70]
 # parents). The shape is jump-then-plateau, which no single multiplier
 # carries; the ratio vector is stable across months and phases while
 # absolute depth varies twofold, so the touch carries the variation.
-# The ADOPTED vector is the seven-entry exercised prefix in
+# The adopted vector is the seven-entry exercised prefix in
 # book-config.json (the walk slices `[: max_levels - 1]` at
 # max_levels 8); this nine-entry constant is the CLI fallback and the
 # record of the two unexercised tail values for the 8-versus-10
@@ -453,7 +453,7 @@ def simulate(rng: np.random.Generator, sign: np.ndarray, sizes: np.ndarray, cfg)
             partial = False
             residual = 0
         executed[k] = v - remaining
-        # The OBSERVED level count matches the real extractor: distinct
+        # The observed level count matches the real extractor: distinct
         # executed prices, a partially consumed stopping level included.
         # The mechanism below keeps `levels` (fully exhausted levels) -
         # recession distance is exhaustion, not execution breadth. The

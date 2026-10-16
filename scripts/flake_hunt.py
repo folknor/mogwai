@@ -70,7 +70,7 @@ def main() -> int:
             )
             lines = (done.stdout + done.stderr).splitlines()
             noise = ("empirical-corpus-range", "instrument preset override")
-            # FROM THE FIRST PANIC TO THE END, ONCE. Without the break this
+            # From the first panic to the end, and only once. Without the break this
             # printed the whole remaining output per panic line - the first
             # panic dumped the tail, and every later one dumped it again - so a
             # red round's report grew quadratically in the number of panics and

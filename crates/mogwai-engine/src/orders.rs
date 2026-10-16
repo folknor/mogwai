@@ -467,7 +467,7 @@ impl Engine {
         // Divergence: reject the next submit outright. `RejectNextSubmit`
         // carries no target, so it applies to whatever submit arrives next.
         //
-        // NOT for a group member: `on_submit_group` consumed the arm once for
+        // Not for a group member, though: `on_submit_group` consumed the arm once for
         // the whole group, because spending it per member would refuse one leg
         // of a group whose whole promise is that its legs share a fate.
         if apply_divergences
@@ -1533,7 +1533,7 @@ impl Engine {
                 out.extend(self.close_out(pos, &order, WireOrderStatus::Filled, ts));
             }
         }
-        // ONE snapshot for the whole batch, taken after every transition it
+        // A single snapshot for the whole batch, taken after every transition it
         // booked - which is what `sizing::swept_fill_max_bytes` bounds. A pass
         // whose only transitions were hold-freeing cancels still owes
         // it, so the test is "did anything move the ledger", not "did anything

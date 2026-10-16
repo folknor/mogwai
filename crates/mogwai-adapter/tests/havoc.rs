@@ -12,7 +12,7 @@
 //! Run a focused case in a socket-capable environment with e.g.
 //! `test -p mogwai-adapter ships_venue_havoc --debug` in the focused runner.
 
-mod common;
+use crate::common;
 
 use std::{
     cell::RefCell,
@@ -707,8 +707,8 @@ async fn havoc_reorder_swaps_adjacent() {
     // held message, this catches it.
     //
     // The flush only runs from the reader loop's on-disconnect callback, which
-    // fires when the socket closes (peer close / EOF) - NOT during a live
-    // mid-stream read, and NOT on a client-side `stop()` (that just aborts the
+    // fires when the socket closes (peer close / EOF) - never during a live
+    // mid-stream read, and never on a client-side `stop()` (that just aborts the
     // reader task: finding A.5, the held message starves until a peer close). So
     // the stub closes the socket after pushing the three trades, modelling a
     // clean stream end; the close drives the flush that releases the third.
@@ -874,7 +874,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     // Cancelling `connect()` mid-flight skips its own cleanup - `abort_tasks`
     // and `retire_connected_flag` never run, so the pump, the reader and the
     // `delivery_ready` sender are dropped rather than retired. That is the
-    // guard-scope shape AGENTS.md flags, and terminality is what makes it safe
+    // guard-scope shape `reference/test-doctrine.md` flags, and terminality is what makes it safe
     // here: a venue-identity mismatch is terminal, so the lifecycle loop returns
     // and nothing restarts to race the assertions below. On any fixture whose
     // failure is retryable this cancellation would leave a live reconnect loop

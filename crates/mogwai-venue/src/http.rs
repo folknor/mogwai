@@ -808,7 +808,7 @@ pub(crate) async fn process_order_cmd(
     let mut engine = account_state.engine.lock().await;
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape, &cleared) else {
-        // The engine has NOT been asked to process anything, so nothing
+        // The engine has not yet been asked to process anything, so nothing
         // mutated: the refusal is the whole effect of this command.
         return OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
             subject: admission_subject(&order_cmd),
@@ -1248,8 +1248,8 @@ pub(crate) async fn arm_divergence(
                 // And with a query, never the cancel. This ran
                 // `cancel_open_order_silently` for its `Err`, which is not a
                 // read: on `Ok` it closes the order out and reaps its held
-                // children. So a request naming an account that does NOT hold
-                // the id, on a venue where the default account DOES, silently
+                // children. So a request naming an account that does not hold
+                // the id, on a venue where the default account does, silently
                 // cancelled the default's order and answered `404 unknown
                 // order` because the `Err` was `None` - the exact cross-account
                 // cancel the scoping above closes. `silent_cancel_refusal` is
@@ -2857,7 +2857,7 @@ pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
 
 /// A page may be cut mid-instant, and that is safe only because the generator
 /// never prints two trades at one instant. The rule a consumer is held to -
-/// `AGENTS.md`'s frontier family: a timestamp-only cursor may advance onto an
+/// the frontier family in `reference/test-doctrine.md`: a timestamp-only cursor may advance onto an
 /// instant only once every row at that instant has been seen - would be
 /// unsatisfiable against this surface if ties existed, since the venue ships no
 /// opaque cursor and resuming at `last_ts` repeats while `last_ts + 1` drops.

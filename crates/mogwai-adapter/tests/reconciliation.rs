@@ -9,7 +9,7 @@
 //! `allows_reconciliation_overfill`). These socket-backed tests pin every
 //! mogwai venue-truth surface and their mass-status composition.
 
-mod common;
+use crate::common;
 
 use std::{
     cell::RefCell,

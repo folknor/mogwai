@@ -65,12 +65,12 @@ SCHEMA_VERSION = 3
 # Expected microsecond epoch width. 13 digits is millisecond, 16 microsecond.
 MICROSECOND_DIGITS = 16
 
-# The OBSERVED spot layout: seven columns, with the trailing is_best_match the
+# The observed spot layout: seven columns, with the trailing is_best_match the
 # vendor's own documentation lists and every archive in this corpus carries.
 # Version 2 of this file recorded six here while accepting stable seven-column
 # data, because the verdict never compared the shape against the schema - see
 # the version 3 note above. Position, not name, is what the parser uses, so a
-# header, when one exists, is checked AGAINST this rather than trusted to
+# header, when one exists, is checked against this rather than trusted to
 # define it. The monthly spot dumps carry NO header row - verified across all
 # nineteen archives - so header equality is enforced conditionally: absent is
 # the documented vendor format, present-but-different is a failure.
@@ -224,7 +224,7 @@ def scan(path: Path) -> dict:
     tie_run = 0
     max_tie_run = 0
 
-    # Two grouping rules, tracked simultaneously. Only COUNTS and the size
+    # Two grouping rules, tracked simultaneously. Only counts and the size
     # histogram are kept; no cadence statistic is derived. The timestamp+side
     # key is held as two scalars so no tuple is allocated per row.
     key_stamp = None
@@ -374,7 +374,7 @@ def scan(path: Path) -> dict:
         "contract_1_header": {
             "present": header is not None,
             "columns": header,
-            # EXACT normalized equality, not a two-position spot check. The
+            # Exact normalized equality, not a two-position spot check. The
             # old positional check would have accepted any header naming a
             # time-ish column 4 and a buyer-ish column 5, whatever else it
             # claimed.
@@ -390,7 +390,7 @@ def scan(path: Path) -> dict:
             "is_microsecond": lo == hi == MICROSECOND_DIGITS,
         },
         "contract_3_timestamps": {
-            # Spot trades carries ONE timestamp column, so there is no
+            # Spot trades carries a single timestamp column, so there is no
             # transaction-versus-publication distinction available here. That is
             # a property of the data, recorded rather than resolved by guessing.
             "timestamp_columns": 1,
@@ -760,7 +760,7 @@ def mode_report() -> int:
             f"{'pass' if r['diagnostics_pass'] else 'FAIL'}"
         )
 
-    # Longest contiguous run of passing months. A failure TRUNCATES rather than
+    # Longest contiguous run of passing months. A failure truncates rather than
     # being bridged, per preregistration section 3.
     best_start = best_len = 0
     run_start = run_len = 0

@@ -27,7 +27,7 @@
 //! Marked `#[ignore]` because it binds a real TCP listener, which the sandbox
 //! may refuse; the full gate and the focused runner both include it.
 
-mod common;
+use crate::common;
 
 use std::{
     sync::Arc,
@@ -1059,9 +1059,10 @@ async fn off_river_window_still_answers_the_request() {
 /// would produce. Loopback with today's small heads made both latent rather
 /// than absent.
 ///
-/// This test lives in a test binary rather than beside the helper because
-/// `tests/common` is compiled into four of them and a pin there would run four
-/// times for one property.
+/// This test lives here rather than beside the helper for a reason that no
+/// longer holds: `tests/common` was once compiled into every adapter test
+/// binary, so a pin there would have run once per binary. They are now modules
+/// of one binary, so the pin could move into `common` without duplicating.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn the_harness_reads_a_request_head_split_across_segments() {

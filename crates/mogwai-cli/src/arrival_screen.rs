@@ -748,7 +748,7 @@ mod tests {
     /// And the version assertion was false on its merits, which the dead path
     /// was hiding. It held the committed artifact's recorded
     /// `tape_protocol_version` against the live constant, so every unrelated
-    /// bump - and `AGENTS.md` declares bumps free - would have turned this
+    /// bump - and bumps are free, since no consumer depends on a tape identity - would have turned this
     /// red. A frozen artifact records the identity it was produced under; that
     /// is the whole point of recording it. What is actually assertable is that
     /// the field is there and is an identity, so that is what is asserted.

@@ -4,8 +4,8 @@
 //! The cut half of the session-segment sampler: real session slices carved out
 //! of a delivered TBBO month into a segment library the composer can loop.
 //!
-//! The direction this serves is `notes/segment-sampler.md` - the tape is a
-//! composable session-segment sampler rather than a month imitator. This module
+//! The direction this serves, by owner ruling: the tape is a composable
+//! session-segment sampler rather than a month imitator. This module
 //! owns only the cut; the compose-and-serve half is `mogwai_data::segment`,
 //! which is why the library format is a plain versioned JSON artifact rather
 //! than a Rust type shared across the crate boundary (`mogwai-lab` depends on

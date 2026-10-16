@@ -690,7 +690,7 @@ async fn run_ws_connection_inner<
 
         // Reattach state is WS commands only - resubscribes on the data socket,
         // nothing on the exec socket. In particular the execution client does
-        // NOT re-pull `GET /account` here, so an `AccountState` the venue
+        // not re-pull `GET /account` here, so an `AccountState` the venue
         // dropped during a blackout that spanned this reconnect stays missing
         // from the pushed account row until the next fill-driven snapshot.
         //

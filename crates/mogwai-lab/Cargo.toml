@@ -7,27 +7,26 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 build = "build.rs"
+autotests = false
 
-# The corpus/evidence and measurement layer of the Python-to-Rust rewrite
-# (phases 1 and 2 of the retired rewrite plan): the TBBO stream contract,
+# The offline corpus-to-fingerprint method library: the TBBO stream contract,
 # session/segment math, manifest-bound input verification and preflight, the
-# storage policy (artifact/cache/scratch), and the unified protocol-12a block
-# engine.
+# storage policy (artifact/cache/scratch), the protocol-12a block engine, and
+# the fits, synthesis, arrival instruments and sidecar built on them.
 #
-# It depends on mogwai-data and mogwai-protocol for the GENERATED measurement
-# side only - the TickEvent/VolTrace/Decimal types a walk emits - and READS
-# them exclusively. Nothing here adds, changes or observes a draw, so the
-# crate carries no TAPE_PROTOCOL_VERSION obligation of its own (spec 2.3, the
-# same consumer-only standing measure12a.rs has). It still depends on neither
-# mogwai-venue nor mogwai-engine: the parity tests that need preset and
-# profile resolution live in mogwai-cli, which depends on both, precisely so
-# the axum stack never lands under the lab.
+# It depends on mogwai-data and mogwai-protocol for the generated measurement
+# side - the TickEvent/VolTrace/Decimal types a walk emits - and only ever
+# reads them. Nothing here adds, changes or observes a draw, so the crate
+# carries no TAPE_PROTOCOL_VERSION obligation of its own (spec 2.3, the same
+# consumer-only standing measure12a.rs has).
 [dependencies]
 mogwai-data.workspace = true
 mogwai-protocol.workspace = true
-# Phase 3b only: `summary`/`fit` walk against an `InstrumentProfile`, which
-# `mogwai-venue` defines and resolves through `Config::load` - the same path
-# the retired Python fit implementation's scratch-config walks took.
+# Instrument-profile and preset resolution only: `InstrumentProfile`,
+# `profile_from_preset` and `Config::load`, the same path the retired Python
+# fit implementation's scratch-config walks took. mogwai-venue has no features,
+# so this brings its serving stack - axum, tokio, mogwai-engine - into the
+# lab's build graph. The edge is one-way: mogwai-venue depends on nothing here.
 mogwai-venue.workspace = true
 
 serde.workspace = true
@@ -40,14 +39,16 @@ sha2.workspace = true
 rust_decimal.workspace = true
 zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # `sidecar` opens the benchmark marker FIFO non-blocking, and needs exactly one
-# thing from here: the `O_NONBLOCK` flag value. Same pin mogwai-venue carries;
-# no feature is enabled because `nix::libc` is unconditional.
+# thing from here: the `O_NONBLOCK` flag value, through the unconditional
+# `nix::libc`. Same pin mogwai-venue carries; venue's `fs`, `process` and
+# `signal` features unify into this build through that edge regardless.
 nix = { version = "0.31.3", default-features = false }
 hotpath = { workspace = true, optional = true }
 
 # Examples only. `ring_sizing` allocates one shipped per-boat broadcast ring to
-# measure its eager resident cost; the LIBRARY stays runtime-free, which is why
-# this is not a dependency.
+# measure its eager resident cost. The library names no tokio item itself, so
+# it is declared here rather than as a dependency, though tokio reaches the
+# library's build through mogwai-venue anyway.
 [dev-dependencies]
 tokio.workspace = true
 
@@ -84,6 +85,14 @@ name = "stage_a_batch_bench"
 # is opt-in through the call site's own `--features`.
 [[example]]
 name = "envelope_evaluation_bench"
+
+# Every integration test compiles into the one `all` target below, which
+# `autotests = false` in [package] makes the only one. Cargo's default links a
+# binary per `tests/*.rs` file; a new test file is declared as a module in
+# `tests/all.rs`, never added as a target of its own.
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [lints]
 workspace = true

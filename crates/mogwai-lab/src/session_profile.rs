@@ -137,7 +137,7 @@ impl Calendar {
         self.windows.iter().map(|(s, e)| e - s).sum()
     }
 
-    /// Open minutes per session, which is NOT the session's span: sessions
+    /// Open minutes per session, which is not the session's span: sessions
     /// merge across the daily halt, so the span overstates exposure.
     #[must_use]
     pub fn session_open_minutes(&self) -> Vec<i64> {

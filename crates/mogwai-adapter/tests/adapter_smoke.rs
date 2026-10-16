@@ -8,7 +8,7 @@
 //! start, connect, submit, drain execution events - and that the fill maps to
 //! the right order/qty/price/venue, not merely the right event variant.
 
-mod common;
+use crate::common;
 
 use std::{
     cell::RefCell,
@@ -107,7 +107,7 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
 
-    // The exec leg, built exactly as every other test in this binary builds one,
+    // The exec leg, built exactly as every other test in this module builds one,
     // so what is asserted here is the default a host gets rather than a fixture.
     let (exec_tx, mut exec_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(exec_tx);
@@ -641,7 +641,7 @@ async fn adapter_submits_a_stop_market_and_sees_the_fill_with_no_triggered() {
         other => panic!("expected an OrderAccepted, got {other:?}"),
     }
     // The venue's wire announced OrderTriggered between the accept and the
-    // fill, and it must NOT surface: nautilus has no Triggered state for a
+    // fill, and surfacing it would be a bug: nautilus has no Triggered state for a
     // stop-market, so forwarding it logged "Invalid event for order type" on
     // every ordinary stop-out. The adapter consumes it, and the next event a
     // host sees after the accept is the fill itself.

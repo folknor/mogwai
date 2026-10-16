@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
+autotests = false
 
 [dependencies]
 mogwai-protocol.workspace = true
@@ -27,7 +28,7 @@ hotpath = { workspace = true, optional = true }
 # dependency's own. Consumers name `mogwai-data/hotpath` and never have to know
 # that arming the macros is a feature on a third crate.
 #
-# `hotpath-alloc` enables BOTH sides deliberately. hotpath's alloc tracking
+# `hotpath-alloc` deliberately enables both sides, never alloc alone. hotpath's alloc tracking
 # only reports through the timing machinery, so alloc alone measures nothing;
 # a feature that silently does nothing is worse than one that costs a little
 # more than asked.
@@ -38,9 +39,10 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 [dev-dependencies]
 criterion.workspace = true
 
-# Examples are declared rather than auto-discovered, so the instrumented one
-# can carry `required-features`. Declaring one target turns auto-discovery off
-# for the rest, which is why the two pre-existing examples are listed too.
+# The instrumented example is declared so it can carry `required-features`.
+# Declaring a target does not turn `autoexamples` off: the rest would still be
+# discovered, so the plain entries below are redundant but harmless, and a
+# declared entry simply overrides the discovered target of the same name.
 [[example]]
 name = "peek"
 
@@ -53,11 +55,19 @@ name = "arrival_walk_bench"
 required-features = ["hotpath"]
 
 # The amendment-only regenerator for the committed arrival transcript pins.
-# It is an example rather than an `#[ignore]`d test BECAUSE the gate profile
-# sets `include_ignored`, so an ignored test that writes a fixture is run by
+# The reason it is an example rather than an `#[ignore]`d test: the gate
+# profile sets `include_ignored`, so an ignored test that writes a fixture is run by
 # every full gate - see the file's own header.
 [[example]]
 name = "regenerate_arrival_transcript"
+
+# Every integration test compiles into the one `all` target below, which
+# `autotests = false` in [package] makes the only one. Cargo's default links a
+# binary per `tests/*.rs` file; a new test file is declared as a module in
+# `tests/all.rs`, never added as a target of its own.
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [lints]
 workspace = true

@@ -120,7 +120,7 @@ def build() -> list[dict]:
     # Two distinct output classes, and the distinction is the whole point of
     # both families. `round_position` pins to the subnormal floor for every
     # result whose leading bit is at or below 2^-1022, so the implementation
-    # takes ONE branch for the subnormals and the lowest normal binade alike -
+    # takes a single branch for the subnormals and the lowest normal binade alike -
     # but the mantissa is below 2^52 in the first and above it in the second,
     # which is where a bound that is too narrow by one binade goes unnoticed.
     # The first version of this generator kept only results below `min_normal`,

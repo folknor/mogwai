@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The discrete book: spread state, effective depletion and minimal
-//! projection against the latent anchor. The mechanism, its consensus
-//! record and the fit behind every constant live in
-//! `notes/book-dynamics-spec.md`; this module is the state and the pure
+//! projection against the latent anchor. The fitted constants arrive as the
+//! `book` scalars beside `cascade`; this module is the state and the pure
 //! transitions, deliberately free of the emission plan and the wire so the
 //! walk logic is testable on its own.
 //!

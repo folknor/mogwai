@@ -148,7 +148,7 @@ pub struct OpenOrder {
     pub resting: Resting,
     /// Number of draws this order has made. Part of the RNG key, so a reprice
     /// or a partial-fill remainder draws a fresh offset rather than reusing the
-    /// one the previous tranche got. Deliberately NOT `revision`, which sweep
+    /// one the previous tranche got. Deliberately not `revision`, which sweep
     /// passes bump: a key that moved with sweep timing would make the trigger a
     /// function of how often the sweeper ran.
     pub band_draw: u32,
@@ -391,8 +391,8 @@ struct FeeSurchargeWindow {
 
 /// The depth ladder the engine crosses, resolved from the instrument's
 /// preset by the venue. The definition lives in `mogwai-protocol` because
-/// the generator's book walks the same ladder - one shared arithmetic, per
-/// the frozen-ladder rule in `notes/book-dynamics-spec.md`.
+/// the generator's book walks the same ladder - one shared multiply-and-floor
+/// arithmetic, so the depth the tape prints is the depth a crossing consumes.
 pub use mogwai_protocol::DepthLadder;
 
 /// What the venue read off its own clean tape at the instant a command arrived:
@@ -2824,7 +2824,7 @@ impl Engine {
                 quantity: state.qty,
                 avg_px: state.avg_px,
                 mark_px: state.mark_px,
-                // Saturating on overflow, NOT zero: the breach check reads a
+                // Saturating on overflow, never zero: the breach check reads a
                 // saturated number from `unrealized_pnl`, and a snapshot that
                 // reported zero for the same position would contradict the
                 // decision the venue just made on it.
@@ -6408,7 +6408,7 @@ mod tests {
         });
         e.arm(Divergence::DuplicateNextFill {});
 
-        // O1 is submitted first; the O2-targeted partial must NOT apply to it,
+        // O1 is submitted first; the O2-targeted partial must not apply to it,
         // but the duplicate behind it must still fire (was silently disarmed).
         let out = e.process_with_market(
             Command::SubmitOrder(limit_order("O1", 10)),
@@ -8534,7 +8534,7 @@ mod tests {
     }
 
     /// The failure the timing exists to prevent: two legs of one bracket swept
-    /// in ONE batch. A reap that waited for the next pass would let the second
+    /// in a single batch. A reap that waited for the next pass would let the second
     /// leg fill against the same span of tape that filled the first.
     #[test]
     fn an_oco_sibling_swept_in_the_same_batch_cannot_also_fill() {
@@ -12163,7 +12163,7 @@ mod tests {
         let rejected = e.process_stamped(Command::SubmitOrder(fok.clone()), 1);
         // The short-of-trigger refusal by its exact text, not by the word
         // "trigger": its sibling refusal ("could not fully fill") is the one
-        // this test must NOT be satisfied by, and only the full string
+        // this test must not be satisfied by, and only the full string
         // separates them.
         assert_eq!(
             reject_reason(&rejected),

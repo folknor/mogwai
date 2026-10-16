@@ -15,7 +15,7 @@ initial_per_contract = "2000"
 maintenance_per_contract = "1800"
 breach_action = "liquidate"
 # Fitted from the delivered July 2026 MNQ TBBO month (job
-# GLBX-20260805-HAPEWPABKG, 22 usable sessions, 29.6M parents over 34.7M
+# `GLBX-20260805-HAPEWPABKG`, 22 usable sessions, 29.6M parents over 34.7M
 # sided prints) under the frozen harness of the retired Python fit
 # implementation; the fit
 # artifact analysis/mnq-fit.json carries every estimator definition,

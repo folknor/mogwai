@@ -39,7 +39,7 @@ UA = {"User-Agent": "mogwai-analysis/1.0 (offline research; stdlib urllib)"}
 # handful of 404s and means the tool discovers coverage rather than assuming it.
 FIRST_CANDIDATE = (2016, 1)
 
-# The last COMPLETE calendar month relative to the preregistration's authoring
+# The last complete calendar month relative to the preregistration's authoring
 # date. Stated rather than computed from the clock: a run in a later month must
 # be a deliberate edit, not a silent span change.
 LAST_COMPLETE = (2026, 7)
@@ -112,7 +112,7 @@ def mode_index(symbol: str) -> None:
     print(f"first        {first[0]:04d}-{first[1]:02d}")
     print(f"last         {last[0]:04d}-{last[1]:02d}")
     print(f"total bytes  {total:,}  ({total / 1e9:.1f} GB)")
-    # Contiguity matters: the preregistration wants a maximal CONTIGUOUS span,
+    # Contiguity matters: the preregistration wants a maximal contiguous span,
     # so a hole is not merely a missing month, it truncates the usable run.
     holes = [f"{y:04d}-{m:02d}" for y, m in missing if (first[0], first[1]) < (y, m)]
     print(f"holes after first present month: {holes if holes else 'none'}")
@@ -338,7 +338,7 @@ def mode_fetch(symbol: str) -> None:
     print(f"authorized span {FETCH_SPAN[0]} .. {FETCH_SPAN[1]}, {len(wanted)} months")
     print(f"destination {DEST}\n")
 
-    # Coverage is confirmed for EVERY month before anything downloads. A hole
+    # Coverage is confirmed for every month before anything downloads. A hole
     # discovered halfway through would leave a partial corpus that looks
     # deliberate, and the preregistration requires a contiguous span.
     print("confirming coverage (HEAD only):")

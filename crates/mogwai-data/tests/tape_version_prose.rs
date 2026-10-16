@@ -55,7 +55,7 @@ fn repo_root() -> PathBuf {
 /// the obvious statement of this hazard is wrong: it does not recurse forever.
 /// Linux caps symlink resolution per pathname at 40, so `is_dir` starts
 /// returning false there and the walk terminates on its own. What it actually
-/// cost was a 40-fold walk - 0.27 s to 1.02 s with one `notes/x -> ..` link on
+/// cost was a 40-fold walk - 0.27 s to 1.02 s with one `x -> ..` link under the notes folder on
 /// this tree - every markdown file counted up to forty times, and a `read_dir`
 /// on the ELOOP boundary able to fail the gate with a symlink error where a
 /// stale-prose verdict belongs.
@@ -194,7 +194,8 @@ fn durable_prose_names_the_live_tape_version() {
     );
 
     // A gate that matches nothing passes forever. Both claim forms are in the
-    // tree today (`reference/architecture.md` and `AGENTS.md`); if a rewrite
+    // tree today (the architecture reference and the root-level agent
+    // instructions file both carry one); if a rewrite
     // drops the last one, the gate has silently stopped gating.
     assert!(
         live_claims >= 2,

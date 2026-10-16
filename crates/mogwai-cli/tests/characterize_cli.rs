@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 /// A three-row `ts,px,sz` corpus, enough for the report to carry a `pair`.
 fn corpus(dir: &Path, name: &str) -> PathBuf {

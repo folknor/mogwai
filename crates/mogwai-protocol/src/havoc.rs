@@ -938,7 +938,7 @@ mod tests {
         // B.7: a zero ceiling with a nonzero initial backoff is ambiguous
         // (max == 0 is not a documented "unlimited" sentinel) and would
         // collapse the lifecycle backoff to a CPU-spinning zero delay. The
-        // old guard fired only when BOTH were > 0, so this slipped through.
+        // old guard fired only when both were > 0, so this slipped through.
         invalid = conn;
         invalid.reconnect_delay_initial_ms = 5_000;
         invalid.reconnect_delay_max_ms = 0;

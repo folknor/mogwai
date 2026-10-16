@@ -17,8 +17,8 @@ import sys
 # each), or a single all-caps word of 5+ letters. Two-to-four-letter single
 # words are overwhelmingly acronyms (CSV, JSON, HTTP, WS, PID) and free.
 SHOUT = re.compile(
-    r"\b[A-Z]{3,}(?:[ ,]+[A-Z]{2,})+\b"  # runs: THE VENUE DOES NOT ...
-    r"|\b[A-Z]{5,}\b"                     # lone long word: IMPORTANT
+    r"\b[A-Z]{3,}(?:[ ,]+[A-Z]{2,})+\b"  # runs: `THE VENUE DOES NOT ...`
+    r"|\b[A-Z]{5,}\b"                     # lone long word: `IMPORTANT`
 )
 
 # The draft brokkr textlint's pattern: lone 5+ words only, no run rule.
@@ -42,7 +42,7 @@ EXEMPT = [
     r"\b(?:env!|env::var(?:_os)?|getenv|environ)",
     #   URLs, and a bare HTTP request line.
     r"https?://",
-    r"^\s*(?://[/!]?|\*|#+)?\s*(?:GET|PUT|POST|PATCH|DELETE|HEAD|OPTIONS)\s+/",
+    r"^\s*(?://[/!]?|\*|#+)?\s*(?:GET|PUT|POST|PATCH|DELETE|HEAD|OPTIONS)\s+/",  # shout-ok
     #
     # SCREAMING_SNAKE_CASE needs no entry at all: \b does not break at _,
     # so no run of 5+ caps in REQUEST_TIMEOUT_SECS is ever whole-word and
@@ -50,7 +50,7 @@ EXEMPT = [
     # and the three rules above cover how those are actually written.
 
     # -- Idiomatic section markers, not emphasis. --------------------------
-    r"^\s*(?://[/!]?|\*|#+)?\s*(?:SAFETY|PANICS|ERRORS|INVARIANT|WARNING|DEPRECATED)\b",
+    r"^\s*(?://[/!]?|\*|#+)?\s*(?:SAFETY|PANICS|ERRORS|INVARIANT|WARNING|DEPRECATED)\b",  # shout-ok
 
     # -- Acronyms and proper nouns that are legitimately 5+ letters. -------
     # Short by design: prose acronyms are mostly 2-4 letters and clear the

@@ -110,7 +110,7 @@ source emits trades only.
 ## The owner's observed defect list (the first eyeball-gate criteria)
 
 From direct comparison of generated tapes (96b1d66 and HEAD - which
-look THE SAME, 201 commits apart) against real April 2026 in the same
+look identical, 201 commits apart) against real April 2026 in the same
 viewer:
 
 1. The cash open does not ignite - the generator smears the 09:30 ET

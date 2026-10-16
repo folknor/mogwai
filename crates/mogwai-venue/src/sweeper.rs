@@ -1599,7 +1599,7 @@ mod tests {
             "the held watermark must leave the settlement to the next pass"
         );
         // Stated so the assertion above cannot be read as vacuous: the span is
-        // the ONLY record, so an advanced watermark loses the instant outright.
+        // the sole record, so an advanced watermark loses the instant outright.
         assert!(
             !calendar
                 .settlement_instants(crossed_to, next_to)

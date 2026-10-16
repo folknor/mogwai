@@ -48,16 +48,17 @@ git history) - streaming TBBO/Binance-trades
 parsing, the protocol-12a measurement engine, aggregation and bootstrap,
 fingerprint and cadence synthesis, and the protocol-11 session-calibration
 fit. Its dependency direction is one-way and asymmetric: `mogwai-lab` depends
-on `mogwai-data`, `mogwai-protocol` and also `mogwai-venue` (session-summary work
-needs to resolve an `InstrumentProfile` through `Config::load` exactly as the
-Python's `--config` scratch walks did), but `mogwai-venue` depends on none of
-it - there is no cycle, and `mogwai-lab` stays out of the tape-generation path
+on `mogwai-data`, `mogwai-protocol` and also `mogwai-venue`, for
+instrument-profile and preset resolution only (`InstrumentProfile`,
+`profile_from_preset`, `Config::load`, as the Python's `--config` scratch walks
+did). Venue has no features, so that edge brings its serving stack into the
+lab's build graph. `mogwai-venue` depends on none of the lab - there is no
+cycle, and `mogwai-lab` stays out of the tape-generation path
 `TAPE_PROTOCOL_VERSION` scopes, the same reason `measure12a.rs` was
 consumer-only inside `mogwai-venue` before the rewrite moved it. `mogwai-cli`
-depends on `mogwai-lab` for the pieces that need no `mogwai-venue` preset
-resolution
-(preflight, cache, most of measure/fit/synth) and calls straight into
-`mogwai-venue` for the generated side of measurement.
+depends on `mogwai-lab` for the offline method (preflight, cache, most of
+measure/fit/synth) and calls straight into `mogwai-venue` for the generated
+side of measurement.
 
 The instrument set is open, and that is why `mogwai-lab` is a library rather
 than a folder of scripts. A symbol is a request string, never an admission

@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use mogwai_lab::arrival_control::{GeneratedBinding, control_generated_pass};
 use serde_json::Value;
 
-mod common;
+use crate::common;
 
 /// The crate's own manifest dir, walked up to the workspace root: an
 /// integration test's working directory is the crate, not the repository.

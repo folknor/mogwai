@@ -1,8 +1,13 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The two-stage count-curve measurement signed in
-//! `notes/count-curve-preregistration.md`.
+//! The count-curve measurement preregistered 2026-08-11: the arrival-count
+//! Fano curve at 1, 5, 15, 60 and 300 s on both the observed and generated
+//! sides, with its within/between-session decomposition. Two backchecks gate
+//! it - Stage 0 recomputes the generated 1, 5 and 60 s counts against the
+//! committed 12a values at exact equality, Stage 1 does the same on the
+//! observed side - before any new horizon is read. The preregistration was
+//! deleted when the measure-and-fit arc closed; git history holds it.
 
 use std::collections::BTreeMap;
 use std::io::Write;

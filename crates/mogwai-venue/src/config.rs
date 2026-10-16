@@ -1340,7 +1340,7 @@ pub(crate) enum ConfiguredClass {
         #[serde(default)]
         swap_short: Decimal,
     },
-    /// A share, held as a position and paid for in `currency`. NOT a spot pair
+    /// A share, held as a position and paid for in `currency`, and not a spot pair
     /// with the ticker as its base: see `InstrumentClass::Equity`.
     /// `lot_size` is the round lot an order must be a multiple of, `borrowable`
     /// the shares this account may be short (absent means the venue models no

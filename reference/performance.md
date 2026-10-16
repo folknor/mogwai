@@ -459,7 +459,7 @@ Settled 2026-08-10, replacing the two-layer setup that preceded it. There are no
 layers and no frozen workloads: the argv is composed at the call site and
 captured verbatim in the row, so pairing rows is a query rather than a name
 lookup. The registry that carries the targets and their feature shapes, and the
-reasoning for what it deliberately does NOT carry, is `brokkr.toml`.
+reasoning for what it deliberately leaves out, is `brokkr.toml`.
 
 Two kinds of surface, the same three modes over both. Recording a row needs a
 clean tree.

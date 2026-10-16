@@ -89,7 +89,7 @@ def main() -> None:
     # its evidence was the defective exhausted-levels observation, which
     # undershot the real distinct-prices convention by construction. The
     # corrected pooled cell reads 1.148 against band 1.085..1.121 - out
-    # on the OTHER side - so the one-sided floor bound covers nothing
+    # on the other side - so the one-sided floor bound covers nothing
     # real. The historical ruling stands as history; the cell grades
     # against its ordinary band until the owner rules on the fork.
     exceptions["levels_mean"]["retired"] = (

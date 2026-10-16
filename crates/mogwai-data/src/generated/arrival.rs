@@ -39,8 +39,8 @@ const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 /// bisected correction for the shipped sampling scheme's realized-mean
 /// inflation, and the integrated frame's exact time change has no such
 /// inflation to correct - applying it here double-counts, a uniform
-/// 1/0.944 = 1.0593 rate excess (the 2026-08-09 calibration amendment,
-/// `notes/protocol-12b-arrival-composition-spec.md` section 0). The
+/// 1/0.944 = 1.0593 rate excess (the 2026-08-09 calibration amendment to
+/// the since-retired protocol 12b arrival-composition spec). The
 /// shipped path keeps the calibration in `begin_event`, which is what it
 /// corrects. Both the intensity denominator and the self-exciting
 /// family's baseline expectation flow from this one definition; removing
@@ -1400,7 +1400,7 @@ mod tests {
             // It detects no content edit: widening an expected value or
             // retuning a param leaves `version` at 2 and this assertion
             // green.  Nothing in the tree detects that, which is the same
-            // hole AGENTS.md records against the shared-fixture rule; the
+            // hole `reference/test-doctrine.md` records against the shared-fixture rule; the
             // executors below are what has to be strong enough not to need
             // one.
             assert_eq!(vector["version"], 2, "conformance vector schema version");

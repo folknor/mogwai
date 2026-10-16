@@ -11,7 +11,7 @@
 //! makes it advertise, and a history poll alone does the same. Both spend a
 //! river, and the advertised set is the materialized set.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

@@ -9,7 +9,7 @@
 //! environment without sockets would fail them for reasons unrelated to the
 //! code. The full gate and the focused runner both include them.
 
-mod common;
+use crate::common;
 
 use std::{
     io::{BufRead, BufReader},

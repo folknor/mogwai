@@ -291,7 +291,7 @@ fn is_char_literal(bytes: &[u8], at: usize) -> bool {
 /// Why this is the check and not "every ignored test owes a skip entry". The
 /// gate sets `include_ignored` deliberately, so an `#[ignore]`d test with no skip
 /// entry runs anyway - and for most of them that is the intent, not an omission. The
-/// socket-backed adapter binaries are the whole reason the flag is on; the two
+/// socket-backed adapter tests are the whole reason the flag is on; the two
 /// `/trades` sizing instruments in `mogwai-venue`'s `http` module are ignored,
 /// unskipped and finish in milliseconds. A check demanding an entry for every
 /// ignored test would refuse both families and would have to grow an exception

@@ -3,46 +3,38 @@
 
 //! Folds the git sha of the tree this crate was built from into the
 //! provenance token (storage policy, the retired rewrite plan, phase 1).
-//! A `cargo install`/crates.io build has no `.git` directory, so this is
-//! best-effort: absent git, the token falls back to the crate-version +
+//! Absent a sha, the token falls back to the crate-version +
 //! `TAPE_PROTOCOL_VERSION` + fingerprint-hash + command components alone,
-//! which is still a real invalidation key - just weaker than a repo dev's,
-//! matching phase 1's stated tradeoff ("repo dev keeps current invalidation
-//! strength").
+//! which is still a real invalidation key - just weaker.
+//!
+//! The stamp is the 12-character short `HEAD` sha and nothing else: no dirty
+//! flag, so a dirty tree shares its `HEAD`'s token. It is empty, not
+//! `unknown`, when no sha can be read.
+//!
+//! The sha arrives in `MOGWAI_SOURCE_IDENTITY`, which the workspace's build
+//! runner computes with `scripts/source_identity.py` before every cargo
+//! invocation; its first field is the full `HEAD` sha, and the script reruns
+//! only when that value changes. This workspace is only ever built through
+//! that runner, so there is no git fallback. A rerun also
+//! follows a dirty-flag or commit-time change the sha ignores; the stamp comes
+//! out identical, but the crate still recompiles. The flag flips on the first
+//! edit after a commit, not on every edit.
 
-use std::process::Command;
+const IDENTITY_VAR: &str = "MOGWAI_SOURCE_IDENTITY";
 
 fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map_or_default(|s| s.trim().to_string());
-    println!("cargo:rustc-env=MOGWAI_LAB_GIT_SHA={sha}");
-    // Re-run only when the commit moves, not on every touch of the tree - a
-    // build script that reruns per file edit would make every `cargo check`
-    // shell out to git. `.git/HEAD` alone is not enough: on a branch it holds
-    // `ref: refs/heads/<name>` and only changes on a checkout, while a commit
-    // moves the ref file it names, or `packed-refs` once refs are packed.
-    // Watching HEAD alone left the sha stale after every commit.
-    watch("../../.git/HEAD");
-    watch("../../.git/packed-refs");
-    if let Some(r) = std::fs::read_to_string("../../.git/HEAD")
-        .ok()
-        .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_owned()))
-    {
-        watch(&format!("../../.git/{r}"));
-    }
-}
+    println!("cargo:rerun-if-env-changed={IDENTITY_VAR}");
 
-/// Watch `path` only if it exists. Cargo treats a missing rerun-if-changed
-/// path as always stale, so watching an absent `packed-refs` reran this script
-/// and rebuilt every dependent on every invocation. Nothing is lost: packing
-/// refs deletes the loose ref file being watched, and a deletion triggers.
-fn watch(path: &str) {
-    if std::path::Path::new(path).exists() {
-        println!("cargo:rerun-if-changed={path}");
-    }
+    // `<sha> <clean|dirty> <commit time>`. The script's own `unknown` is not a
+    // sha and reads as empty, as an unset variable does.
+    let sha = std::env::var(IDENTITY_VAR)
+        .ok()
+        .and_then(|identity| {
+            identity
+                .split_once(' ')
+                .and_then(|(sha, _)| sha.get(..12))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    println!("cargo:rustc-env=MOGWAI_LAB_GIT_SHA={sha}");
 }

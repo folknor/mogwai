@@ -111,7 +111,7 @@ fn read_b5_log(path: &Path) -> anyhow::Result<(Value, f64)> {
     let bytes = std::fs::read(path).map_err(|e| {
         anyhow!(
             "B5 refused: no gate transcript at {}: {e}. Run the standing build gate with its \
-             --json flag and capture the output there before running this command; see AGENTS.md \
+             --json flag and capture the output there before running this command; see docs/cli.md \
              for the command.",
             path.display()
         )

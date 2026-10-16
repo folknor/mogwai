@@ -4,7 +4,7 @@
 # The fixture behind the boarding door: no shipped preset is a USD-quoted spot
 # pair, and the door's reachable case needs one - a policed-USD account boards
 # it, buys, and ends up holding a base-asset balance line no policy rule can
-# value. BTCSETTLE is the second hop that line would fund and the door refuses.
+# value. `BTCSETTLE` is the second hop that line would fund and the door refuses.
 #
 # The venue balances fund every settlement currency named here, so nothing is
 # funding-barred at boot and each refusal below is the door it names rather

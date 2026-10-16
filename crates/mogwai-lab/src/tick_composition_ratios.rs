@@ -133,7 +133,7 @@ pub const MODES: [Mode; 4] = [
         acceptance: Acceptance::SessionReshape,
         // The protocol-7 constants as shipped when this comparison was made.
         // Protocol 8 has since replaced four of the five with the values this
-        // mode proposed, so these are NOT current. `max_extend_ticks` is the
+        // mode proposed, so these are not current. `max_extend_ticks` is the
         // exception and still ships at 1 << 30: it is a per-lock runaway
         // backstop rather than a reach ceiling, and is deliberately not scaled.
         baseline: Baseline {

@@ -14,7 +14,7 @@
 
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 /// The listing is the preset table, not a copy of it.
 #[test]

@@ -3,7 +3,7 @@
 
 use std::process::{Command, Output};
 
-mod common;
+use crate::common;
 
 fn run(args: &[&str]) -> Output {
     Command::new(common::venue_binary())

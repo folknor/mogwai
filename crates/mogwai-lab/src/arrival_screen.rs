@@ -10,8 +10,10 @@
 //! reads a TBBO corpus, and nothing here consumes the brick-B4 envelope: the
 //! binding admissibility list is A1 to A4 and B4 is a Stage B gate.
 //!
-//! The spec is `notes/protocol-12b-arrival-composition-spec.md`; sections 9
-//! and 16 own everything in this module.
+//! Everything in this module was lifted from the protocol 12b
+//! arrival-composition spec's Stage A screen and its frozen constants and
+//! search space, deleted when the measure-and-fit
+//! arc closed; git history holds it, and the code here is now the record.
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -511,7 +513,7 @@ pub fn coarse_lattice(family: Family) -> Vec<LatticeCell> {
 /// The cell brick A0 prices: the coarse point nearest the family's domain
 /// centre, taken per axis rather than by indexing the flattened tensor.
 ///
-/// The flattened middle is NOT the domain centre - for `WallMmpp` it is the
+/// The flattened middle is not the domain centre - for `WallMmpp` it is the
 /// occupancy midpoint crossed with the first rate-ratio and tau point alone, a
 /// corner of the grid whose price says nothing about the tensor's interior.
 /// Per axis, this reproduces brick K's `wall_mmpp` transcript point exactly
@@ -1622,7 +1624,7 @@ fn project_walk(
                 scalars,
                 seed,
                 walk_start,
-                mogwai_venue::source::fingerprint(),
+                mogwai_data::Fingerprint::repo(),
                 &profile.session,
                 None,
                 SizeGrid::from_def(&profile.def),
@@ -1872,7 +1874,7 @@ fn project_stream(
     })
 }
 
-/// The section 3.5 composition loss for ONE seed: the observed-populated-minute
+/// The section 3.5 composition loss for a single seed: the observed-populated-minute
 /// weighted mean, over hours, of the exact 1-Wasserstein distance between the
 /// two `log1p(N)` populations. `None` when the observed side carries no
 /// populated minute at all, which is the only degenerate case section 3.5
