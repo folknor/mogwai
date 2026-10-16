@@ -295,11 +295,26 @@ impl SizeStream {
         self.rng.seek(position);
     }
 
-    /// The next child's size draw.
+    /// The next `words.len() / 2` children's words, size word then snap word
+    /// each, in one batched fill: the same words `draw` would read.
+    pub(super) fn fill(&mut self, words: &mut [u64]) {
+        self.rng.fill(words);
+    }
+
+    /// The next child's size draw, one child at a time: the reference the
+    /// batched decoration is pinned against.
+    #[cfg(test)]
     pub(super) fn draw(&mut self) -> SizeDraw {
-        let z = normal_quantile(open_unit(self.rng.next_word()));
+        let size_word = self.rng.next_word();
+        let snap_word = self.rng.next_word();
+        self.draw_from(size_word, snap_word)
+    }
+
+    /// A child's size draw from its two words, size then snap.
+    pub(super) fn draw_from(&self, size_word: u64, snap_word: u64) -> SizeDraw {
+        let z = normal_quantile(open_unit(size_word));
         let base = (self.mu + self.sigma * z).exp().max(f64::MIN_POSITIVE);
-        let lot_snap = half_open_unit(self.rng.next_word()) < self.snap_frac;
+        let lot_snap = half_open_unit(snap_word) < self.snap_frac;
         SizeDraw { base, lot_snap }
     }
 }
@@ -687,6 +702,39 @@ mod tests {
             let rate = steps as f64 / trials as f64;
             let se = (p * (1.0 - p) / trials as f64).sqrt();
             assert!((rate - p).abs() < 5.0 * se, "p {p} rate {rate}");
+        }
+    }
+
+    /// Decoration's batched read - fills of any length, a size and a snap
+    /// word per child, turned by `draw_from` - gives every child exactly the
+    /// draw one `draw` per child gives, across chunk boundaries, both start
+    /// parities of the underlying block and starts deep in the child space.
+    #[test]
+    fn batched_size_words_are_the_per_child_draws() {
+        for first in [0_u64, 1, 2, 31, 1 << 33, (1 << 40) + 7] {
+            let mut per_child = SizeStream::new(42, 0.0027, 1.1, 0.2);
+            per_child.seek(first);
+            let reference: Vec<(u64, bool)> = (0..300)
+                .map(|_| {
+                    let draw = per_child.draw();
+                    (draw.base.to_bits(), draw.lot_snap)
+                })
+                .collect();
+            for chunk in [1_usize, 3, 7, 32, 33, 300] {
+                let mut batched = SizeStream::new(42, 0.0027, 1.1, 0.2);
+                batched.seek(first);
+                let mut got = Vec::new();
+                while got.len() < 300 {
+                    let take = chunk.min(300 - got.len());
+                    let mut words = vec![0_u64; 2 * take];
+                    batched.fill(&mut words);
+                    for [size_word, snap_word] in words.as_chunks::<2>().0 {
+                        let draw = batched.draw_from(*size_word, *snap_word);
+                        got.push((draw.base.to_bits(), draw.lot_snap));
+                    }
+                }
+                assert_eq!(got, reference, "first {first} chunk {chunk}");
+            }
         }
     }
 

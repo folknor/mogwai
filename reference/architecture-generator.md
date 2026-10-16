@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 39; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 40; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -256,6 +256,16 @@ path, which sizes its parents its own way, leaves the count words unread.
 The cascade's level steps move to the child-indexed step stream. An armed
 halt still does not age the components, and that is now stated where it
 happens. Every MNQ and MES tape moves; the bounce walks are byte-identical.
+
+Version 40 moves no byte. `TapeRng::fill` writes a run of words exactly as
+that many `next_word` calls would, computing Philox blocks four at a time.
+On an x86-64 CPU with AVX2, chosen at run time, it uses an intrinsics kernel
+holding one block in each 64-bit lane; elsewhere it uses a portable lane
+kernel. The two are integer arithmetic and bit-identical, so which one ran
+cannot reach a tape. The parent packets of every walk, and the size
+decoration in runs of up to 32 children, read through it. Every golden,
+hash and transcript re-ran unchanged; the bump is taken because the
+generation path changed and the rule is unconditional.
 
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are

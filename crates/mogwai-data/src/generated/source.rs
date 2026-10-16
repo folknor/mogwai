@@ -38,6 +38,7 @@
 use std::sync::Arc;
 
 use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, decimal_to_f64};
+#[cfg(test)]
 use rand::RngExt;
 use rust_decimal::Decimal;
 
@@ -958,11 +959,6 @@ impl GeneratedSource {
         }
     }
 
-    /// One main-stream word.
-    fn next_word(&mut self) -> u64 {
-        self.rng.random()
-    }
-
     /// The parent's gap from its two words: the gap itself, a unit
     /// exponential (the `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap at the shape
     /// of one `draws` asserts), and the arrival-state flip.
@@ -1214,13 +1210,55 @@ impl GeneratedSource {
             return;
         }
         self.size_stream.seek(self.plan_first_child);
-        for record in &mut self.plan {
-            if let Record::Trade(trade) = record {
-                let draw = self.size_stream.draw();
+        // The children's words come in batched fills of up to `CHUNK`
+        // children, the same words one `draw` per child would read, so a
+        // long sweep never needs a buffer as large as the child cap.
+        const CHUNK: usize = 32;
+        let mut words = [0_u64; 2 * CHUNK];
+        let mut owed = self
+            .plan
+            .iter()
+            .filter(|record| matches!(record, Record::Trade(_)))
+            .count();
+        let mut trades = self.plan.iter_mut().filter_map(|record| match record {
+            Record::Trade(trade) => Some(trade),
+            Record::Quote(_) => None,
+        });
+        while owed > 0 {
+            let take = owed.min(CHUNK);
+            let chunk = &mut words[..2 * take];
+            self.size_stream.fill(chunk);
+            for [size_word, snap_word] in chunk.as_chunks::<2>().0 {
+                let trade = trades.next().expect("one trade per counted child");
+                let draw = self.size_stream.draw_from(*size_word, *snap_word);
                 trade.qty = self.spec.sizes.quantize(draw.base, draw.lot_snap);
             }
+            owed -= take;
         }
         self.plan_decorated = true;
+        #[cfg(test)]
+        self.assert_decoration_is_per_child();
+    }
+
+    /// Every test that decorates a plan also checks it: the quantities the
+    /// batched fill wrote must be the ones one `SizeStream::draw` per trade,
+    /// in plan order from the parent's first child, gives. So the chunk
+    /// accounting, the trade filter and the order are pinned by every sized
+    /// walk in the suite, long sweeps included, not by one fixture.
+    #[cfg(test)]
+    fn assert_decoration_is_per_child(&self) {
+        let mut reference = self.size_stream.clone();
+        reference.seek(self.plan_first_child);
+        for record in &self.plan {
+            if let Record::Trade(trade) = record {
+                let draw = reference.draw();
+                assert_eq!(
+                    trade.qty,
+                    self.spec.sizes.quantize(draw.base, draw.lot_snap),
+                    "a batched size differs from the per-child draw"
+                );
+            }
+        }
     }
 
     /// A price coordinate in ticks as a record mantissa, or the terminal
@@ -1878,10 +1916,18 @@ impl GeneratedSource {
                 .min(MID_CEILING);
         }
         self.reopen_frontier_ns = self.clock_ns;
-        // The parent's seven main-stream words, drawn after the kernel
-        // resolved so a kernel refusal draws none.
-        let innovation = [self.next_word(), self.next_word(), self.next_word()];
-        let bounce = BounceDraws::draw(|| self.next_word());
+        // The parent's seven main-stream words, drawn in one fill after the
+        // kernel resolved, so a kernel refusal draws none.
+        let mut words = [0_u64; 7];
+        self.rng.fill(&mut words);
+        let [i0, i1, i2, regime, side_flip, drift_direction, drift] = words;
+        let innovation = [i0, i1, i2];
+        let bounce = BounceDraws {
+            regime,
+            side_flip,
+            drift_direction,
+            drift,
+        };
         let mid = self.next_latent_mid(innovation);
         let (aggressor, book) = self.next_side_and_book(mid, bounce);
         let price_ticks = placed_trade_ticks(&book, aggressor, spec.trade_bounce_ticks);
@@ -2228,9 +2274,13 @@ impl GeneratedSource {
     /// the state-conditioned sweep and the price-repeat branch.
     fn begin_legacy_event(&mut self, rate_mult: f64, children_mult: f64) -> Result<(), TickFault> {
         let spec = Arc::clone(&self.spec);
-        // The parent's twelve main-stream words, drawn up front; each is read
-        // below at its stage, in the walk's causal order (see `draws`).
-        let draws = LegacyDraws::draw(|| self.next_word());
+        // The parent's twelve main-stream words, drawn up front in one fill -
+        // the same words `next_word` would give, in batched blocks - and each
+        // read below at its stage, in the walk's causal order (see `draws`).
+        let mut words = [0_u64; 12];
+        self.rng.fill(&mut words);
+        let mut words = words.into_iter();
+        let draws = LegacyDraws::draw(|| words.next().expect("twelve words for twelve slots"));
         let dt_ns =
             ((self.next_duration_ns(draws.gap, draws.state_flip) as f64 / rate_mult).round()
                 as u64)

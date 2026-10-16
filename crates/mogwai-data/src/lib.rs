@@ -85,7 +85,7 @@ pub use record::{
     QuoteRec, Record, RecordScale, RiverSource, Round, ScaleError, SweepTrades, TradeRec,
     UnsizedParentView, UnsizedRecord, record_from_event,
 };
-pub use tape_rng::{TapeRng, UNTAGGED_DOMAIN, philox4x32_10};
+pub use tape_rng::{FILL_LANES, TapeRng, UNTAGGED_DOMAIN, philox4x32_10, philox4x32_10_lanes};
 pub use trigger::{
     BookState, FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk,
     book_reading, market_snapshot_reading, scan_triggers, vol_reading, vol_reading_from_trades,
@@ -284,7 +284,14 @@ pub use trigger::{
 /// and the cascade's level steps move to the child-indexed step stream. A
 /// fractional `student_df` is refused. Every MNQ and MES tape moves; the
 /// bounce walks are byte-identical.
-pub const TAPE_PROTOCOL_VERSION: u32 = 39;
+/// 40 batches the generator's word supply: `TapeRng::fill` computes Philox
+/// blocks four at a time, through AVX2 intrinsics where the CPU has them,
+/// and the parent packets and the size decoration read through it. No byte
+/// moves - every word is the one `next_word` would have given at its
+/// position, and every golden, hash and transcript re-ran unchanged - and the
+/// bump is taken because the generation path changed and the rule is
+/// unconditional.
+pub const TAPE_PROTOCOL_VERSION: u32 = 40;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

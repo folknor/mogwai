@@ -1044,9 +1044,7 @@ impl CascadeState {
         let config = &tables.config;
         let mut packet = [0_u64; MAX_PARENT_WORDS];
         let packet = &mut packet[..tables.parent_words()];
-        for word in packet.iter_mut() {
-            *word = self.streams.parent.next_word();
-        }
+        self.streams.parent.fill(packet);
         let (kernel_words, rest) = packet.split_at(config.excitation_ratio.len());
         let df = tables.student_df as usize;
         let (t_words, rest) = rest.split_at(1 + df / 2 + df % 2);

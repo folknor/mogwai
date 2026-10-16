@@ -594,6 +594,83 @@ stays inside its 10% band but its provenance sentence must be reworded
 (report B). Buffered state must distinguish generated-ahead from consumed for
 cloning, checkpoints, faults and observation data (report A).
 
+## Priority 4d. SIMD: batched Philox in AVX2 (landed), vector transforms (rejected as built)
+
+Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 40,
+a bump taken because the generation path changed, not because a byte did:
+every golden, hash and transcript stands. A fresh codex audit found no
+unsafe-code defect and no word mismatch. It did find the missing bump, an
+over-promising comment, a size test that did not reach `decorate`, and an
+exhaustion test that did not check untouched destinations; all four are
+closed. Decoration is now checked from inside `decorate`, test builds only,
+against one per-child draw for every trade, so every sized walk in the
+suite pins it. Sparred with
+codex in three rounds, the third on measurements. Two fresh subagents wrote
+the first drafts, one per file: the portable Philox lane kernel with the
+exact fill, and the vector math kernels.
+
+What it is now.
+
+- `TapeRng::fill` writes the next words of a stream into a caller's slice,
+  bit-identical to the same number of `next_word` calls in every pattern:
+  an odd start, a carry across the low counter word, interleaved seeks and
+  clones, and exhaustion. Batches of four blocks go through a lane kernel;
+  a tail of more than one block still runs a whole batch and keeps the words
+  it needs. No buffer was added to `TapeRng`, whose size is unchanged.
+- On x86-64 with AVX2, chosen at run time, the batch is
+  `philox4x32_10_avx2`, written with `std::arch` intrinsics. Each 64-bit
+  lane holds one block, so each round is two `_mm256_mul_epu32`, and the
+  state stays in registers for all ten rounds. Elsewhere it is the portable
+  structure-of-arrays kernel. Both are integer arithmetic and bit-identical,
+  so the choice cannot touch a tape and needs no build configuration;
+  consumers such as broadarrow get it too.
+- Consumers: the legacy packet (12 words), the integrated packet (7, still
+  drawn only after the arrival kernel succeeds), the cascade parent packet,
+  and size decoration, in fills of up to 32 children.
+
+Pins:
+
+- the portable kernel and the AVX2 kernel against the scalar block on
+  every lane, across the low-word carry and the top of the block range;
+- `fill` against `next_word` for every start and length, plus interleaved
+  fills, seeks and clones, and exhaustion;
+- `batched_size_words_are_the_per_child_draws`, which covers chunk
+  boundaries and deep starts.
+
+Each was bite-checked by a text-edit mutation.
+
+Measured, release, this host:
+
+| | Before | After |
+|---|---|---|
+| 120M words, `next_word` against `fill` in runs of 64 | 546 ms | 255 ms |
+| legacy, per million parents | 214 ms | 185 ms |
+| integrated, per million parents | 231 to 242 ms | 220 ms |
+| cascade, per million parents | 355 to 377 ms | 317 ms |
+| `realism`, sized, 2M parents | 1.73 s | 1.52 s |
+
+Rejected, recorded so it is not retried as built:
+
+- Autovectorization. The portable kernel, compiled under
+  `target_feature(avx2)`, measured slower than its baseline build (442
+  against 393 ms per 120M words). The intrinsics kernel is what delivered.
+- Vector transforms with every branch evaluated per lane. In-tree ln, exp
+  and the AS 241 quantile, accurate and monotone, with every branch
+  evaluated per lane and selected afterwards: lognormal sizes 467 ms against
+  244 ms scalar per 16M, normals 343 against 121. They tripled the work to
+  expose two baseline lanes. The module was deleted.
+
+Open:
+
+- A central-branch-only vector quantile with per-lane scalar tails. Codex's
+  design: classify the lanes, compute the central ratio in vectors, the
+  tails in the scalar code, and keep the central results identical between
+  the vector body and any remainder. That would be tape 40, and is not
+  started.
+- Cross-parent batching of innovations. It needs scratch owned by the
+  consumer and a position that reports what was consumed, not what was
+  computed.
+
 ## Priority 5. Rail sizing as independent seeds (landed)
 
 Landed 2026-10-16 (uncommitted at the time of writing), sparred with a fresh
