@@ -48,7 +48,9 @@ sink is nautilus's own `ExecutionEventEmitter`, and two facts combine badly:
   `start()` ran on any other thread cannot obtain one at all - there is no
   process-wide slot to fall back to.
 - `send_order_event` on an emitter with no sender writes a `log::warn!` and
-  returns. There is no error and no return value to check.
+  returns. There is no error and no return value to check; the emitter's
+  `try_` variants report the failure, but the `emit_*` helpers a client
+  reaches for go through the infallible one.
 
 So a client connected without a sender reports success, holds a healthy socket,
 and drops every `OrderAccepted`, `OrderFilled`, `OrderCanceled` and
@@ -66,9 +68,9 @@ older version of this page should know it. Until nautilus 0.63 the emitter owned
 its sender by value on a `Clone` type, so an execution context cloned into the
 websocket pump froze whatever sender state existed at clone time and a later
 installation never reached it. Nautilus 0.63 moved the sender into a shared cell
-that every clone observes, so that narrower ordering hazard is gone. The refusal
-above is unaffected: it fires when a sender is never obtainable at all, which the
-shared cell does not address.
+that every clone observes, and it has stayed there since, so that narrower
+ordering hazard is gone. The refusal above is unaffected: it fires when a sender
+is never obtainable at all, which the shared cell does not address.
 
 **What a host must do:** nothing, if it registers the factory with a node. If it
 constructs the client itself, call `start()` on the execution client from the

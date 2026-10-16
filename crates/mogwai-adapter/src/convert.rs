@@ -178,7 +178,7 @@ pub(crate) fn wire_trail_offset(
 /// trigger means a trail armed on arrival, so the venue refuses the pair as
 /// contradictory. The wire's dormant form is the activation alone.
 ///
-/// Nautilus 0.65's risk engine is why the pair arrives at all. It must price
+/// Nautilus's risk engine is why the pair arrives at all. It must price
 /// every order it admits, and a trailing order stating neither trigger nor
 /// price is priced off a cached trade tick, or denied without one - which a
 /// bar-driven strategy never has. So a host states the trigger the trail will
@@ -1328,7 +1328,8 @@ mod tests {
     /// A dormant trailing order stating the trigger its trail will start from,
     /// or a looser one, reaches the wire as activation alone, for both trailing
     /// types and both sides. The level itself is inside the bound: it is the
-    /// shape a host builds to satisfy nautilus 0.65's risk engine.
+    /// shape a host builds to satisfy nautilus's risk engine, which must price
+    /// every order it admits.
     #[test]
     fn a_dormant_trail_drops_a_trigger_no_tighter_than_its_first_level() {
         for order_type in [OrderType::TrailingStopMarket, OrderType::TrailingStopLimit] {

@@ -1808,8 +1808,15 @@ mod tests {
     /// would evict the claimant in turn.
     ///
     /// This is also the in-repo half of the websocket boundary, the other half
-    /// being `clippy.toml`'s ban on nautilus's reconnecting transports: that
-    /// transport's own loop would redial through every one of these closes.
+    /// being `clippy.toml`'s ban on nautilus's reconnecting transports. The ban
+    /// is not about these closes: nautilus's websocket client takes a close
+    /// handler whose `false` return stops its reconnect loop, so it could stop
+    /// on every one of them. It is about the rest of this function's contract,
+    /// which that loop has no seam for: a run-identity probe after every dial,
+    /// backoff scaled on the sim clock with seeded jitter (its jitter is
+    /// unseeded), a receipt book that reports undelivered commands where it
+    /// replays them onto the next connection, and a stop on a terminal text
+    /// frame, which never reaches a close handler.
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
     async fn every_reasoned_terminal_close_stops_the_loop() {

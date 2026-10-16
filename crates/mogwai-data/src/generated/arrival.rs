@@ -1173,6 +1173,7 @@ mod tests {
         // -k log(1 + theta m/k), the Gamma(k, m/k) cumulant function.
         const N: usize = 100_000;
         const DAY_SECONDS: usize = 86_400;
+        const PATH_TAUS: f64 = 20_000.0;
         let cells = [
             ShotNoiseParams {
                 m: 0.5,
@@ -1228,7 +1229,13 @@ mod tests {
                 );
             }
 
-            let path_len = 30 * DAY_SECONDS;
+            // The tolerance below is the exact standard error of the path mean
+            // at any length, so the length only buys power, and power goes as
+            // the number of correlation times walked rather than as wall
+            // seconds. A fixed wall span gave the fast cell millions of
+            // `tau_s` and the slow one hundreds; the expensive cell is the
+            // fast one, which draws `k / tau_s` jumps per step.
+            let path_len = ((PATH_TAUS * params.tau_s) as usize).min(30 * DAY_SECONDS);
             let mut path_rng = ChaCha12Rng::seed_from_u64(0x30DA_0000 + cell_index as u64);
             let mut s = params.stationary(&mut path_rng);
             let mut x_sum = params.level(s);
@@ -1248,7 +1255,7 @@ mod tests {
                 / duration.powi(2);
             assert!(
                 (x_sum / duration - 1.0).abs() <= 5.0 * mean_variance.sqrt(),
-                "30-day X mean at cell {cell_index}"
+                "path X mean at cell {cell_index}"
             );
         }
     }

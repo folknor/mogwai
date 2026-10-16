@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! End-to-end guard for reconciliation reports. Nautilus' Rust trait defaults
-//! silently degrade to empty reports or `None`; these socket-backed tests pin
-//! every mogwai venue-truth surface and their mass-status composition.
+//! degrade the report generators to empty reports or `None` with only a
+//! "not implemented" log line, and the default mass status composes those
+//! empties into an empty whole. The policy hooks default to the conservative
+//! answer instead (an overfill stays rejected under
+//! `allows_reconciliation_overfill`). These socket-backed tests pin every
+//! mogwai venue-truth surface and their mass-status composition.
 
 mod common;
 

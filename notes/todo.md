@@ -399,7 +399,7 @@ instrument class is not a finding and does not need re-reporting.
 What survived `notes/testnet.md`, the 2026-08-14 product-type plan, when it was
 adjudicated against the two end-state documents on 2026-08-29. The nautilus
 constraints it established are now `reference/nautilus.md`, verified against the
-0.63 pin, which the plan predated. What follows is only the work.
+pin that file records, which the plan predated. What follows is only the work.
 
 Most of that plan was dead weight and is recorded here once so it is not
 re-derived. Its central claim - that nautilus's account model forces the venue
@@ -438,11 +438,12 @@ classes.
   publishing nothing and leave the check inert, or refuse the way `forex` does,
   loudly, on the grounds that a wrong number is invisible where an absence is
   not. Whichever way it lands, it is a wire change owing broadarrow a message,
-  because their percent and cash sizers read the account. One 0.65 constraint
-  on the first branch: nautilus's margin check now reads a missing balance row
-  in the margin currency as zero free rather than skipping, so a published
-  rate denies every order on an account the venue has not yet reported a row
-  for - the unfunded mode, until its first fill.
+  because their percent and cash sizers read the account. One constraint on
+  the first branch, re-read at 0.66: nautilus's margin check reads a missing
+  balance row in the margin currency as zero free rather than skipping, so a
+  published rate denies every position-increasing order on an account the venue
+  has not yet reported a row for - the unfunded mode, until its first fill. A
+  position-reducing order skips the margin check.
 
 - **The remaining account-correctness rules are unaudited against the engine.**
   They are stated at `reference/nautilus.md`, and nothing in nautilus checks any
@@ -458,7 +459,10 @@ classes.
   never sees the reset - variation margin has no carrier - so it keeps
   computing unrealized PnL from the original fill price, and
   `Portfolio::equity` counts every settlement since the last fill twice until
-  the position closes. Live on MNQ and MES. The fork: keep settlement as real
+  the position closes. Live on MNQ and MES, and unchanged at 0.66: margin
+  equity is still the balances total plus unrealized PnL from the position's own
+  cost basis, and the option-premium valuation 0.66 added applies to premium
+  instruments, never to a mogwai future. The fork: keep settlement as real
   venues do it and document the host-side correction, stop folding variation
   into the reported balance and report it as unrealized instead, or find a
   carrier that moves nautilus's cost basis, which the inbound channel does not
@@ -469,12 +473,26 @@ classes.
   risk flatten (`LQ-` and `RISK-` orders) reaches a host only as an
   `AccountState` change. Nautilus's path for these is a `FillReport` with no
   matching local order, which the execution engine materializes as a
-  reduce-only external order; its adapter guide also asks for a `FILLED` order
-  report in mass status for such fills, and since 0.65 a startup
-  reconciliation inside the lookback warns when one is missing. Under netting,
-  an unclaimed external fill lands on an `EXTERNAL` position rather than the
-  strategy's own, so the routing needs a reading of
-  `determine_netting_position_id` before it is built.
+  reduce-only external order, and reduce-only is binding: the engine refuses to
+  open or reopen a position from such a fill, so a venue-initiated fill that
+  would build exposure cannot ride this path and needs its own reading.
+  Startup reconciliation is stricter: a mass-status fill with no order report
+  is materialized as an external order only when it carries a venue position
+  id, and is otherwise dropped with a warning naming the venue order, so it is
+  an order report with filled status in mass status that carries such a fill
+  across a restart as itself. Under netting, an unclaimed external fill lands
+  on an `EXTERNAL` position rather than the strategy's own, so the routing
+  needs a reading of `determine_netting_position_id` before it is built.
+
+  The delivery shape is part of the same work. Nautilus lets a client send an
+  order status report and its real fills as one unit
+  (`ExecutionReport::OrderWithFills`, reconciled by
+  `reconcile_order_with_fills`): the real fills are applied first, keeping
+  their trade ids and commissions, and only an uncovered residual is
+  synthesized. For a venue that can name the order behind a liquidation or risk
+  flatten, as this one can by its `LQ-` and `RISK-` ids, that is the form to
+  build rather than a bare fill report, which materializes a market order with
+  no provenance. Adopt it when this entry is worked, not as a separate item.
 
 - **The adapter publishes no `InstrumentStatus` or `InstrumentClose`.** Halts
   and expiry are inert on a nautilus live node, apart from binary-option
@@ -570,6 +588,35 @@ classes.
   could restore the realistic silence on demand. Whichever is ruled gets
   recorded at `ratchet_trailing_stops`.
 
+- **The engine does not round a trailing trigger to the price grid - an owner
+  decision, found by the 0.66 sweep.** Submit and amend refuse a stated price,
+  trigger or activation that is off the instrument's price increment, but
+  `ratchet_trailing_stops` sets the candidate trigger to the followed extreme
+  less (or plus) `trail_offset` with no rounding and nothing checks the offset
+  against the grid, so an off-grid `trail_offset` leaves the trigger, and a
+  `TrailingStopLimit`'s derived limit, between two ticks. Nautilus 0.66 rounds
+  its own trailing prices onto the increment (upstream #5241, trailing stop
+  prices falling between price increments), so the trigger nautilus computes for
+  the same trail and the one this venue reports on `OrderUpdated` can differ.
+  Real exchanges quote triggers on the grid. The fork is whether the engine
+  rounds the ratcheted trigger (and in which direction), refuses an off-grid
+  `trail_offset` and `limit_offset` at submit as it refuses an off-grid price,
+  or leaves it and says so in `docs/oms-types.md`. Whichever is ruled gets
+  recorded at `ratchet_trailing_stops`.
+
+- **Trade bust is a divergence nobody has built.** 0.66 nautilus can void a
+  fill after it was applied (`OrderFillVoided`, an order status of voided, and
+  position and commission unwinding keyed on the voided quantity), which is
+  exactly what an exchange does when it busts a trade. The havoc set has
+  duplicate, dropped and delayed fills but nothing that takes a fill back, so
+  no run exercises a strategy's handling of a position that changes under it
+  after the fact. Work, not a decision: a `BustFill` divergence that emits the
+  void for a named earlier fill and restates the account, plus a reading of
+  what the engine's own book and ledger must do (a bust is a venue event, not
+  a cancel, and must reverse the fill's cash and position effect). Needs the
+  void's consequences on netting and hedging positions read in the execution
+  engine before the wire shape is chosen.
+
 - A zero-price fill is still warned about and booked by `warn_zero_px`, so a
   position can carry `mark_px == 0` if the tape produces one.
   `position_unrealized_checked`'s zero answer is the backstop for exactly that
@@ -660,13 +707,101 @@ classes.
   in `docs/oms-types.md` and `docs/config.md`. `MogwaiExecClientConfig`
   defaults to `Cash`. Under it a future is valued at full notional on top of a
   balance that never paid it, a negative venue balance freezes the nautilus
-  account, and since 0.65 the venue's unfunded mode has every opening buy
-  denied by nautilus's risk engine before it is sent. The adapter knows both
-  halves at connect time - its own account type and every instrument's class,
-  and whether the first account snapshot carries any balance row - so it could
+  account, and the venue's unfunded mode has every opening buy denied by
+  nautilus's risk engine before it is sent (re-read at 0.66, unchanged). The
+  adapter knows both halves at connect time - its own account type and every
+  instrument's class, and whether the first account snapshot carries any balance row - so it could
   warn or refuse at the pairing rather than leave it to a doc paragraph. The
   open question is which, and whether the default itself should follow the
   served class; an owner decision, and a consumer-visible change either way.
+
+- **Week, Month and Year bars are refused, and 0.66 ships the calendar math the
+  refusal said was missing.** The adapter's bar fold is epoch-anchored and
+  refuses these aggregations by name, because folding them on fixed 7-day and
+  30-day lengths would produce blocks that are neither weeks nor months. The
+  public `get_time_bar_bounds` in nautilus's model crate now returns the
+  previous, current and next boundary for a bar type in a stated time zone,
+  following local calendar boundaries for day and longer periods, with
+  gaps and folds resolved. An owner decision whether the refusal should go: the
+  fold could take its boundaries from that function instead of its own epoch
+  arithmetic, at the price of choosing the time zone and week origin the venue
+  means (the exchange-local zone of the instrument is the likely answer), which
+  `docs/config.md` would then state. The refusal is loud and named, so leaving
+  it costs a host a clear error and nothing silent; low priority.
+
+- **A post-only rejection never sets nautilus's `due_post_only`.** Found by
+  the 0.66 sweep. `OrderRejected` carries the flag, and the adapter always
+  passes false, because the wire cannot say why an order was refused:
+  `VenueMessage::OrderRejected` holds only the order id, a free-text reason and
+  a timestamp, and the engine's post-only refusal is the reason string "post-only
+  order would take liquidity" at three sites in `orders.rs`. Deriving the flag
+  from the order's own `post_only` would be wrong, since any other refusal of a
+  post-only order would trip it, and parsing the reason text is ruled out.
+  Closing it is a protocol change: a structured field on the wire reject, set by
+  the engine, copied by the adapter into its existing `OrderRejected::new` call.
+
+- **`allows_reconciliation_overfill` is left at nautilus's default of false.
+  Not recommended to change.** The 0.66 hook is consulted only by
+  `reconcile_fill_report`, on fill history and mass status; live `OrderFilled`
+  events go through `check_overfill`, which never reads it. Duplicate fills,
+  including `DuplicateNextFill`, are caught by trade id before any quantity
+  check, and a partial fill never exceeds the venue's own quantity. The one real
+  overfill is a modify the venue applied while its `OrderUpdated` was dropped
+  or delayed by havoc, which leaves nautilus's local quantity too low. A blanket
+  true would hide a genuine overfill defect, which is the signal the havoc
+  tests exist to raise. If it is ever wanted, the shape is true only when the
+  mirror's venue-side quantity covers the raised total.
+
+- **Cancel and modify rejections for finished orders may be refused by
+  nautilus. Speculative, unconfirmed.** The venue sends `OrderCancelRejected`
+  for a target already filled, canceled or expired, and the adapter forwards it
+  without reading the mirror's status. The 0.66 order state machine accepts
+  `CancelRejected` and `ModifyRejected` only from live statuses, so on a
+  terminal order it would refuse the transition. The expected effect is a
+  logged invalid transition and nothing else, but nobody has observed it. A
+  filter in the adapter would change what a host sees, so it is an owner
+  decision, and a socket test should show the effect before one is written.
+
+- **A degraded account snapshot may reset nautilus's per-instrument locks.
+  Speculative, unverified.** The adapter sends every `AccountState` with
+  `reported = true`, including one that dropped a balance row. Read but not
+  exercised: `CashAccount::apply` clears its per-instrument locks when the
+  state is reported and carries any balances, so a partial snapshot could
+  clear locks for currencies it did not carry. Margin rows are dropped silently
+  on an unrepresentable amount and have no repair counterpart to the one
+  balance rows now have in `balance_row`. Both want a test before any change.
+
+- **A free-balance reservation may outlive an order whose ack never reaches
+  nautilus. Speculative.** The 0.66 risk engine holds a reservation for every
+  approved order until the cache shows it open or closed. The mirror drops an
+  unknown-order rejection with only a warning, so an order whose `OrderAccepted`
+  or `OrderRejected` is lost on the way to nautilus could keep its reservation,
+  and every later buy on that account would see less free balance. Whether the
+  adapter can produce that state, rather than havoc producing it deliberately,
+  is the open question.
+
+- **Optional 0.66 surfaces the adapter does not use. Not recommended without a
+  reason.** `nautilus_common::clients::execution::generate_mass_status` is a
+  free function that composes mass status on a caller-supplied clock; the
+  adapter's own override could call it on the simulated clock instead of
+  composing the reports itself. `EventEmitter::try_send_account_state` and
+  `try_send_order_event` report a failed send where the plain forms only warn,
+  but the retained-sender witness already covers sender liveness. The report
+  generators' `*_task` variants need nothing: when one returns `None` nautilus
+  falls back to the inline generators the adapter overrides.
+
+- **`MogwaiClock` cancels a replaced timer silently.** nautilus's
+  `replace_existing_timer` logs a "Timer replaced" warning and skips
+  cancelling one that has already expired; ours cancels without a word. Minor,
+  and recorded only so the parity claims in `clock.rs` are read with it in
+  mind.
+
+- **The schedule-timer tests in `clock.rs` wait on wall time. Speculative flake
+  risk.** They use 50 ms margins so a slow debug build does not push a first
+  deadline into the past, and under heavy load they could still miss. None has
+  flaked yet. A socket-backed test driving a real `CalendarSchedule` end to end
+  would be the stronger check, at the price of a `jiff` dev-dependency; the
+  unit tests use test-local schedules to avoid it.
 
 - `HavocSpec.data` was resolved and needs no entry: `config.rs`'s
   `validate_havoc` refuses the field outright with a named error telling the
@@ -681,9 +816,10 @@ classes.
   `RiskEngine`, `Trader` or `LiveNode`. So the 0.65 change that made the risk
   engine deny what it cannot fund-check - the cash-account unfunded denial, the
   trailing stop with no price, the modify that now runs the full check - landed
-  with every test green and was found only by reading. A lane that submits
-  through a real risk engine against the venue, for each account type and
-  funding mode the docs promise, would turn the next such change into a
+  with every test green and was found only by reading, and the 0.66 change that
+  counts approved-but-unaccepted orders against free balance was found the same
+  way. A lane that submits through a real risk engine against the venue, for
+  each account type and funding mode the docs promise, would turn the next such change into a
   failure. It is also the only thing that would pin the `reference/nautilus.md`
   claims a pin bump keeps moving.
 
@@ -717,10 +853,10 @@ classes.
 ## Documentation
 
 - **`docs/havoc.md` does not say where a duplicated fill lands on a nautilus
-  host.** Since 0.65 the execution engine republishes every fill it declines
-  on `events.order_fill_declined.{instrument_id}`, and a `DuplicateNextFill`
-  copy is declined as a duplicate trade id, so a host can now subscribe and
-  observe the divergence rather than infer it from a log line. The
+  host.** The execution engine republishes every fill it declines on
+  `events.order_fill_declined.{instrument_id}` (re-read at 0.66), and a
+  `DuplicateNextFill` copy is declined as a duplicate trade id, so a host can
+  subscribe and observe the divergence rather than infer it from a log line. The
   `DuplicateNextFill` row should say so, after a run confirms the copy
   arrives on that topic rather than being dropped earlier in the adapter.
 
@@ -791,13 +927,16 @@ read for this audit were detailed and current rather than skeletal - which is
 weak evidence and should be treated as such. A compiler probe settles a public
 surface; nothing settles a semantic claim except one of us re-reading the code.
 
-- **The nautilus 0.65 risk engine meets their cash accounts, 2026-10-05.
+- **The nautilus risk engine meets their cash accounts, 2026-10-05.
   Unverified on their side; read `research/broadarrow` before sending.** The
-  change is nautilus's, so they meet it through their own 0.65 bump, not
-  through anything of ours; what we can add is the venue half.
-  `venue-clients/src/venue/mogwai.rs` reportedly picks `Cash` for spot, and on
-  0.65 a cash account with no balance row in the notional currency has every
-  opening buy denied with `NotionalExceedsFreeBalance`. Whether any of their
+  change is nautilus's (0.65, unchanged at 0.66), so they meet it through their
+  own bump, not through anything of ours; what we can add is the venue half.
+  `venue-clients/src/venue/mogwai.rs` reportedly picks `Cash` for spot, and a
+  cash account with no balance row in the notional currency has every opening
+  buy denied with `NotionalExceedsFreeBalance`. Since 0.66 the same engine also
+  counts an approved order the venue has not yet accepted against free balance,
+  so a scenario that submits several buys back to back can see a later one
+  denied locally though each fits alone. Whether any of their
   spot scenarios trades a quote currency the account was not funded in is the
   question, and only their tree answers it. If one does, the message is the
   two consumer paragraphs this sweep added, in `docs/config.md` and
@@ -1084,7 +1223,7 @@ mogwai defects, and several have been owed for weeks.
 > What that unblocked, witnessed so far:
 > - **Futures (MNQ), partial.** Warmup, fed fills at venue timing, and the
 >   **settlement-currency commission** confirmed: per-contract taker fee charged
->   as `2.50 USD` per fill (1.25 × multiplier 2), in USD, with brakes marking in
+>   as `2.50 USD` per fill (1.25 times multiplier 2), in USD, with brakes marking in
 >   USD. A separate MNQ stop strategy rested a `STOP_MARKET` and had it trigger
 >   on the multiplied instrument. Not yet in one clean run: stop-trigger +
 >   commission + brake-mark together end to end.

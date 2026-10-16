@@ -265,6 +265,13 @@ also refused by a nautilus cash account, which then keeps its last accepted
 state. Pair the unfunded mode with `account_type = "margin"` on the exec
 client; `reference/nautilus.md` has the detail.
 
+The same risk engine also counts an order it has approved but the venue has not
+yet accepted against free balance, so a host that submits several buys in one
+breath can have a later one denied locally although each fits alone and the
+venue would have taken them all. The count ends when the order is open or
+closed in the host's cache, so a delayed or dropped acknowledgement, or a venue
+blackout, keeps it held. An amend is checked against the account alone.
+
 `oms_type` is `netting` (the default) or `hedging`; the venue supports both
 styles, one per run - every account inherits the run's choice, per
 `docs/oms-types.md` - it refuses a consumer over neither, and `/health` reports
@@ -564,9 +571,10 @@ absent - a venue predating the field - decodes as `false`, so the safe reading i
 what a consumer gets by not knowing.
 
 The distinction survives the trip into a nautilus host, which is where it was
-being lost. Nautilus's `OrderRejected` carries a reason string and nothing else
-an adapter may set, so a refused submit used to reach a strategy looking exactly
-like "insufficient balance", terminal, separable only by reading our wording.
+being lost. Nautilus's `OrderRejected` carries a reason string and a post-only
+flag, and nothing else an adapter may set to say why, so a refused submit used
+to reach a strategy looking exactly like "insufficient balance", terminal,
+separable only by reading our wording.
 `mogwai-adapter` now prefixes a retryable refusal's reason with its public
 `RETRYABLE_REJECT_PREFIX` constant (`[retryable] `), leaving the venue's own
 reason after it. A consumer matches the constant; nobody has to depend on a

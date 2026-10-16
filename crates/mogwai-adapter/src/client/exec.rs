@@ -1026,8 +1026,8 @@ fn fill_report_from_wire(
             return None;
         }
     };
-    // Taker unconditionally: the wire carries no maker/taker flag (see the
-    // fill event handler's identical, deliberately lossy mapping).
+    // The wire's own liquidity side, mapped one to one (the fill event
+    // handler maps it the same way).
     Some(FillReport::new(
         account_id,
         instrument_id,
@@ -2306,11 +2306,21 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
 ///   name the venue id.
 ///
 /// Unlike a submit rejection, a failed cancel does not mean the order is dead:
-/// nautilus's own order FSM restores the pre-cancel status on `CancelRejected`
-/// (see `orders/mod.rs`'s `(PendingCancel, CancelRejected) => PendingCancel`
-/// transition), so the mirror must likewise leave `record.status` untouched -
-/// the order is still whatever it was (Accepted, PartiallyFilled, ...) before
-/// the cancel was attempted. The emitted venue id prefers the wire value and
+/// nautilus's own order FSM accepts `CancelRejected` on every live status and
+/// keeps the order where it is (see `orders/mod.rs`): from `PendingCancel` it
+/// restores the status held before the cancel was requested, and from
+/// `Submitted`, `Accepted`, `Triggered`, `PartiallyFilled` and `PendingUpdate`
+/// it leaves the status unchanged, which is the case that matters when a
+/// cancel rejection arrives for an order no pending cancel was recorded
+/// against. The mirror likewise leaves `record.status` untouched - the order
+/// is still whatever it was (Accepted, PartiallyFilled, ...) before the cancel
+/// was attempted. A terminal order has no such transition, so a cancel
+/// rejection for one is refused by nautilus's FSM rather than applied; this
+/// function does not filter on that, and the venue sends one for a target
+/// already filled, canceled or expired. The same holds for `ModifyRejected`,
+/// which the FSM accepts from the same live statuses plus `PendingCancel`
+/// (leaving a pending cancel in flight and amended terms intact). The emitted
+/// venue id prefers the wire value and
 /// falls back to the mirror's, so a wire `None` on a known order still carries
 /// the id the adapter already holds.
 fn emit_cancel_rejected(
@@ -3565,10 +3575,8 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             }
         }
     };
-    // mogwai does not report a liquidity side on the wire. The engine fills
-    // immediately against replayed history, which is taker-equivalent, so every
-    // fill is reported as Taker. This is a deliberate, lossy mapping: the wire
-    // carries no maker/taker flag to preserve.
+    // The liquidity side is the wire's own `fill.liquidity_side`, mapped one to
+    // one below; nothing is inferred or defaulted here.
     let position_id = fill
         .position_id
         .as_deref()
@@ -3639,39 +3647,20 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
                     return None;
                 }
             };
-            // A hostile balance amount that cannot represent as nautilus Money
-            // drops just this currency's balance with a warning rather than
-            // panicking the exec task that books the account snapshot.
-            let convert_amount = |amount, label| {
-                convert::money(amount, currency)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            currency = %balance.currency,
-                            field = label,
-                            error = %err,
-                            "dropping account balance: unrepresentable amount"
-                        );
-                    })
-                    .ok()
-            };
-            let total = convert_amount(balance.total, "total")?;
-            let locked = convert_amount(balance.locked, "locked")?;
-            let free = convert_amount(balance.free, "free")?;
-            // `AccountBalance::new` hard-asserts `locked + free == total` and
-            // panics otherwise. A havoc'd/messy AccountState can carry
-            // inconsistent amounts, and even a self-consistent wire decimal
-            // snapshot can fail the fixed-point check after each amount is
-            // independently rounded to currency precision above. Route
-            // through new_checked and drop just this currency's balance
-            // (matching convert_amount's own drop-with-warning discipline)
-            // rather than panicking the unsupervised exec task.
-            match AccountBalance::new_checked(total, locked, free) {
-                Ok(balance) => Some(balance),
+            // A row that cannot be represented is dropped with a warning
+            // rather than panicking the exec task that books the snapshot.
+            // Nautilus applies balances per currency (an upsert), so a dropped
+            // row is not an absent currency: the account keeps that
+            // currency's previous balance until a later snapshot carries a
+            // representable row for it. The drop is therefore reserved for
+            // rows that cannot be made right; see `balance_row`.
+            match balance_row(balance, currency) {
+                Ok(row) => Some(row),
                 Err(err) => {
                     tracing::warn!(
                         currency = %balance.currency,
                         error = %err,
-                        "dropping account balance: locked + free != total"
+                        "dropping account balance; nautilus keeps this currency's previous balance"
                     );
                     None
                 }
@@ -3749,6 +3738,50 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     )
     .with_info(risk_info(state.risk.as_ref()));
     ctx.emit(|e| e.send_account_state(account_state));
+}
+
+/// One wire balance row as a nautilus `AccountBalance`, or the reason it
+/// cannot be one.
+///
+/// Each wire amount is an exact decimal, and each is rounded to the currency's
+/// precision on its own, so a row whose wire amounts satisfy `locked + free ==
+/// total` can still fail nautilus's fixed-point identity after rounding. Such a
+/// row is the venue's truth, and dropping it would leave nautilus holding the
+/// previous value for the currency (balances are upserted per currency), so it
+/// is repaired instead: `total` and `locked` are kept as rounded and `free` is
+/// derived as their difference, which restores the identity and moves `free` by
+/// at most the rounding step.
+///
+/// A row whose wire amounts do not themselves satisfy the identity is the
+/// venue contradicting itself (a havoc'd or corrupt frame). That is not
+/// repaired: choosing which of the three numbers to believe would fabricate a
+/// balance, so it is refused and the caller drops it. An amount `Money` cannot
+/// hold is refused the same way. `AccountBalance::new` asserts the identity and
+/// would panic the unsupervised exec task, hence `new_checked`.
+fn balance_row(
+    balance: &mogwai_protocol::Balance,
+    currency: Currency,
+) -> anyhow::Result<AccountBalance> {
+    let total = convert::money(balance.total, currency).context("total")?;
+    let locked = convert::money(balance.locked, currency).context("locked")?;
+    let free = convert::money(balance.free, currency).context("free")?;
+    let first = match AccountBalance::new_checked(total, locked, free) {
+        Ok(row) => return Ok(row),
+        Err(err) => err,
+    };
+    let consistent_on_wire = balance
+        .locked
+        .checked_add(balance.free)
+        .is_some_and(|sum| sum == balance.total);
+    if !consistent_on_wire {
+        anyhow::bail!("locked + free != total on the wire: {first}");
+    }
+    let derived = total
+        .as_decimal()
+        .checked_sub(locked.as_decimal())
+        .ok_or_else(|| anyhow::anyhow!("derived free overflows: {first}"))?;
+    let free = convert::money(derived, currency).context("derived free")?;
+    AccountBalance::new_checked(total, locked, free).context("locked + free != total after repair")
 }
 
 /// The venue's risk state rendered into nautilus's account info bag, so a
@@ -4397,6 +4430,50 @@ mod tests {
         let business = mark_retryable("insufficient balance", false);
         assert_eq!(business, "insufficient balance");
         assert!(!business.starts_with(RETRYABLE_REJECT_PREFIX));
+    }
+
+    fn a_wire_balance(total: &str, locked: &str, free: &str) -> mogwai_protocol::Balance {
+        mogwai_protocol::Balance {
+            currency: "USD".to_owned(),
+            total: Decimal::from_str(total).expect("a decimal literal"),
+            free: Decimal::from_str(free).expect("a decimal literal"),
+            locked: Decimal::from_str(locked).expect("a decimal literal"),
+            held: None,
+        }
+    }
+
+    /// A balance row that is consistent on the wire but not after each amount
+    /// is rounded to the currency's precision must be repaired, not dropped.
+    ///
+    /// Nautilus upserts balances per currency, so a dropped row leaves the
+    /// account holding that currency's previous balance indefinitely. USD has
+    /// two decimals, so locked and free of 0.015 each round to the same value
+    /// and cannot both sum to a total of 0.03 in whole cents.
+    #[test]
+    fn a_rounding_only_balance_mismatch_is_repaired_not_dropped() {
+        let usd = Currency::from_str("USD").expect("USD is known");
+        let row = balance_row(&a_wire_balance("0.03", "0.015", "0.015"), usd)
+            .expect("a wire-consistent row survives rounding");
+        assert_eq!(row.total.as_decimal(), Decimal::from_str("0.03").unwrap());
+        assert_eq!(
+            row.locked.as_decimal() + row.free.as_decimal(),
+            row.total.as_decimal(),
+            "the repaired row satisfies nautilus's identity"
+        );
+
+        let plain = balance_row(&a_wire_balance("100.00", "40.00", "60.00"), usd)
+            .expect("an exact row converts as it always did");
+        assert_eq!(plain.free.as_decimal(), Decimal::from_str("60.00").unwrap());
+    }
+
+    /// A row the venue contradicts itself on is still refused.
+    ///
+    /// Without this the repair above could be a blanket rewrite that
+    /// fabricates a free amount for any corrupt row.
+    #[test]
+    fn a_wire_inconsistent_balance_is_still_refused() {
+        let usd = Currency::from_str("USD").expect("USD is known");
+        assert!(balance_row(&a_wire_balance("100.00", "40.00", "70.00"), usd).is_err());
     }
 
     /// A degraded account snapshot must not retire the well-formed ones.
