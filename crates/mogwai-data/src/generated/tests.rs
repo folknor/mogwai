@@ -3835,10 +3835,17 @@ struct GarchOverride {
 /// Bounded high-tail collector: keeps the largest `keep` values seen without
 /// retaining the whole sample, which at sixteen million draws would be hundreds
 /// of megabytes for statistics that only read the extreme upper tail.
+///
+/// Compaction partitions at the retained boundary rather than sorting, and
+/// the retained values are sorted descending once, when queried: both queries
+/// leave `values` sorted, which the envelope harness relies on when it scans
+/// `values` directly after asking for the maximum.
 struct TopK {
     keep: usize,
     values: Vec<f64>,
     threshold: f64,
+    sorted: bool,
+    /// Observations offered, merged collectors' included.
     seen: u64,
 }
 
@@ -3848,36 +3855,108 @@ impl TopK {
             keep,
             values: Vec::with_capacity(keep * 2),
             threshold: f64::NEG_INFINITY,
+            sorted: true,
             seen: 0,
         }
     }
     fn push(&mut self, value: f64) {
         self.seen += 1;
+        self.offer(value);
+    }
+    fn offer(&mut self, value: f64) {
         if value <= self.threshold {
             return;
         }
         self.values.push(value);
+        self.sorted = false;
         if self.values.len() >= self.keep * 2 {
             self.compact();
         }
     }
-    fn compact(&mut self) {
-        self.values.sort_unstable_by(|a, b| b.total_cmp(a));
-        self.values.truncate(self.keep);
-        self.threshold = *self.values.last().unwrap_or(&f64::NEG_INFINITY);
-    }
-    /// The value exceeded by exactly `rank` samples, i.e. the rail that would
-    /// have been hit `rank` times over the whole sample.
-    fn value_exceeded_by(&mut self, rank: usize) -> Option<f64> {
-        self.compact();
-        if rank >= self.values.len() {
-            return None;
+    /// Fold in another collector over a disjoint sample. Exact: a collector
+    /// with a finite threshold holds at least `keep` values at or above it
+    /// and thresholds only rise, so each retains its sample's top `keep` as a
+    /// multiset, ties included, and the union holds the combined top `keep`.
+    fn merge(&mut self, other: TopK) {
+        self.seen += other.seen;
+        for value in other.values {
+            self.offer(value);
         }
-        Some(self.values[rank])
+    }
+    /// Keep the largest `keep`, unordered, with the threshold at the smallest
+    /// of them. Partitioning at `keep - 1` puts that smallest one at the
+    /// boundary, which is what the threshold must be; the last element of
+    /// an unordered vector is not.
+    fn compact(&mut self) {
+        if self.values.len() <= self.keep {
+            return;
+        }
+        self.values
+            .select_nth_unstable_by(self.keep - 1, |a, b| b.total_cmp(a));
+        self.threshold = self.values[self.keep - 1];
+        self.values.truncate(self.keep);
+    }
+    /// Compact and sort the retained values descending.
+    fn settle(&mut self) {
+        self.compact();
+        if !self.sorted {
+            self.values.sort_unstable_by(|a, b| b.total_cmp(a));
+            self.sorted = true;
+        }
+    }
+    /// The zero-based descending order statistic: the value at `rank` among
+    /// the largest, i.e. the rail that would have been exceeded `rank` times
+    /// over the whole sample when no values tie.
+    fn value_exceeded_by(&mut self, rank: usize) -> Option<f64> {
+        self.settle();
+        self.values.get(rank).copied()
     }
     fn max(&mut self) -> f64 {
-        self.compact();
+        self.settle();
         self.values.first().copied().unwrap_or(f64::NAN)
+    }
+}
+
+/// A collector, whole or split into per-seed collectors and merged, keeps
+/// exactly the largest `keep` values a full sort keeps, and leaves them
+/// sorted for a direct scan. Over data dense in exact ties, so values equal
+/// to a moving threshold are rejected often; and over runs short of
+/// capacity, where no compaction ever fires.
+#[test]
+fn a_tail_collector_keeps_what_a_full_sort_keeps() {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        // 300 distinct values: ties everywhere.
+        (state % 300) as f64 * 0.5
+    };
+    for (keep, n, parts) in [
+        (64, 10_000_usize, 8_usize),
+        (64, 40, 3),
+        (7, 5_000, 5),
+        (1, 999, 4),
+    ] {
+        let data: Vec<f64> = (0..n).map(|_| next()).collect();
+        let mut sorted = data.clone();
+        sorted.sort_unstable_by(|a, b| b.total_cmp(a));
+        sorted.truncate(keep);
+
+        let mut whole = TopK::new(keep);
+        data.iter().for_each(|&value| whole.push(value));
+        let mut merged = TopK::new(keep);
+        for part in data.chunks(n.div_ceil(parts)) {
+            let mut local = TopK::new(keep);
+            part.iter().for_each(|&value| local.push(value));
+            merged.merge(local);
+        }
+        for collector in [&mut whole, &mut merged] {
+            assert_eq!(collector.max(), sorted[0], "keep {keep} n {n}");
+            assert_eq!(collector.values, sorted, "keep {keep} n {n}");
+            assert_eq!(collector.seen, n as u64);
+            assert_eq!(collector.value_exceeded_by(keep), None);
+        }
     }
 }
 
@@ -3902,13 +3981,19 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
     // means. The in-loop guard makes the two equal today; collecting the
     // capped one would silently start under-reporting the tail the moment it
     // stopped being equal.
+    //
+    // Each seed is an independent trajectory, so each runs on its own scoped
+    // thread with its own collectors, and the results fold in seed order. The
+    // tails merge exactly (see `TopK::merge`); the squared-return sum is a
+    // sum of per-seed partials, which moves the RMS in its last bits against
+    // one running sum - the figures quoted from it are to a few significant
+    // digits. A worker's failed rail assertion re-raises at its join.
+    const KEEP: usize = 65_536;
     let unit = STUDENT_T_UNIT_SCALE;
-    let mut sigma_tail = TopK::new(65_536);
-    let mut return_tail = TopK::new(65_536);
-    let mut sumsq = 0.0_f64;
-    let mut total = 0_u64;
-
-    for seed in 0..seeds {
+    let walk = |seed: u64| {
+        let mut sigma_tail = TopK::new(KEEP);
+        let mut return_tail = TopK::new(KEEP);
+        let mut sumsq = 0.0_f64;
         let mut vol = super::dynamics::GarchVol::new(21_000.0, over.vol_scalar);
         let uncond = over.vol_scalar.powi(2);
         vol.a0 = uncond * (1.0 - over.a1 - over.b1);
@@ -3930,9 +4015,27 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
             sigma_tail.push(step.sigma2_candidate.sqrt());
             return_tail.push(step.unclipped_return.abs());
             sumsq += step.unclipped_return * step.unclipped_return;
-            total += 1;
         }
+        (sigma_tail, return_tail, sumsq)
+    };
+    let per_seed: Vec<(TopK, TopK, f64)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..seeds)
+            .map(|seed| scope.spawn(move || walk(seed)))
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("a seed's walk panicked"))
+            .collect()
+    });
+    let mut sigma_tail = TopK::new(KEEP);
+    let mut return_tail = TopK::new(KEEP);
+    let mut sumsq = 0.0_f64;
+    for (sigma, ret, partial) in per_seed {
+        sigma_tail.merge(sigma);
+        return_tail.merge(ret);
+        sumsq += partial;
     }
+    let total = seeds * horizon;
     let rms = (sumsq / total as f64).sqrt();
     (sigma_tail, return_tail, rms, total)
 }
@@ -3946,9 +4049,9 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // had rested on a test nothing had run since it was written, and both the
 // `#[ignore]` and the skip entry went. That dev build was optimized by the
 // owner's host-wide cargo configuration, not by anything in this repository;
-// under the unoptimized dev profile the repository builds now, the test is
-// past the watchdog again and is `#[ignore]`d as debug-slow, which the gate
-// still runs.
+// under the unoptimized dev profile the repository builds now, the serial
+// walk was past the watchdog again. The seeds now walk on their own threads,
+// which brings it back under it, so it runs in every lane.
 //
 // It is also pointed at the shipped constants rather than at a written-down
 // "stage-1 winner" triple that happened to equal them. A candidate frozen in a
@@ -3956,7 +4059,6 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // `GARCH_GARCH` or `VOL_SCALAR` and this would have gone on measuring the old
 // process, green, while `consts.rs` still cited it.
 #[test]
-#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 fn shipped_garch_rails_sit_above_the_clean_tail() {
     let candidate = GarchOverride {
         a1: GARCH_ARCH,

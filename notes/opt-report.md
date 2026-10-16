@@ -377,49 +377,44 @@ stays inside its 10% band but its provenance sentence must be reworded
 (report B). Buffered state must distinguish generated-ahead from consumed for
 cloning, checkpoints, faults and observation data (report A).
 
-## Priority 5. Rail sizing as independent seeds
+## Priority 5. Rail sizing as independent seeds (landed)
 
-Both reports. Exact in every pinned figure.
+Landed 2026-10-16 (uncommitted at the time of writing), sparred with a fresh
+codex session to consensus.
 
-Bottleneck. `measure_uncapped_tail` walks eight independent seeds one after
-another on one thread, each step drawing a rejection-sampled t(4).
+What it is now.
 
-Redesign.
+- `measure_uncapped_tail` walks each seed on its own scoped thread with its
+  own generator, `GarchVol`, two tail collectors and squared-return partial,
+  the real `GarchVol::step` and the per-step rail assertion unchanged; a
+  worker's failed assertion re-raises at its join. Results fold in seed
+  order.
+- `TopK::merge` is exact, ties included (codex settled the tie worry: a
+  collector with a finite threshold already holds `keep` values at or above
+  it, so rejecting another equal one never leaves it short). Compaction
+  partitions at `keep - 1`, so the pivot is the retained minimum and the
+  threshold; queries sort the retained values once, which the envelope
+  harness depends on, since it scans `values` directly after `max()`. The
+  capacity stays 65,536: the envelope harness reports a count reaching it as
+  censored, so shrinking it would change that diagnostic. `seen` sums the
+  merged collectors' observations.
+- `value_exceeded_by` is documented as the order statistic it is; "exceeded
+  by exactly `rank` samples" was true only without ties.
 
-- One worker (scoped thread) per seed, each owning its seeded generator, its
-  `GarchVol`, two local tail accumulators, the squared-return sum and the
-  count, merged in seed order (both). The top-k merge is exact: the global top
-  k lies in the union of the per-seed top k's, since a sample excluded from a
-  seed's top k already has k samples above it in that seed. The real
-  `GarchVol::step` and both per-step rail assertions stay.
-- `TopK` (both): partition at the retained boundary (`select_nth_unstable_by`,
-  linear) instead of fully sorting 131,072 values per compaction, and sort the
-  retained values once when ranked queries are answered; today every query,
-  repeated maximum queries included, compacts again (report A). It keeps
-  65,536 values while the deepest rank read is 8,000 (report B). Report A
-  cautions that the threshold rejects most samples after warm-up, so
-  compaction is not every 65,536 updates indefinitely, and sorting is not
-  shown to dominate.
-- The innovation from priority 4's fixed-length sampler once it lands, still
-  the shipped draw and `GarchVol::step`, never a copy (report B).
-- Later: seeds in SIMD lanes, a batched kernel advancing independent seeds
-  while keeping each trajectory's order (both). A parallel prefix scan over
-  time: report B notes that while no rail binds, which the per-step assertion
-  guarantees, the variance recursion is exactly affine,
-  `sigma2' = a0 + (a1 z^2 + b1) sigma2`, so one seed's chain composes; not
-  worth it until one seed is the wall. Report A would not start there: the
-  shipped transition includes the clamps the test exists to detect, and
-  replacing it with an unrailed recurrence risks changing what is certified.
+The ranked tails, maxima and the envelope's counts are unchanged; the RMS is
+a sum of per-seed partials and may move in its last bits. The `consts.rs`
+figures reproduce: sigma 57.2x `vol_scalar`, largest clean return 3.33e-3,
+RMS 1.2393e-5. Pinned by `a_tail_collector_keeps_what_a_full_sort_keeps`
+(data dense in exact ties, whole and split-and-merged, short of capacity),
+bite-checked with a wrong threshold.
 
-Payoff. About 8x from threads on an idle host with eight or more cores, less
-inside a loaded gate (report B); a latency gain, not less total work, and
-per-worker warm-up of the tail thresholds is duplicated (report A). About
-another 2x from the sampler (report B).
+Measured: `shipped_garch_rails_sit_above_the_clean_tail` 17.0 s to 2.8 s in
+dev, alone, and back in the plain lane, where it passed under full-suite
+load.
 
-Risks. Merge floating-point sums in fixed seed order, never completion order
-(report A). The RMS becomes a sum of per-seed partials and moves in its last
-bits, an intentional numeric change; the `consts.rs` figures quoted to 3 to 5
-significant figures are unaffected (both).
+Not done: the fixed-draw t(4) sampler belongs to priority 4; seeds in SIMD
+lanes and a parallel prefix scan are not worth it with one seed at about
+2.8 s.
 
 ## Priority 6. The cascade's offspring as exponential intensity state
 
@@ -496,7 +491,8 @@ site rather than land them alone.
 - Realism's off-grid check cannot trip on anything the walk does (report B):
   every record price is a whole number of ticks times the tick mantissa, so it
   only verifies the Decimal conversion at the edge.
-- The oversized `TopK` is under priority 5. The control-walk laterals were
+- The `TopK` capacity was kept at 65,536 under priority 5, deliberately: the
+  envelope harness's censoring diagnostic reads it. The control-walk laterals were
   closed by priority 1's rewrite; what it found in turn is listed there.
 
 ## Suggested sequence
@@ -572,8 +568,10 @@ them. Walls are one test alone in a dev build, measured 2026-10-16.
 
 | Test | File | Tape 35 | Tape 36 | After priority 2 |
 |---|---|---|---|---|
-| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 37.8 s | 35.0 s, and fails (below) | 23.3 s, 1.8 s in release, still fails |
-| `shipped_garch_rails_sit_above_the_clean_tail` | `crates/mogwai-data/src/generated/tests.rs` | 17.3 s | 17.0 s | untouched |
+| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 37.8 s | 35.0 s, and fails (below) | 23.3 s (23.8 s after priority 3), 1.8 s in release, still fails |
+
+`realism` is the only one left. It is over the watchdog on parent
+resolution alone; priority 4 is what would bring it under.
 
 Re-enabled at tape 36: `session_edge_spike_localizes` (12.5 s),
 `one_walk_serves_every_probe_on_a_symbol` (12.5 s) and
@@ -582,7 +580,9 @@ the control walk's real-day test, now
 `the_control_walk_covers_every_exposed_hour_of_its_session` (8.8 s, was
 about 23 s as `the_control_walk_pair_replays_one_tape`; 7.8 s after
 priority 2). Re-enabled by priority 2:
-`session_edge_spike_lifts_realized_clamp` (9.0 s, was 24.3 s).
+`session_edge_spike_lifts_realized_clamp` (9.0 s, was 24.3 s). Re-enabled
+by priority 5: `shipped_garch_rails_sit_above_the_clean_tail` (2.8 s, was
+17.0 s).
 
 The control walk's pinned day (seed 301) went from 667k parents at tape 35 to
 1.28M at tape 36 while cost per parent fell; over seeds 300 to 316 the day
