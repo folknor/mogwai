@@ -28,6 +28,7 @@ use std::sync::Arc;
 use mogwai_protocol::{
     AggressorSide, InstrumentDef, MarketRegime, QuoteTick, TradeTick, decimal_to_f64,
 };
+use rand::distr::{Bernoulli, OpenClosed01};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
@@ -52,10 +53,12 @@ use super::consts::{
     REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
 };
 use super::dynamics::{
-    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
+    ArrivalClock, BounceLaws, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
 };
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
-use super::numeric::{decimal_from_f64, round_lot_size};
+use super::numeric::{
+    PriceMemo, decimal_from_f64, decimal_from_f64_round_dp, round_lot_size, spot_round_lot,
+};
 use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
@@ -109,8 +112,17 @@ pub struct GeneratedSource {
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
     size_dist: LogNormal<f64>,
+    // Read only by the test that pins the sampler's median; the walk reads
+    // the lots derived from it below.
+    #[cfg(test)]
     pub(super) size_median: f64,
+    // The two round-lot scales, fixed by `size_median` and so derived once
+    // rather than through a `log10` and a `powf` on every snapped draw.
+    spot_lot: f64,
+    integral_lot: f64,
     size_grid: SizeGrid,
+    coins: ChildCoins,
+    price_memo: PriceMemo,
     calendar: Option<Arc<SessionCalendar>>,
     tick_f64: f64,
     regime: RegimeState,
@@ -225,6 +237,33 @@ pub struct VolTrace {
     pub realized_clamp_hit: bool,
     pub mid_before: f64,
     pub mid_after: f64,
+}
+
+/// The per-child and per-parent coins whose probabilities are fixed for a
+/// source's life, built once. `random_bool(p)` is `Bernoulli::new(p)` plus
+/// one sample, so sampling these draws exactly what the per-call form drew.
+/// The level-step coins are the three values `step_child` selects between,
+/// each computed by the expression that used to run per child.
+#[derive(Clone, Copy)]
+struct ChildCoins {
+    size_snap: Bernoulli,
+    price_repeat: Bernoulli,
+    level_step_cascade: Bernoulli,
+    level_step_high: Bernoulli,
+    level_step_low: Bernoulli,
+}
+
+impl ChildCoins {
+    fn new(size_round_frac: f64, level_step_prob: f64) -> Self {
+        let coin = |p: f64| Bernoulli::new(p).expect("probability validated into [0, 1]");
+        Self {
+            size_snap: coin(size_round_frac),
+            price_repeat: coin(EVENT_PRICE_REPEAT_PROB),
+            level_step_cascade: coin(level_step_prob),
+            level_step_high: coin((level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)),
+            level_step_low: coin(level_step_prob * LOW_REGIME_LEVEL_STEP_MULT),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -592,8 +631,15 @@ impl GeneratedSource {
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         let symbol = Arc::from(scalars.symbol.as_str());
+        let tick_f64 = decimal_to_f64(scalars.modal_tick);
+        let coins = ChildCoins::new(scalars.size_round_frac, shape.level_step_prob);
+        let price_memo = PriceMemo::new(tick_f64, scalars.price_decimals);
         let mut this = Self {
-            tick_f64: decimal_to_f64(scalars.modal_tick),
+            tick_f64,
+            coins,
+            price_memo,
+            spot_lot: spot_round_lot(size_median),
+            integral_lot: integral_lot(size_median),
             scalars: Arc::new(scalars),
             symbol,
             rng: ChaCha12Rng::seed_from_u64(seed),
@@ -635,11 +681,13 @@ impl GeneratedSource {
                 drift_dir: 1,
                 drift_hot: false,
                 trade_bounce_ticks,
+                laws: BounceLaws::new(),
             },
             duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
+            #[cfg(test)]
             size_median,
             size_grid,
             calendar: calendar.map(Arc::new),
@@ -726,13 +774,28 @@ impl GeneratedSource {
         self.arrival.active_mean_s
     }
 
+    /// One `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap. rand_distr samples it as
+    /// `scale * (-ln u).powf(1 / shape)` over `u` in `(0, 1]`; at the shipped
+    /// shape of one that is `1 * (-ln u).powf(1)`, and both the unit scale and
+    /// `powf(x, 1.0) == x` are exact, so the short form draws the same `u` and
+    /// returns the same bits without the `powf`. Any other shape takes the
+    /// distribution itself.
+    fn draw_unit_weibull(&mut self) -> f64 {
+        if ARRIVAL_WEIBULL_SHAPE == 1.0 {
+            let u: f64 = self.rng.sample(OpenClosed01);
+            -u.ln()
+        } else {
+            self.duration_dist.sample(&mut self.rng)
+        }
+    }
+
     fn next_duration_ns(&mut self) -> u64 {
         if let Some(quiet) = self.arrival_override {
             self.arrival.quiet = quiet;
         }
         #[cfg(test)]
         self.draw_stages.push("gap");
-        let raw_eps = self.duration_dist.sample(&mut self.rng);
+        let raw_eps = self.draw_unit_weibull();
         let state_mean = if self.arrival.quiet {
             self.arrival.quiet_mean_s
         } else {
@@ -955,7 +1018,7 @@ impl GeneratedSource {
 
     fn draw_size(&mut self) -> SizeDraw {
         let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
-        let lot_snap = self.rng.random_bool(self.scalars.size_round_frac);
+        let lot_snap = self.rng.sample(self.coins.size_snap);
         SizeDraw { base, lot_snap }
     }
 
@@ -966,7 +1029,7 @@ impl GeneratedSource {
                 // The lot on an integral grid is at least one contract, so a
                 // median below ten contracts snaps to whole contracts rather
                 // than to a fractional lot.
-                let lot = integral_lot(self.size_median);
+                let lot = self.integral_lot;
                 decimal_from_f64((base / lot).round() * lot)
             } else {
                 decimal_from_f64(base)
@@ -979,14 +1042,16 @@ impl GeneratedSource {
                 .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
                 .max(self.size_grid.min_size);
         }
-        // The spot arm is the pre-size-grid expression, character for
-        // character: the lot-snap branch is not re-rounded to SIZE_DECIMALS,
-        // because it never was, and `spot_draws_are_bit_identical_...` is only
-        // provable if this arm is left alone rather than merely made similar.
+        // The spot arm is the pre-size-grid expression: the lot-snap branch is
+        // not re-rounded to SIZE_DECIMALS, because it never was, and
+        // `spot_draws_are_bit_identical_...` is only provable if this arm keeps
+        // its value rather than merely a similar one. The precomputed lot and
+        // the fast rounding are byte-identical by construction and by
+        // `fast_round_dp_matches_the_decimal_conversion` respectively.
         let size = if lot_snap {
-            round_lot_size(base, self.size_median)
+            round_lot_size(base, self.spot_lot)
         } else {
-            decimal_from_f64(base).round_dp(SIZE_DECIMALS)
+            decimal_from_f64_round_dp(base, SIZE_DECIMALS)
         };
         size.max(self.size_grid.min_size)
     }
@@ -1290,8 +1355,8 @@ impl GeneratedSource {
         .max(1.0);
         self.pending_quote = materialize_quote.then(|| QuoteTick {
             symbol: Arc::clone(&self.symbol),
-            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
-            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_px: self.price_memo.price(book.bid_ticks),
+            ask_px: self.price_memo.price(book.ask_ticks),
             bid_sz: book.bid_size,
             ask_sz: book.ask_size,
             ts_event: self.clock_ns,
@@ -1436,8 +1501,8 @@ impl GeneratedSource {
         };
         self.pending_quote = materialize_quote.then(|| QuoteTick {
             symbol: Arc::clone(&self.symbol),
-            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
-            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_px: self.price_memo.price(book.bid_ticks),
+            ask_px: self.price_memo.price(book.ask_ticks),
             bid_sz: book.bid_size,
             ask_sz: book.ask_size,
             ts_event: self.clock_ns,
@@ -1796,7 +1861,7 @@ impl GeneratedSource {
             count
         };
         let repeat_draw =
-            count == 1 && !self.bounce.high_regime && self.rng.random_bool(EVENT_PRICE_REPEAT_PROB);
+            count == 1 && !self.bounce.high_regime && self.rng.sample(self.coins.price_repeat);
         let compatible_repeat = repeat_draw
             && self
                 .last_event_price_ticks
@@ -1834,8 +1899,8 @@ impl GeneratedSource {
         };
         self.pending_quote = materialize_quote.then(|| QuoteTick {
             symbol: Arc::clone(&self.symbol),
-            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
-            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_px: self.price_memo.price(book.bid_ticks),
+            ask_px: self.price_memo.price(book.ask_ticks),
             bid_sz: book.bid_size,
             ask_sz: book.ask_size,
             ts_event: self.clock_ns,
@@ -1857,14 +1922,14 @@ impl GeneratedSource {
         // it is (tape protocol 33). A real multi-print parent on CME is a
         // multi-level parent nine times in ten, because a trade summary is
         // one print per level.
-        let level_step_prob = if self.cascade.is_some() {
-            self.shape.level_step_prob
+        let level_step = if self.cascade.is_some() {
+            self.coins.level_step_cascade
         } else if self.bounce.high_regime {
-            (self.shape.level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)
+            self.coins.level_step_high
         } else {
-            self.shape.level_step_prob * LOW_REGIME_LEVEL_STEP_MULT
+            self.coins.level_step_low
         };
-        if self.burst.emitted > 0 && self.rng.random_bool(level_step_prob) {
+        if self.burst.emitted > 0 && self.rng.sample(level_step) {
             match self.burst.side {
                 AggressorSide::Buyer => self.burst.price_ticks += 1.0,
                 AggressorSide::Seller => self.burst.price_ticks -= 1.0,
@@ -1901,8 +1966,7 @@ impl GeneratedSource {
         let draw = self.step_child();
         TradeTick {
             symbol: Arc::clone(&self.symbol),
-            price: decimal_from_f64(draw.price_ticks * self.tick_f64)
-                .round_dp(self.scalars.price_decimals),
+            price: self.price_memo.price(draw.price_ticks),
             size: self.materialize_size(draw.size),
             aggressor: self.burst.side,
             ts_event: self.clock_ns,

@@ -11,6 +11,7 @@
 
 use mogwai_protocol::AggressorSide;
 use rand::RngExt;
+use rand::distr::Bernoulli;
 use rand_chacha::ChaCha12Rng;
 
 use super::consts::{
@@ -30,6 +31,9 @@ pub struct SweepShape {
     pub(super) level_step_prob: f64,
     pub(super) truncated: u64,
     pub(super) drawn: u64,
+    // `ln(1 - 1/m)`, the geometric branch's denominator, a function of `m`
+    // alone and so solved with it rather than on every draw.
+    ln_continue: f64,
 }
 
 impl SweepShape {
@@ -67,6 +71,7 @@ impl SweepShape {
             level_step_prob: ((levels_mean - 1.0) / (children_mean - 1.0)).clamp(0.0, 1.0),
             truncated: 0,
             drawn: 0,
+            ln_continue: (1.0 - 1.0 / m).ln(),
         }
     }
 
@@ -83,7 +88,7 @@ impl SweepShape {
         if rng.random::<f64>() < self.q {
             return 1;
         }
-        let raw = 1.0 + (1.0 - rng.random::<f64>()).ln() / (1.0 - 1.0 / self.m).ln();
+        let raw = 1.0 + (1.0 - rng.random::<f64>()).ln() / self.ln_continue;
         let count = raw.floor().max(1.0) as u64;
         if count > u64::from(CHILD_CAP) {
             self.truncated += 1;
@@ -320,6 +325,38 @@ pub(super) struct BounceState {
     /// mutation rather than a restructuring. See the constant for why this is
     /// not a spread.
     pub(super) trade_bounce_ticks: f64,
+    pub(super) laws: BounceLaws,
+}
+
+/// The bounce and drift coins, built once from their constant probabilities.
+/// `random_bool(p)` is `Bernoulli::new(p)` followed by one sample, so holding
+/// the constructed distributions draws exactly what the per-call form drew;
+/// it only stops re-deriving the integer threshold on every event.
+#[derive(Clone, Copy)]
+pub(super) struct BounceLaws {
+    drift_dir_flip: Bernoulli,
+    hot_drift: Bernoulli,
+    high_regime_drift: Bernoulli,
+    high_to_low: Bernoulli,
+    low_to_high: Bernoulli,
+    high_flip: Bernoulli,
+    low_flip: Bernoulli,
+}
+
+impl BounceLaws {
+    pub(super) fn new() -> Self {
+        let coin =
+            |p: f64| Bernoulli::new(p).expect("bounce probabilities are constants in [0, 1]");
+        Self {
+            drift_dir_flip: coin(DRIFT_DIR_FLIP_PROB),
+            hot_drift: coin(HOT_DRIFT_PROB),
+            high_regime_drift: coin(HIGH_REGIME_DRIFT_PROB),
+            high_to_low: coin(BOUNCE_HIGH_TO_LOW_PROB),
+            low_to_high: coin(BOUNCE_LOW_TO_HIGH_PROB),
+            high_flip: coin(BOUNCE_HIGH_FLIP_PROB),
+            low_flip: coin(BOUNCE_LOW_FLIP_PROB),
+        }
+    }
 }
 
 impl BounceState {
@@ -327,15 +364,15 @@ impl BounceState {
         if !self.high_regime {
             return;
         }
-        if rng.random_bool(DRIFT_DIR_FLIP_PROB) {
+        if rng.sample(self.laws.drift_dir_flip) {
             self.drift_dir *= -1;
         }
         let p_drift = if self.drift_hot {
-            HOT_DRIFT_PROB
+            self.laws.hot_drift
         } else {
-            HIGH_REGIME_DRIFT_PROB
+            self.laws.high_regime_drift
         };
-        if rng.random_bool(p_drift) {
+        if rng.sample(p_drift) {
             self.drift_ticks += self.drift_dir;
             self.drift_hot = true;
         } else {
@@ -345,18 +382,18 @@ impl BounceState {
 
     pub(super) fn next_side(&mut self, rng: &mut ChaCha12Rng) -> AggressorSide {
         if self.high_regime {
-            if rng.random_bool(BOUNCE_HIGH_TO_LOW_PROB) {
+            if rng.sample(self.laws.high_to_low) {
                 self.high_regime = false;
             }
-        } else if rng.random_bool(BOUNCE_LOW_TO_HIGH_PROB) {
+        } else if rng.sample(self.laws.low_to_high) {
             self.high_regime = true;
         }
         let p_flip = if self.high_regime {
-            BOUNCE_HIGH_FLIP_PROB
+            self.laws.high_flip
         } else {
-            BOUNCE_LOW_FLIP_PROB
+            self.laws.low_flip
         };
-        if rng.random_bool(p_flip) {
+        if rng.sample(p_flip) {
             self.prev_side = match self.prev_side {
                 AggressorSide::Buyer => AggressorSide::Seller,
                 AggressorSide::Seller | AggressorSide::NoAggressor => AggressorSide::Buyer,

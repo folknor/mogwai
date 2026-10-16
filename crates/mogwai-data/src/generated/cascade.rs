@@ -410,6 +410,18 @@ pub(super) struct CascadeTables {
     student_scale: f64,
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
+    one_second: OneSecondSteps,
+}
+
+/// Every component's `ar1_coefficients` at a one-second step, the step the
+/// walk takes on every open second, solved once rather than an `exp` and a
+/// `sqrt` per component per second. `level` serves the sigma-extra
+/// components too, which share the level taus.
+#[derive(Clone)]
+struct OneSecondSteps {
+    texture: Vec<(f64, f64)>,
+    fast: (f64, f64),
+    level: Vec<(f64, f64)>,
 }
 
 impl CascadeTables {
@@ -469,6 +481,23 @@ impl CascadeTables {
             .collect();
         let parents_per_second = 1.0 / mean_event_duration_s;
         let student_scale = (config.student_df / (config.student_df - 2.0)).sqrt();
+        let texture_tau_s: Vec<f64> = config
+            .texture_tau_minutes
+            .iter()
+            .map(|t| t * 60.0)
+            .collect();
+        let level_tau_s: Vec<f64> = config.level_tau_minutes.iter().map(|t| t * 60.0).collect();
+        let one_second = OneSecondSteps {
+            texture: texture_tau_s
+                .iter()
+                .map(|tau| ar1_coefficients(1.0, *tau))
+                .collect(),
+            fast: ar1_coefficients(1.0, config.fast_texture_tau_s),
+            level: level_tau_s
+                .iter()
+                .map(|tau| ar1_coefficients(1.0, *tau))
+                .collect(),
+        };
         Ok(Self {
             config: config.clone(),
             calendar: calendar.clone(),
@@ -476,12 +505,9 @@ impl CascadeTables {
             texture_s,
             sigma_shape,
             weekday: envelope.weekday_weight,
-            texture_tau_s: config
-                .texture_tau_minutes
-                .iter()
-                .map(|t| t * 60.0)
-                .collect(),
-            level_tau_s: config.level_tau_minutes.iter().map(|t| t * 60.0).collect(),
+            texture_tau_s,
+            level_tau_s,
+            one_second,
             texture_sqrt_w: config.texture_weights.iter().map(|w| w.sqrt()).collect(),
             level_sqrt_w: config.level_weights.iter().map(|w| w.sqrt()).collect(),
             parents_per_second,
@@ -609,21 +635,34 @@ impl CascadeState {
     }
 
     fn step_components(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng, elapsed_s: f64) {
+        let coefficients = |tau: f64| ar1_coefficients(elapsed_s, tau);
         for (y, tau) in self.texture.iter_mut().zip(&tables.texture_tau_s) {
-            let rho = (-elapsed_s / tau).exp();
-            *y = rho * *y + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
+            *y = ar1_step(*y, coefficients(*tau), tables, rng);
         }
-        {
-            let rho = (-elapsed_s / tables.config.fast_texture_tau_s).exp();
-            self.fast = rho * self.fast + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
-        }
+        let fast = coefficients(tables.config.fast_texture_tau_s);
+        self.fast = ar1_step(self.fast, fast, tables, rng);
         for (y, tau) in self.level.iter_mut().zip(&tables.level_tau_s) {
-            let rho = (-elapsed_s / tau).exp();
-            *y = rho * *y + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
+            *y = ar1_step(*y, coefficients(*tau), tables, rng);
         }
         for (y, tau) in self.sigma_extra.iter_mut().zip(&tables.level_tau_s) {
-            let rho = (-elapsed_s / tau).exp();
-            *y = rho * *y + (1.0 - rho * rho).sqrt() * tables.normal.sample(rng);
+            *y = ar1_step(*y, coefficients(*tau), tables, rng);
+        }
+    }
+
+    /// `step_components(.., 1.0)` over the coefficients the tables solved
+    /// once for a one-second step, which is every step but a closure's.
+    /// Draw order and arithmetic are the general step's.
+    fn step_components_one_second(&mut self, tables: &CascadeTables, rng: &mut ChaCha12Rng) {
+        let one = &tables.one_second;
+        for (y, c) in self.texture.iter_mut().zip(&one.texture) {
+            *y = ar1_step(*y, *c, tables, rng);
+        }
+        self.fast = ar1_step(self.fast, one.fast, tables, rng);
+        for (y, c) in self.level.iter_mut().zip(&one.level) {
+            *y = ar1_step(*y, *c, tables, rng);
+        }
+        for (y, c) in self.sigma_extra.iter_mut().zip(&one.level) {
+            *y = ar1_step(*y, *c, tables, rng);
         }
     }
 
@@ -675,7 +714,7 @@ impl CascadeState {
                 let Some(next) = self.second_ns.checked_add(NS_PER_SECOND) else {
                     return Err(CascadeRefusal::ClockExhausted);
                 };
-                self.step_components(tables, rng, 1.0);
+                self.step_components_one_second(tables, rng);
                 self.second_ns = next;
             }
             self.filled = true;
@@ -909,6 +948,23 @@ impl CascadeState {
             impact_ticks,
         }
     }
+}
+
+/// An Ornstein-Uhlenbeck component's exact discretisation over `elapsed_s`:
+/// the decay `rho` and the innovation scale `sqrt(1 - rho^2)` that keeps the
+/// component at unit stationary variance.
+fn ar1_coefficients(elapsed_s: f64, tau: f64) -> (f64, f64) {
+    let rho = (-elapsed_s / tau).exp();
+    (rho, (1.0 - rho * rho).sqrt())
+}
+
+fn ar1_step(
+    y: f64,
+    (rho, innovation_scale): (f64, f64),
+    tables: &CascadeTables,
+    rng: &mut ChaCha12Rng,
+) -> f64 {
+    rho * y + innovation_scale * tables.normal.sample(rng)
 }
 
 fn sign_of(side: AggressorSide) -> f64 {

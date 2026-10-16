@@ -784,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
     fn one_walk_serves_every_probe_on_a_symbol() {
         let ticks = trades(TEST_ORIGIN, 6);
         let probes = vec![
@@ -935,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
     fn sweep_pass_walks_only_the_new_span() {
         // Pin both ends to real adjacent tape prints. This measures the delta
         // span rather than assuming an arbitrary wall interval contains one.

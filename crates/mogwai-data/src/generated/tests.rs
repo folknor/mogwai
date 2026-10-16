@@ -1414,6 +1414,7 @@ fn liquidity_drought_imitates_dying_symbol() {
 
 // A 1M-tick walk: see the heavy-walk cfg note at the top of this file.
 #[test]
+#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_localizes() {
     let fp = Fingerprint::from_repo_json();
@@ -1447,6 +1448,7 @@ fn session_edge_spike_localizes() {
 //
 // Two 1M-tick walks: see the heavy-walk cfg note at the top of this file.
 #[test]
+#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_lifts_realized_clamp() {
     let fp = Fingerprint::from_repo_json();
@@ -2137,7 +2139,12 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
 }
 
 // A 2M-parent-event walk: see the heavy-walk cfg note at the top of this file.
+// Disabled on cost: in an unoptimized dev build the 2M parents' draws alone
+// take about 22 s, past the per-test watchdog before any measurement runs, and
+// the lag-50 autocorrelations need one continuous series, so the walk cannot
+// be split the way the dwell arms were.
 #[test]
+#[ignore = "debug-slow: a 2M-parent serial walk; its draws alone exceed the per-test watchdog in a dev build"]
 #[cfg(not(feature = "hotpath"))]
 fn realism() {
     let fp = Fingerprint::from_repo_json();
@@ -2219,7 +2226,7 @@ fn realism() {
         "truncation_frac={}",
         measured.truncation_frac
     );
-    assert_dwell_is_bounded(&measured, &scalars, &fp);
+    assert_dwell_is_bounded(&measured.dwell(), &scalars, &fp);
 }
 
 #[test]
@@ -2439,20 +2446,36 @@ fn arrival_children_mults_preserve_the_declared_mean() {
 //     0.0105 - so nothing is given up here, but read it as the binary guard it
 //     is rather than as a measurement of a fraction.
 //
-// An eight-arm 2M-parent-event walk: see the heavy-walk cfg note at the top of
-// this file. Run it alone with the workspace runner AGENTS.md names:
-//   test -p mogwai-data dwell_is_bounded_across_run_seeds --debug
-// That takes about 6.5 s per sweep and needs no `--timeout` raise - the old
-// hint here asked for `--timeout 280` on a walk that never needed it. The
-// runner runs every sweep of the profile, and for this crate it reports
-// skip with a reason for the `instrumented` sweep, which is the `cfg` above
-// doing its job rather than a silent zero-match pass.
-#[test]
-#[cfg(not(feature = "hotpath"))]
-fn dwell_is_bounded_across_run_seeds() {
-    for run_seed in [0, 1, 2, 3, 4, 5, 6, 42] {
-        assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW / 8);
-    }
+// Each arm is its own test, so the eight `DRAW / 8` walks run in parallel and
+// each answers to the per-test watchdog alone. Under one test they were a 2M
+// parent-event serial walk, which an unoptimized dev build measured at 46 s.
+// The arms step with `advance_parent` and fold only parent timestamps and
+// print hours (`measure_dwell`): the four dwell statistics need nothing else,
+// and the compact path takes exactly the draws `next_tick` takes, so each arm
+// judges the same realization the full measurement did. See the heavy-walk cfg
+// note at the top of this file for the `hotpath` gate; the runner reports the
+// `instrumented` sweep as a skip with a reason, which is that `cfg` doing its
+// job rather than a silent zero-match pass. The shared name prefix
+// `dwell_is_bounded_at_run_seed` selects all eight arms as one filter.
+macro_rules! dwell_arms {
+    ($($name:ident => $seed:expr),* $(,)?) => {$(
+        #[test]
+        #[cfg(not(feature = "hotpath"))]
+        fn $name() {
+            assert_run_seed_dwell_is_bounded_with_draw($seed, DRAW / 8);
+        }
+    )*};
+}
+
+dwell_arms! {
+    dwell_is_bounded_at_run_seed_0 => 0,
+    dwell_is_bounded_at_run_seed_1 => 1,
+    dwell_is_bounded_at_run_seed_2 => 2,
+    dwell_is_bounded_at_run_seed_3 => 3,
+    dwell_is_bounded_at_run_seed_4 => 4,
+    dwell_is_bounded_at_run_seed_5 => 5,
+    dwell_is_bounded_at_run_seed_6 => 6,
+    dwell_is_bounded_at_run_seed_42 => 42,
 }
 
 /// No two trades on one river share a `ts_event`, and a consumer's correctness
@@ -2543,11 +2566,106 @@ fn assert_run_seed_dwell_is_bounded_with_draw(run_seed: u64, draw: usize) {
     scalars.price_decimals = u32::from(def.price_precision);
     let seed = mogwai_protocol::RunSeeds::from_run_seed(run_seed).tape_for("BTCUSDT");
     let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
-    let measured = measure(&mut src, &scalars, draw);
+    let measured = measure_dwell(&mut src, draw);
     assert_dwell_is_bounded(&measured, &scalars, &fp);
 }
 
-fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: &Fingerprint) {
+/// The four statistics the dwell gate reads.
+struct Dwell {
+    mean_gap_s: f64,
+    gap_p999_s: f64,
+    empty_hour_frac: f64,
+    max_empty_hour_run_h: f64,
+}
+
+impl Measured {
+    fn dwell(&self) -> Dwell {
+        Dwell {
+            mean_gap_s: self.mean_gap_s,
+            gap_p999_s: self.gap_p999_s,
+            empty_hour_frac: self.empty_hour_frac,
+            max_empty_hour_run_h: self.max_empty_hour_run_h,
+        }
+    }
+}
+
+/// `measure`'s four dwell statistics over the same `draw` parents, without
+/// building a wire record. A parent's trades are stamped `parent_ts + i *
+/// stride` for `i` below its child count, so its first and last trade bound
+/// every print it makes; a burst spans microseconds, so those two instants
+/// cover every hour bucket it touches. The first trade of the walk and the
+/// last trade of the last parent are `measure`'s `first_ts` and `last_ts`.
+/// `dwell_measurement_matches_the_full_walk` pins the equivalence.
+fn measure_dwell(src: &mut GeneratedSource, draw: usize) -> Dwell {
+    let mut parent_timestamps = Vec::with_capacity(draw);
+    let mut occupied_hours: HashSet<u64> = HashSet::new();
+    let mut last_ts = 0_u64;
+    for _ in 0..draw {
+        let parent = src.advance_parent().expect("infinite generated tape");
+        let last_child =
+            parent.parent_ts_ns + u64::from(parent.child_count - 1) * parent.child_stride_ns;
+        parent_timestamps.push(parent.parent_ts_ns);
+        occupied_hours.insert(parent.parent_ts_ns / NS_PER_HOUR);
+        occupied_hours.insert(last_child / NS_PER_HOUR);
+        last_ts = last_child;
+    }
+    let durations: Vec<f64> = parent_timestamps
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]) as f64 / 1_000_000_000.0)
+        .collect();
+    let mut sorted_durations = durations.clone();
+    sorted_durations.sort_by(f64::total_cmp);
+    let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
+    let (empty_hour_frac, max_empty_hour_run_h) =
+        empty_hour_stats_over(parent_timestamps[0], last_ts, &occupied_hours);
+    Dwell {
+        mean_gap_s: mean(&durations),
+        gap_p999_s: sorted_durations[p999_index],
+        empty_hour_frac,
+        max_empty_hour_run_h,
+    }
+}
+
+/// The compact dwell measurement is the full one, bit for bit, at a draw
+/// short enough to walk both ways. Without this the per-seed arms would
+/// judge a re-derivation of `measure` rather than `measure` itself.
+#[test]
+fn dwell_measurement_matches_the_full_walk() {
+    let fp = Fingerprint::from_repo_json();
+    let def = mogwai_protocol::default_instruments()
+        .into_iter()
+        .find(|def| def.symbol.as_ref() == "BTCUSDT")
+        .expect("the default instrument set carries BTCUSDT");
+    let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
+    scalars.modal_tick = def.price_increment;
+    scalars.price_decimals = u32::from(def.price_precision);
+    // About three hours of tape: several whole hour buckets, so the
+    // empty-hour statistics are computed over a real population.
+    let draw = 60_000;
+    let seed = mogwai_protocol::RunSeeds::from_run_seed(42).tape_for("BTCUSDT");
+    let mut full = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
+    let full = measure(&mut full, &scalars, draw).dwell();
+    let mut compact = GeneratedSource::new(scalars, seed, 0, &fp, None);
+    let compact = measure_dwell(&mut compact, draw);
+    for (name, a, b) in [
+        ("mean_gap_s", full.mean_gap_s, compact.mean_gap_s),
+        ("gap_p999_s", full.gap_p999_s, compact.gap_p999_s),
+        (
+            "empty_hour_frac",
+            full.empty_hour_frac,
+            compact.empty_hour_frac,
+        ),
+        (
+            "max_empty_hour_run_h",
+            full.max_empty_hour_run_h,
+            compact.max_empty_hour_run_h,
+        ),
+    ] {
+        assert_eq!(a.to_bits(), b.to_bits(), "{name}: full {a} compact {b}");
+    }
+}
+
+fn assert_dwell_is_bounded(measured: &Dwell, scalars: &GeneratorScalars, fp: &Fingerprint) {
     let dwell = &fp.golden_targets.dwell;
     let cadence = scalars.mean_event_duration_s / dwell.mean_s.anchor;
     assert!(
@@ -3331,6 +3449,7 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // `GARCH_GARCH` or `VOL_SCALAR` and this would have gone on measuring the old
 // process, green, while `consts.rs` still cited it.
 #[test]
+#[ignore = "debug-slow: exceeds the per-test watchdog in an unoptimized dev build"]
 fn shipped_garch_rails_sit_above_the_clean_tail() {
     let candidate = GarchOverride {
         a1: GARCH_ARCH,

@@ -811,6 +811,7 @@ fn write_bars(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     // The rest of the moved summary surface is exercised by these tests
     // alone; the shipping paths need only `summarize`/`SummaryAcc`.
     use mogwai_lab::summary::{
@@ -1823,6 +1824,9 @@ mod tests {
             };
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             let mut events: u64 = 0;
+            // One buffer reused across every record: the hash covers the
+            // line's bytes, not how they were assembled.
+            let mut line = String::new();
             while let Some(event) = source.next_tick() {
                 if event.ts_event() >= WINDOW_NS {
                     break;
@@ -1832,8 +1836,10 @@ mod tests {
                 // layout, Display for decimals - a stable contract, unlike
                 // Debug text, whose derived layout could drift with a field
                 // rename and silently re-key the oracle.
-                let line = match &event {
-                    TickEvent::Trade(t) => format!(
+                line.clear();
+                match &event {
+                    TickEvent::Trade(t) => write!(
+                        line,
                         "T|{}|{}|{}|{}|{}",
                         t.symbol,
                         t.price,
@@ -1841,11 +1847,13 @@ mod tests {
                         aggressor_word(t.aggressor),
                         t.ts_event
                     ),
-                    TickEvent::Quote(q) => format!(
+                    TickEvent::Quote(q) => write!(
+                        line,
                         "Q|{}|{}|{}|{}|{}|{}",
                         q.symbol, q.bid_px, q.ask_px, q.bid_sz, q.ask_sz, q.ts_event
                     ),
-                };
+                }
+                .expect("writing to a String cannot fail");
                 for byte in line.bytes() {
                     hash ^= u64::from(byte);
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);

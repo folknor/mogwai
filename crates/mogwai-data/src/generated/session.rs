@@ -68,15 +68,27 @@ impl EnvelopeTables {
     }
 }
 
-// Precomputed session multipliers. Built once from the fingerprint's
-// SessionProfile so the per-tick hot path is two array indexes and a multiply,
-// not a re-normalization. The arrival multiplier centers each share on 1.0 by
-// dividing out the uniform share (24 hours, 7 days); the vol multiplier is the
-// fingerprint's per-mean ratio used as-is. When the calendar carries an
-// envelope, the hourly curves are not consulted at all: the envelope's
-// per-minute tables stand in for them, normalized the same way.
+// Precomputed session multipliers, one arrival/vol pair per minute of the
+// week, shared by every clone. Every input the shape reads is a function of
+// the UTC minute index modulo a week: the hourly curves key on hour and day of
+// week, and an envelope keys on the calendar's local week minute under a
+// whole-minute offset. So the table is filled by evaluating the shape below at
+// each minute of one week, and a lookup at any instant returns the value that
+// evaluation would have produced there, bit for bit, with no per-parent civil
+// arithmetic, calendar walk or division. Holding only the shared table is also
+// what keeps a source clone from deep-copying the calendar and its envelope.
 #[derive(Clone)]
 pub(super) struct SessionModulator {
+    minutes: std::sync::Arc<[(f64, f64)]>,
+}
+
+// The construction-time shape the table is evaluated from. The arrival
+// multiplier centers each share on 1.0 by dividing out the uniform share (24
+// hours, 7 days); the vol multiplier is the fingerprint's per-mean ratio used
+// as-is. When the calendar carries an envelope, the hourly curves are not
+// consulted at all: the envelope's per-minute tables stand in for them,
+// normalized the same way.
+struct SessionShape {
     // intensity_hour[h] * 24.0: arrival-rate multiplier from the hour share,
     // centered on 1.0 (uniform hour share is 1/24).
     arr_hour: [f64; 24],
@@ -98,11 +110,39 @@ pub(super) struct SessionModulator {
 
 impl SessionModulator {
     /// The calendar is a constructor input, not a later attachment, because the
-    /// normalizers below cannot be computed without it. A modulator built from
-    /// the profile alone and corrected afterwards would be wrong for the window
+    /// normalizers cannot be computed without it. A modulator built from the
+    /// profile alone and corrected afterwards would be wrong for the window
     /// between the two, which is precisely the state this signature makes
     /// unrepresentable.
     pub(super) fn new(profile: &SessionProfile, calendar: Option<&SessionCalendar>) -> Self {
+        let shape = SessionShape::new(profile, calendar);
+        let minutes = (0..MINUTES_PER_WEEK)
+            .map(|minute| {
+                let clock_ns = minute * NS_PER_MINUTE;
+                (shape.arrival_mult(clock_ns), shape.vol_mult(clock_ns))
+            })
+            .collect();
+        Self { minutes }
+    }
+
+    fn minute(&self, clock_ns: u64) -> (f64, f64) {
+        self.minutes[((clock_ns / NS_PER_MINUTE) % MINUTES_PER_WEEK) as usize]
+    }
+
+    // Arrival-rate multiplier at this wall-clock instant. A duration is divided
+    // by this so a high-activity instant produces shorter inter-arrivals.
+    pub(super) fn arrival_mult(&self, clock_ns: u64) -> f64 {
+        self.minute(clock_ns).0
+    }
+
+    // Volatility multiplier at this wall-clock instant.
+    pub(super) fn vol_mult(&self, clock_ns: u64) -> f64 {
+        self.minute(clock_ns).1
+    }
+}
+
+impl SessionShape {
+    fn new(profile: &SessionProfile, calendar: Option<&SessionCalendar>) -> Self {
         let mut arr_hour = [0.0; 24];
         for (h, mult) in arr_hour.iter_mut().enumerate() {
             *mult = profile.intensity_hour[h] * 24.0;
@@ -198,7 +238,7 @@ impl SessionModulator {
     // division is what makes the stored factors scale-invariant: a profile
     // whose factors are all doubled, or all ones, is exactly neutral rather
     // than a 168x arrival multiplier.
-    pub(super) fn arrival_mult(&self, clock_ns: u64) -> f64 {
+    fn arrival_mult(&self, clock_ns: u64) -> f64 {
         self.raw_arrival(clock_ns) / self.arrival_normalizer
     }
 
@@ -208,7 +248,7 @@ impl SessionModulator {
     // guard is relaxed for calendar-bearing profiles, and a curve normalized
     // over 168 hours instead of the 113.75 a CME week actually trades would
     // scale every return by roughly 1.5 with no error anywhere.
-    pub(super) fn vol_mult(&self, clock_ns: u64) -> f64 {
+    fn vol_mult(&self, clock_ns: u64) -> f64 {
         self.raw_vol(clock_ns) / self.vol_normalizer
     }
 }
@@ -277,6 +317,51 @@ mod tests {
         // instant would read exactly 1.0; the envelope is what moves it.
         let flat = SessionModulator::new(&profile(), Some(&always_open()));
         assert_eq!(flat.arrival_mult(at(5)), flat.arrival_mult(at(6)));
+    }
+
+    /// The table lookup is the shape evaluation, bit for bit, at instants the
+    /// table was never filled at: mid-minute, weeks past the epoch, under a
+    /// non-zero offset and with or without an envelope. A shape input that
+    /// was not weekly-periodic in the UTC minute would fail here.
+    #[test]
+    fn the_minute_table_reproduces_the_shape_at_every_instant() {
+        let mut enveloped = always_open();
+        enveloped.utc_offset_minutes = -300;
+        enveloped.open_windows = vec![WeeklyWindow {
+            start_minute: 1_000,
+            end_minute: 9_000,
+        }];
+        enveloped.envelope = Some(SessionEnvelope {
+            session_open_minute_of_day: 1_020,
+            weekday_weight: [0.7, 1.1, 1.3, 0.9, 1.0, 1.2, 0.8],
+            volume: (0..1_380).map(|m| 0.5 + f64::from(m % 11)).collect(),
+            range: (0..1_380).map(|m| 0.3 + f64::from(m % 13)).collect(),
+        });
+        enveloped.validate().unwrap();
+        let mut hourly = profile();
+        for (h, share) in hourly.intensity_hour.iter_mut().enumerate() {
+            *share = (1.0 + h as f64) / 300.0;
+        }
+        hourly.vol_hour[3] = 2.5;
+        hourly.dow_weight[2] = 0.3;
+        for calendar in [None, Some(&always_open()), Some(&enveloped)] {
+            let shape = SessionShape::new(&hourly, calendar);
+            let modulator = SessionModulator::new(&hourly, calendar);
+            let mut clock_ns: u64 = 7;
+            while clock_ns < 40 * 7 * 1_440 * NS_PER_MINUTE {
+                assert_eq!(
+                    modulator.arrival_mult(clock_ns).to_bits(),
+                    shape.arrival_mult(clock_ns).to_bits(),
+                    "arrival at {clock_ns}"
+                );
+                assert_eq!(
+                    modulator.vol_mult(clock_ns).to_bits(),
+                    shape.vol_mult(clock_ns).to_bits(),
+                    "vol at {clock_ns}"
+                );
+                clock_ns += 7_919 * 1_000_000_003;
+            }
+        }
     }
 
     #[test]
