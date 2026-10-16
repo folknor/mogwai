@@ -15,8 +15,8 @@ use std::sync::Mutex;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use mogwai_data::{
-    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickSource,
-    TriggerScan, scan_triggers,
+    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, Pushback, TriggerScan,
+    scan_triggers,
 };
 use mogwai_protocol::{ScanKind, Side};
 use rust_decimal::Decimal;
@@ -75,10 +75,10 @@ fn benches(c: &mut Criterion) {
         ("walk_one_pass_500_scans", 500),
     ] {
         let scans = scans(count);
-        // A `TickSource` is consumed as it drains, so the source is cloned per
+        // A river is consumed as it drains, so the source is rebuilt per
         // iteration: reusing one would leave every iteration after the first
         // already past `to_ns`, breaking on its first pull and reporting the
-        // cost of one `next_tick` as the cost of a pass.
+        // cost of one `next_record` as the cost of a pass.
         //
         // The source is handed back as part of the output: `iter_batched` drops
         // outputs after stopping the timer but drops a consumed input inside the
@@ -121,8 +121,8 @@ fn benches(c: &mut Criterion) {
     // scale with different things - the seek distance versus print density and
     // scan count - so they are timed apart. Shaped like
     // `fills::scan_triggers`: a checkpoint restore out of a long-lived
-    // process-wide index, taken under a lock, then the residual drain through
-    // `MergeSource::starting_at` behind a `Box<dyn TickSource>`.
+    // process-wide index, taken under a lock, then the residual seek through
+    // the one-record `Pushback` the venue's history source uses.
     let index = Mutex::new(CheckpointIndex::new(
         source(),
         CHECKPOINT_K,
@@ -141,8 +141,7 @@ fn benches(c: &mut Criterion) {
             // benchmarks above.
             |()| {
                 let restored = index.lock().expect("index").source_before(target);
-                let boxed: Box<dyn TickSource> = Box::new(restored);
-                MergeSource::starting_at(vec![boxed], Some(target))
+                Pushback::starting_at(restored, Some(target))
             },
             BatchSize::SmallInput,
         );

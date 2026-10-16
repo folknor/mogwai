@@ -478,6 +478,10 @@ fn default_size_log_sigma() -> f64 {
 /// the measured table at its check in `validate`.
 pub const MAX_MEAN_EVENT_DURATION_S: f64 = 1_000.0;
 
+/// Ceiling on `GeneratorScalars::price_decimals`: the scale a generated price
+/// mantissa is recorded at. See the reasoning at its check in `validate`.
+pub const MAX_PRICE_DECIMALS: u32 = 9;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorScalars {
@@ -710,10 +714,21 @@ impl GeneratorScalars {
         // coarser grid, so no test or runtime check catches it - only this does.
         // The venue enforces the same relationship on its instrument defs via
         // `on_increment`; this is the generator-layer twin.
-        // rust_decimal carries at most 28 fractional digits. Zero is a valid
-        // whole-number grid (YM/MYM are the motivating examples); values above
-        // 28 claim precision the numeric representation cannot provide.
-        if self.price_decimals > 28 || self.modal_tick.normalize().scale() > self.price_decimals {
+        // Zero is a valid whole-number grid (YM/MYM are the motivating
+        // examples). The ceiling is the record's, not `Decimal`'s: a generated
+        // price is an `i64` mantissa at this scale, and at nine places the
+        // latent mid's ceiling of one billion is a mantissa of 1e18, leaving
+        // headroom under `i64::MAX` for every offset an emitted level adds.
+        // The headroom is a domain statement, not the guard - every emitted
+        // price is still converted checked - but a scale past it would make
+        // ordinary prices unrepresentable rather than merely extreme ones.
+        if self.price_decimals > MAX_PRICE_DECIMALS {
+            return Err(ScalarError::detailed(
+                "price_decimals",
+                "exceeds the nine places a generated price mantissa can carry",
+            ));
+        }
+        if self.modal_tick.normalize().scale() > self.price_decimals {
             return Err(ScalarError::field("modal_tick"));
         }
         // Two-sided, and the ceiling is the half that was missing. This knob

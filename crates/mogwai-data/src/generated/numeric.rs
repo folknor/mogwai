@@ -2,25 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Small numeric helpers shared across the generator: the saturating
-//! f64-to-Decimal conversion the walk uses for prices/sizes and round-lot
-//! snapping.
+//! f64-to-Decimal conversion, and the two conversions from the walk's float
+//! coordinates onto a river's integer record scale - [`PriceGrid`] for tick
+//! counts and [`SizeQuantizer`] for size draws.
 
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 
 // Saturating f64 -> Decimal conversion: no internal generator draw can panic
-// here. The pinned size/price distributions keep draws far inside Decimal
-// range in practice, but a sufficiently extreme heavy-tail sample (or a NaN)
-// would make `Decimal::from_f64` return None, so we clamp to the nearest
-// representable value instead of unwrapping. NaN maps to zero (no sign to
-// preserve); +/-inf and out-of-range finite magnitudes saturate to
-// Decimal::MAX / Decimal::MIN by sign.
+// here. NaN maps to zero (no sign to preserve); +/-inf and out-of-range finite
+// magnitudes saturate to Decimal::MAX / Decimal::MIN by sign.
 //
 // Deliberately not unified with `mogwai_protocol::decimal_from_f64`, which
 // zeroes +/-inf instead of saturating (it has a test pinning that behaviour).
-// For a generated price/size, clamping an overflowed draw to a huge-but-valid
-// magnitude is a safer failure mode than collapsing it to zero, so this stays
-// local. The reverse direction (`decimal_to_f64`) is byte-identical in both
-// crates and is imported from the protocol helper instead of redefined here.
+// The reverse direction (`decimal_to_f64`) is byte-identical in both crates and
+// is imported from the protocol helper instead of redefined here.
 pub(super) fn decimal_from_f64(value: f64) -> Decimal {
     if let Some(decimal) = Decimal::from_f64(value) {
         return decimal;
@@ -34,213 +29,236 @@ pub(super) fn decimal_from_f64(value: f64) -> Decimal {
     }
 }
 
-/// `decimal_from_f64(value).round_dp(dp)`, byte for byte, without the
-/// conversion's bit-by-bit decimal expansion wherever the answer is already
-/// decided in binary.
+/// The ceiling on every quantity mantissa a generated record carries:
+/// configured top-of-book sizes, the minimum size, every size draw and every
+/// discrete-book quantity. Build refuses configured quantities above it, and
+/// draws saturate to it, so no record quantity exceeds it.
 ///
-/// `from_f64` keeps at most 16 significant digits, so the decimal it
-/// produces sits within a relative 1e-13 of `value` even where the 28-digit
-/// scale cap truncates it harder (the `y >= 1` floor bounds that case), and
-/// `value * 10^dp` is within a relative 1.2e-16 of its exact product. When `y
-/// = value * 10^dp` sits further than a relative 1e-11 from both an integer
-/// and a half-integer, the exact decimal times `10^dp` lies strictly inside
-/// the same open interval: it is not an integer, so the decimal carries more
-/// than `dp` places and `round_dp` rescales to exactly `dp`; it is no tie, so
-/// banker's rounding goes to the nearer neighbour, which is `y`'s. Everything
-/// else - near ties, near-integers whose trailing zeros `from_f64` strips,
-/// and values outside the range where `y` is an exact integer carrier - takes
-/// the slow path unchanged. `fast_round_dp_matches_the_decimal_conversion`
-/// pins the equivalence differentially.
-pub(super) fn decimal_from_f64_round_dp(value: f64, dp: u32) -> Decimal {
-    fast_round_dp(value, dp).unwrap_or_else(|| decimal_from_f64(value).round_dp(dp))
-}
+/// It bounds one record, not a sum: a reader accumulating quantities over an
+/// unbounded number of records does so in `u128` or checked arithmetic. At
+/// 10^18 a `u128` sum holds more than 10^20 records at the ceiling.
+pub const SIZE_UNITS_CEILING: u64 = 1_000_000_000_000_000_000;
 
-/// The decided-in-binary half of [`decimal_from_f64_round_dp`]; `None` sends
-/// the value down the exact conversion.
-fn fast_round_dp(value: f64, dp: u32) -> Option<Decimal> {
-    const POW10: [f64; 16] = [
-        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
-    ];
-    let y = value * POW10.get(dp as usize)?;
-    if !(1.0..1e15).contains(&y) {
-        return None;
-    }
-    let floor = y.floor();
-    let frac = y - floor;
-    let guard = y * 1e-11;
-    if frac <= guard || frac >= 1.0 - guard || (frac - 0.5).abs() <= guard {
-        return None;
-    }
-    let mantissa = if frac > 0.5 { floor + 1.0 } else { floor };
-    Some(Decimal::new(mantissa as i64, dp))
-}
+/// 2^53: every non-negative integer below it is exactly a float, and the cast
+/// to `i64` of an integral float below it is exact. Compared as a float
+/// literal rather than derived from `i64::MAX as f64`, which rounds up to
+/// 2^63 and would admit a value the saturating cast silently clamps.
+const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
-/// A direct-mapped memo of `decimal_from_f64(ticks * tick).round_dp(decimals)`
-/// for one source's fixed tick and price precision.
+/// A river's tick as a mantissa at its price scale, and the checked
+/// conversion of a tick count onto it.
 ///
-/// The walk prices on an integer tick grid that clusters around the mid, so
-/// the same few hundred levels are converted over and over; the conversion is
-/// a pure function of the tick count, which makes a hit byte-identical to a
-/// miss by construction. Keyed on the f64's bits, so a lookup can only hit
-/// the exact input that filled it; the empty sentinel is a NaN bit pattern,
-/// which no finite input can share, and non-finite inputs bypass the memo.
-#[derive(Clone)]
-pub(super) struct PriceMemo {
-    tick: f64,
-    decimals: u32,
-    keys: [u64; PRICE_MEMO_SLOTS],
-    values: [Decimal; PRICE_MEMO_SLOTS],
+/// The walk prices on an integer tick grid held as `f64`; the record is the
+/// tick count times the tick's own mantissa, pure integer arithmetic, exact
+/// for any tick the scale can represent (0.01, 0.25, 5). The conversion is the
+/// real guard on the record's range: the latent mid's ceiling proves nothing
+/// about an emitted level once width, displacement, drift and a sweep's
+/// traversal are added, so every emitted price passes through here, and a
+/// coordinate that is not a positive integer inside the exact range, or whose
+/// mantissa overflows, is refused rather than clamped.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PriceGrid {
+    pub(super) tick_mantissa: i64,
 }
 
-const PRICE_MEMO_SLOTS: usize = 32;
-const PRICE_MEMO_EMPTY: u64 = u64::MAX;
+impl PriceGrid {
+    pub(super) fn mantissa(self, ticks: f64) -> Option<i64> {
+        // A range test is false for NaN, so the guard refuses it with the rest.
+        if !((1.0..EXACT_INT_LIMIT).contains(&ticks) && ticks.fract() == 0.0) {
+            return None;
+        }
+        (ticks as i64).checked_mul(self.tick_mantissa)
+    }
 
-impl PriceMemo {
-    pub(super) fn new(tick: f64, decimals: u32) -> Self {
+    pub(super) fn mantissa_of_ticks(self, ticks: i64) -> Option<i64> {
+        if ticks < 1 {
+            return None;
+        }
+        ticks.checked_mul(self.tick_mantissa)
+    }
+}
+
+/// A river's size draws onto its integer quantity scale.
+///
+/// Built once per source from the size grid, the scale and the latent median,
+/// so a draw costs a multiply, a round and a compare.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SizeQuantizer {
+    /// `10^size_dp`, the factor from a size to its mantissa.
+    unit_scale: f64,
+    integral: bool,
+    min_units: u64,
+    /// The round lot as a size, never smaller than one unit.
+    lot_value: f64,
+    /// The round lot in units: at least one, saturated at the ceiling.
+    lot_units: u64,
+}
+
+impl SizeQuantizer {
+    /// `lot_exponent` is `floor(log10(median))`, the decade the round lot
+    /// tracks. An integral grid's lot is at least one whole contract, so its
+    /// exponent floors at zero.
+    pub(super) fn new(size_dp: u32, integral: bool, min_units: u64, lot_exponent: i32) -> Self {
+        let lot_exponent = if integral {
+            lot_exponent.max(0)
+        } else {
+            lot_exponent
+        };
+        // The lot in units, built without constructing a power that cannot
+        // be represented: below one unit the lot is one unit, and a lot above
+        // the ceiling is the ceiling.
+        let unit_exponent = lot_exponent.saturating_add(size_dp as i32);
+        let (lot_value, lot_units) = if unit_exponent < 0 {
+            (10_f64.powi(-(size_dp as i32)), 1)
+        } else {
+            let units = u32::try_from(unit_exponent)
+                .ok()
+                .and_then(|exponent| 10_u64.checked_pow(exponent))
+                .map_or(SIZE_UNITS_CEILING, |units| units.min(SIZE_UNITS_CEILING));
+            (10_f64.powi(lot_exponent), units)
+        };
         Self {
-            tick,
-            decimals,
-            keys: [PRICE_MEMO_EMPTY; PRICE_MEMO_SLOTS],
-            values: [Decimal::ZERO; PRICE_MEMO_SLOTS],
+            unit_scale: 10_f64.powi(size_dp as i32),
+            integral,
+            min_units,
+            lot_value,
+            lot_units,
         }
     }
 
-    pub(super) fn price(&mut self, ticks: f64) -> Decimal {
-        if !ticks.is_finite() {
-            return self.compute(ticks);
-        }
-        let key = ticks.to_bits();
-        let slot = (ticks as i64 as usize) % PRICE_MEMO_SLOTS;
-        if self.keys[slot] == key {
-            return self.values[slot];
-        }
-        let value = self.compute(ticks);
-        self.keys[slot] = key;
-        self.values[slot] = value;
-        value
-    }
-
-    fn compute(&self, ticks: f64) -> Decimal {
-        decimal_from_f64(ticks * self.tick).round_dp(self.decimals)
+    /// One size draw onto the grid.
+    ///
+    /// An ordinary spot draw rounds half to even at the scale, as the decimal
+    /// rounding it replaced did; an integral draw rounds half away from zero,
+    /// which is what the integral grid has always done (truncation biases every
+    /// draw down and banker's rounding thins the odd sizes on a 0.5-heavy
+    /// grid). A snapped draw takes the lot count rounded half away from zero -
+    /// the float `round` the snap has always used - and on a fractional grid
+    /// floors at one lot, so a snapped draw well below half a lot is never
+    /// zero. A non-finite or over-range intermediate saturates to the ceiling
+    /// before the minimum is applied, and the ceiling is above the minimum by
+    /// construction, so a numerical failure can never land below it.
+    pub(super) fn quantize(self, base: f64, lot_snap: bool) -> u64 {
+        let ceiling = SIZE_UNITS_CEILING as f64;
+        let units = if lot_snap {
+            let lots = base / self.lot_value;
+            if lots.is_finite() {
+                let lots = lots.round();
+                let lots = if self.integral { lots } else { lots.max(1.0) };
+                if lots >= ceiling {
+                    SIZE_UNITS_CEILING
+                } else {
+                    (lots as u64)
+                        .checked_mul(self.lot_units)
+                        .map_or(SIZE_UNITS_CEILING, |units| units.min(SIZE_UNITS_CEILING))
+                }
+            } else {
+                SIZE_UNITS_CEILING
+            }
+        } else {
+            let scaled = base * self.unit_scale;
+            if !scaled.is_finite() || scaled >= ceiling {
+                SIZE_UNITS_CEILING
+            } else if self.integral {
+                scaled.round() as u64
+            } else {
+                scaled.round_ties_even() as u64
+            }
+        };
+        units.max(self.min_units)
     }
 }
 
-/// The round-lot scale a spot size snaps to: decade-relative to the derived
-/// median rather than absolute. Computed once per source, since the median
-/// is fixed for its life.
-///
-/// The old rule snapped to whole units above 1.0 and to 0.1 below it. At the
-/// raw-fill size scale (a 0.0027 BTC median) that turned every round-lot draw
-/// into exactly 0.1 - 37x the median - on the ~24% of trades `size_round_frac`
-/// selects. `lot = 10^floor(log10(median))` reproduces the old sub-unit
-/// behaviour at a 0.1 median and tracks the median anywhere else. `is_round_lot`
-/// in the test module is the same predicate, deliberately, so the generator and
-/// the gate cannot disagree about what a round lot is.
-pub(super) fn spot_round_lot(median: f64) -> f64 {
-    10.0_f64.powf(median.log10().floor())
-}
-
-/// Snap a size draw to the round-lot grid `lot` (see [`spot_round_lot`]).
-///
-/// The floor at one lot keeps a snapped size strictly positive: `round` can
-/// legitimately return zero for a draw well below half a lot.
-pub(super) fn round_lot_size(base: f64, lot: f64) -> Decimal {
-    decimal_from_f64((lot * (base / lot).round()).max(lot))
+/// The round-lot decade a size snaps to: `floor(log10(median))`. Decade-
+/// relative to the median rather than absolute, because at the raw-fill size
+/// scale (a 0.0027 BTC median) an absolute sub-unit lot turned every snapped
+/// draw into 37 times the median. `is_round_lot` in the test module is the
+/// same predicate, so the generator and the gate cannot disagree about what a
+/// round lot is.
+pub(super) fn lot_exponent(median: f64) -> i32 {
+    let exponent = median.log10().floor();
+    if exponent.is_finite() {
+        exponent.clamp(f64::from(i32::MIN / 2), f64::from(i32::MAX / 2)) as i32
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use rand::{RngExt, SeedableRng};
-    use rand_chacha::ChaCha12Rng;
-
     use super::*;
 
-    fn slow(value: f64, dp: u32) -> Decimal {
-        decimal_from_f64(value).round_dp(dp)
-    }
-
-    // Equal as wire text, which is what the tape carries: value and scale
-    // both, so a fast path that kept a trailing zero `from_f64` strips fails
-    // here even though the two compare equal as numbers. Returns whether the
-    // fast path answered.
-    fn assert_same(value: f64, dp: u32) -> bool {
-        let fast = fast_round_dp(value, dp);
-        let expected = slow(value, dp).to_string();
-        if let Some(fast) = fast {
-            assert_eq!(
-                fast.to_string(),
-                expected,
-                "fast path diverged at {value:e} ({:#x}) dp {dp}",
-                value.to_bits()
-            );
+    #[test]
+    fn the_price_grid_refuses_what_it_cannot_carry_exactly() {
+        let grid = PriceGrid { tick_mantissa: 25 };
+        assert_eq!(grid.mantissa(4.0), Some(100));
+        for bad in [
+            0.0,
+            -1.0,
+            0.5,
+            f64::NAN,
+            f64::INFINITY,
+            EXACT_INT_LIMIT,
+            i64::MAX as f64,
+        ] {
+            assert_eq!(grid.mantissa(bad), None, "{bad}");
         }
+        let wide = PriceGrid {
+            tick_mantissa: 1_000_000_000_000,
+        };
         assert_eq!(
-            decimal_from_f64_round_dp(value, dp).to_string(),
-            expected,
-            "{value:e} dp {dp}"
+            wide.mantissa(EXACT_INT_LIMIT - 1.0),
+            None,
+            "mantissa overflow"
         );
-        fast.is_some()
+        assert_eq!(grid.mantissa_of_ticks(0), None);
+        assert_eq!(grid.mantissa_of_ticks(i64::MAX), None);
     }
 
-    /// The guarded fast path agrees with `from_f64` plus `round_dp` across
-    /// thirty decades around the shipped size law, and turns away the
-    /// adversarial inputs its guard exists for: exact grid points, exact
-    /// half-points and their float neighbours, where a stripped trailing zero
-    /// or a banker's tie decides the text. The hit counts are asserted too, so
-    /// a guard that rejected everything - correct and useless - cannot pass.
     #[test]
-    fn fast_round_dp_matches_the_decimal_conversion() {
-        let mut rng = ChaCha12Rng::seed_from_u64(0x5EED_D0D0);
-        let mut hits = 0_u32;
-        let mut total = 0_u32;
-        for _ in 0..60_000 {
-            let value = 10_f64.powf(rng.random_range(-15.0..15.0));
-            for dp in [0, 2, 4, 8, 10, 15] {
-                hits += u32::from(assert_same(value, dp));
-                total += 1;
-            }
-        }
-        // About a third of these land with `y` in range at all; nearly all of
-        // those are decided.
-        assert!(hits > total / 4, "fast path fired {hits} of {total} times");
-
-        let mut edge_hits = 0_u32;
-        for k in 1_u64..20_000 {
-            let k = k * 7_919;
-            for dp in [2_u32, 8] {
-                let scale = 10_f64.powi(dp as i32);
-                for base in [k as f64 / scale, (k as f64 + 0.5) / scale] {
-                    for value in [base.next_down(), base, base.next_up()] {
-                        edge_hits += u32::from(assert_same(value, dp));
-                    }
-                }
-            }
-        }
-        assert_eq!(edge_hits, 0, "the guard let a near-tie through");
+    fn spot_draws_round_half_even_and_snaps_floor_at_one_lot() {
+        // 8 dp, a 0.0027 median: the lot is 0.001, 100_000 units.
+        let quantizer = SizeQuantizer::new(8, false, 1, lot_exponent(0.0027));
+        assert_eq!(quantizer.quantize(0.002_7, false), 270_000);
+        assert_eq!(
+            quantizer.quantize(0.000_000_005, false),
+            1,
+            "the minimum floors it"
+        );
+        assert_eq!(quantizer.quantize(0.002_7, true), 300_000);
+        assert_eq!(
+            quantizer.quantize(0.000_01, true),
+            100_000,
+            "never below one lot"
+        );
+        assert_eq!(quantizer.quantize(f64::INFINITY, false), SIZE_UNITS_CEILING);
+        assert_eq!(quantizer.quantize(f64::MAX, true), SIZE_UNITS_CEILING);
+        assert_eq!(quantizer.quantize(1e300, false), SIZE_UNITS_CEILING);
     }
 
-    /// A memo hit returns what a miss computes, through slot collisions that
-    /// evict and refill, and at non-finite inputs that bypass it.
     #[test]
-    fn price_memo_returns_the_conversion_through_collisions() {
-        let tick = 0.01;
-        let mut memo = PriceMemo::new(tick, 2);
-        let mut rng = ChaCha12Rng::seed_from_u64(0x0BAD_F00D);
-        let mut ticks = 9_500_000.0_f64;
-        for _ in 0..50_000 {
-            ticks += f64::from(rng.random_range(-40_i32..=40));
-            assert_eq!(
-                memo.price(ticks).to_string(),
-                slow(ticks * tick, 2).to_string(),
-                "ticks {ticks}"
-            );
-        }
-        for ticks in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, 1.0] {
-            assert_eq!(
-                memo.price(ticks).to_string(),
-                slow(ticks * tick, 2).to_string(),
-                "ticks {ticks}"
-            );
-        }
+    fn integral_draws_round_half_away_and_floor_at_the_minimum() {
+        let quantizer = SizeQuantizer::new(0, true, 1, lot_exponent(40.0));
+        assert_eq!(quantizer.quantize(2.5, false), 3);
+        assert_eq!(quantizer.quantize(0.2, false), 1);
+        assert_eq!(quantizer.quantize(44.0, true), 40);
+        assert_eq!(
+            quantizer.quantize(3.0, true),
+            1,
+            "a zero-lot snap takes the minimum"
+        );
+        // A sub-contract median still snaps to whole contracts.
+        let small = SizeQuantizer::new(0, true, 1, lot_exponent(0.3));
+        assert_eq!(small.quantize(2.4, true), 2);
+    }
+
+    #[test]
+    fn a_lot_below_one_unit_or_above_the_ceiling_is_clamped_not_constructed() {
+        let tiny = SizeQuantizer::new(8, false, 1, -12);
+        assert_eq!(tiny.lot_units, 1);
+        assert_eq!(tiny.quantize(0.000_000_034, true), 3);
+        let huge = SizeQuantizer::new(18, false, 1, 30);
+        assert_eq!(huge.lot_units, SIZE_UNITS_CEILING);
+        assert_eq!(huge.quantize(1e31, true), SIZE_UNITS_CEILING);
     }
 }

@@ -17,7 +17,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 34; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 35; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -164,33 +164,44 @@ is given up by `event_log_sigma`. The fit is `analysis/tape-v2/
 proto_impact.py`.
 Every MNQ and MES tape moves; calendar-less presets are byte-identical.
 
+Version 35 replaces the tape's representation, not its draws. A generated
+river now emits compact records - integer price and quantity mantissas at a
+decimal scale fixed for the river - and resolves one whole parent at a time
+into a reused plan that readers drain; see "The record representation and the
+parent plan" below. Every stochastic stage runs in the order it did, so no
+draw moved, but every generated tape's bytes did: wire text is written at the
+river's fixed scale (`0.00270000` where it was `0.0027`), the spot lot-snap
+branch that the decimal path never re-rounded now lands on the eight-place
+grid with every other draw, and the fill band's realized volatility reads
+prices through one mantissa-to-float division rather than `Decimal::to_f64`.
+
 Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are
-unconditional will assume the opposite. `analysis/protocol9-tape-hashes.json`
-freezes FNV-1a hashes of six simulated hours of canonical BTCUSDT trade and
-quote lines, at two seeds plus a flow-surge arm, taken when the tape identity
-was 9. `protocol9_tape_oracle` in `mogwai-cli`'s `gen` module asserts equality
-against it, and at the current tape identity it still matches - the assertion
-is live in the gate, so that sentence is enforced rather than dated, and it
-carries no version number of its own for a later bump to falsify. The identity
-itself is stated once above, in the phrasing
-`crates/mogwai-data/tests/tape_version_prose.rs` checks; a second statement of
-it here in any other phrasing would be exactly the durable-claim defect that
-test exists to prevent.
-So none of the intervening bumps - 12's arrival-frame calibration, 13's
-fill-band decimal normalization, 14's `ReopenGap` crossing repair, and onward -
-moved any of the bytes this oracle observes (15 is not among them: it remains
-the arrival-mechanism reservation, held for a protocol-12b mechanism landing
-that has not happened, so no commit has ever set the constant to it): the first six simulated hours of the offline generation path, at
-those three arms. It does not walk MNQ, it does not walk the venue's river
-placement, and it does not run past six hours, so it is evidence about the
-crypto generator's core draw rather than a blanket identity. That is consistent
-with each bump's own scope: 13 is a fill-band key and 14 a calendar crossing,
-neither of which the crypto preset's generation reaches, and 17's per-symbol
-tape root keys the venue's rivers while leaving offline generation seeds
-untouched. The
-version constant is a process identity that advances whenever a change could
-move a tape; it is not a claim that every tape moved.
+unconditional will assume the opposite. A tape oracle in `mogwai-cli`'s `gen`
+module hashes the wire frames of six simulated hours of BTCUSDT - every trade
+and quote frame exactly as a socket would receive it - at two seeds plus a
+flow-surge arm, against the committed `analysis/tape-oracle-hashes.json`. The
+fixture records the tape identity it was blessed at as a fact about its own
+history, not as a claim checked against the live constant, so a later bump
+that moves none of these bytes leaves it standing and one that moves them
+re-blesses it in the same change. Its predecessor froze the same three arms as
+`Decimal`-text lines at identity 9 and held unchanged from 9 through 34: none
+of the bumps in between - 12's arrival-frame calibration, 13's fill-band
+decimal normalization, 14's `ReopenGap` crossing repair, and onward - moved
+the first six simulated hours of the offline crypto generation path (15 is
+not among them: it remains the arrival-mechanism reservation, held for a
+protocol-12b mechanism landing that has not happened, so no commit has ever
+set the constant to it). 35 moved every one of those bytes, because it
+changed the representation the oracle reads, and the oracle was re-blessed
+over the wire frames rather than kept as a record of a spelling the tape no
+longer has. The oracle does not walk MNQ, the venue's river placement, or
+past six hours, so it is evidence about the crypto generator's core draw
+rather than a blanket identity. The identity itself is stated once above, in
+the phrasing `crates/mogwai-data/tests/tape_version_prose.rs` checks; a
+second statement of it here in any other phrasing would be exactly the
+durable-claim defect that test exists to prevent. The version constant is a
+process identity that advances whenever a change could move a tape; it is not
+a claim that every tape moved.
 
 ## The synthetic top of book
 
@@ -225,6 +236,59 @@ or a consumer that requires the first frame to be a quote is asserting
 something stronger than the venue promises, and it will lose that bet at boot;
 drain to a deadline instead. `scripts/smoke.py` did exactly that and flaked
 twice in one day before it was corrected.
+
+## The record representation and the parent plan
+
+A generated river is a stream of compact records, not of protocol objects. A
+`Record` carries a price or quantity as an integer mantissa at a decimal scale
+fixed for the whole river - the price at the preset's `price_decimals`, the
+size at whole units on an integral grid and otherwise at eight places or the
+finest place a configured quantity needs - and no symbol at all; the river's
+`RecordScale` holds the symbol and both scales once. A `Decimal`, a
+`TradeTick`, a JSON frame: each is built from a record and its scale only at
+the edge that needs one. The tape thread writes the `VenueMessage` frame
+straight from the integers into one reused buffer, the fill walks compare
+integer mantissas against thresholds compiled once onto the river's grid, and
+the realized-volatility estimator converts a mantissa to a float by one
+division that the tape walk and a boat's resident window share. A price is the
+walk's tick count times the tick's own mantissa, so it is exact for any tick
+the scale represents, and every emitted price passes through a checked
+conversion: a coordinate that is not a positive integer in the exact float
+range, or whose mantissa overflows, latches the terminal
+`TickFault::PriceUnrepresentable` rather than being clamped. Validation holds
+`price_decimals` to nine places, which leaves the latent mid's ceiling a
+mantissa of 1e18 with headroom under the integer, and quantities are capped
+at `SIZE_UNITS_CEILING`.
+
+The compact interface is single-river by construction, because the scale
+belongs to a river: `RiverSource` is one river at one scale for its life.
+Heterogeneous streams - the Kraken corpus, a multi-symbol merge, a composed
+segment river - stay on the event-facing `TickSource`, where every event
+carries its own symbol and exact decimals, and `EventView` adapts a river into
+that world rather than the reverse.
+
+`GeneratedSource` resolves one whole parent transaction at a time into a
+reused plan of records, and readers drain the plan. Every stochastic stage
+runs in the order it always did; what moved is when the children are
+materialized - all of them at the parent rather than one per read. A parent's
+footprint is therefore known the moment it is drawn, which is what lets a
+seek drop a whole parent that ends before its target without cloning the
+generator to try it, and lets the checkpoint chain advance whole parents only.
+A resolution that fails installs nothing, so a faulted parent publishes no
+prefix. `ParentSource::next_parent` hands a parent-aware reader the whole
+parent - its instant, its records, its trade count and its volatility trace -
+because quotes are not a parent boundary on every path: the discrete book can
+publish two for one parent, or suppress both.
+
+The checkpoint chain snapshots at parent boundaries only, at the first
+boundary at least `k` records after the last snapshot, so consecutive
+snapshots are at most one parent's footprint past `k` apart and each records
+its cumulative position. A boundary snapshot's clock is the end of the span
+its last parent reserved, an upper bound on every record it consumed, which is
+all the strictly-before resume partition needs. An extension starts a parent
+only below its cap and charges every record that parent emits, so it can
+overshoot by one parent; the venue's cumulative reach ceiling hands each chunk
+only what remains of it, so the whole walk overshoots by one parent at most.
 
 ## The generator's volatility process and its three rails
 

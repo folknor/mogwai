@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Subcommand};
-use mogwai_data::{TickEvent, TickSource};
+use mogwai_data::{RiverSource, TickEvent};
 use mogwai_lab::aggregate::bootstrap::STAGE_M_SEED;
 use mogwai_lab::kernel::{splitmix64, tuple_mix};
 use mogwai_protocol::AggressorSide;

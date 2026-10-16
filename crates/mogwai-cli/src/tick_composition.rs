@@ -722,7 +722,7 @@ fn tail_of(mut values: Vec<u64>) -> Tail {
 
 #[cfg(test)]
 mod tests {
-    use mogwai_data::{TickEvent, TickSource};
+    use mogwai_data::{Record, RiverSource};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -833,6 +833,12 @@ mod tests {
         assert_eq!(fanout, vec![2, 2]);
     }
 
+    /// The compact parent summary against the wire's records, read one at a
+    /// time. The wire side's parent ends where the source says it does
+    /// (`at_parent_boundary`), not at the next quote: a quote is not a parent
+    /// boundary in general, since the discrete-book path can publish two for
+    /// one parent or none. Within a parent the first record sits at the
+    /// parent's instant and its trades, in order, at the child stride.
     fn assert_compact_matches_wire(
         compact: &mut GeneratedSource,
         wire: &mut GeneratedSource,
@@ -840,17 +846,24 @@ mod tests {
     ) {
         for _ in 0..parents {
             let summary = compact.advance_parent().expect("compact walk parent");
-            let quote = wire.next_tick().expect("wire quote");
-            assert!(matches!(quote, TickEvent::Quote(_)));
-            assert_eq!(quote.ts_event(), summary.parent_ts_ns);
-            for child in 0..summary.child_count {
-                let trade = wire.next_tick().expect("wire child");
-                assert!(matches!(trade, TickEvent::Trade(_)));
-                assert_eq!(
-                    trade.ts_event(),
-                    summary.parent_ts_ns + u64::from(child) * summary.child_stride_ns
-                );
+            assert!(wire.at_parent_boundary(), "the wire walk is mid-parent");
+            let mut first_ts = None;
+            let mut trade_ts = Vec::new();
+            loop {
+                let record = wire.next_record().expect("wire record");
+                first_ts.get_or_insert(record.ts());
+                if let Record::Trade(trade) = record {
+                    trade_ts.push(trade.ts);
+                }
+                if wire.at_parent_boundary() {
+                    break;
+                }
             }
+            assert_eq!(first_ts, Some(summary.parent_ts_ns));
+            let expected: Vec<u64> = (0..summary.child_count)
+                .map(|child| summary.parent_ts_ns + u64::from(child) * summary.child_stride_ns)
+                .collect();
+            assert_eq!(trade_ts, expected);
         }
         for _ in 0..64 {
             assert_eq!(

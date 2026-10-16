@@ -3,10 +3,9 @@
 
 //! Deterministic, lazily materialized rivers owned by one serving process.
 
-use mogwai_data::TickEvent;
 use mogwai_data::{
-    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
-    SizeGrid, TickSource,
+    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, Pushback, Record, RiverSource,
+    SessionProfile, SizeGrid,
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol, control::GeneratorArm};
 use rust_decimal::Decimal;
@@ -621,19 +620,6 @@ impl From<ResolveRefusal> for MaterializeRefusal {
         Self::Resolve(value)
     }
 }
-struct BoatCursor {
-    first: Option<TickEvent>,
-    source: GeneratedSource,
-}
-impl TickSource for BoatCursor {
-    fn next_tick(&mut self) -> Option<TickEvent> {
-        self.first.take().or_else(|| self.source.next_tick())
-    }
-    fn fault(&self) -> Option<mogwai_data::TickFault> {
-        self.source.fault()
-    }
-}
-
 /// Test-only convenience: the `Option` shape the in-crate tests assert on,
 /// collapsing every materialization refusal the way no production caller may.
 #[cfg(test)]
@@ -641,7 +627,7 @@ pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,
     rivers: &Rivers,
-) -> Option<Box<dyn TickSource>> {
+) -> Option<Box<dyn RiverSource>> {
     rivers
         .history_source(&rivers.key_for_symbol(symbol).ok()?, start)
         .ok()
@@ -842,19 +828,17 @@ impl Rivers {
     /// rather than re-walked from the origin. `None` means the tape origin, which
     /// is checkpoint zero and therefore free.
     ///
-    /// The `MergeSource` around a one-element vector is not a leftover from the
-    /// multi-symbol era and must not be "simplified" away. `TickSource::seek_to`
-    /// consumes the tick it returns, so something has to hold that first in-window
-    /// tick until the stream is read; `MergeSource`'s per-source head buffer is what
-    /// does it. Unwrapping this to the bare source silently drops the tick at
-    /// exactly `start` - a one-tick-late history window that no type would catch.
-    /// Replacing it means writing an equivalent one-tick pushback, which is the same
-    /// object with a narrower name.
+    /// The `Pushback` around the positioned source must not be "simplified"
+    /// away. `RiverSource::seek_to` consumes the record it returns, so
+    /// something has to hold that first in-window record until the stream is
+    /// read. Unwrapping this to the bare source silently drops the record at
+    /// exactly `start` - a one-record-late history window that no type would
+    /// catch.
     ///
     /// That `start` is inclusive is relied on rather than incidental: the fill
     /// sweeper passes `from_ns + 1` precisely to get a window that excludes the
-    /// instant it already processed, which only works if the tick at the requested
-    /// instant is emitted.
+    /// instant it already processed, which only works if the record at the
+    /// requested instant is emitted.
     /// Takes a key, never a label, like every other water read on this registry.
     /// See `Rivers::key_for_symbol` for why the two are not interchangeable and
     /// where the remaining label-to-key resolutions live.
@@ -862,7 +846,7 @@ impl Rivers {
         &self,
         key: &RiverKey,
         start: Option<u64>,
-    ) -> Result<Box<dyn TickSource>, MaterializeRefusal> {
+    ) -> Result<Box<dyn RiverSource>, MaterializeRefusal> {
         let target = start.unwrap_or(TAPE_ORIGIN_NS);
         let river = self.river(key)?;
         reach_river(&river, target).map_err(MaterializeRefusal::Reach)?;
@@ -872,10 +856,7 @@ impl Rivers {
                 key.symbol()
             )));
         };
-        Ok(Box::new(MergeSource::starting_at(
-            vec![Box::new(positioned)],
-            start,
-        )))
+        Ok(Box::new(Pushback::starting_at(positioned, start)))
     }
 
     /// Materialize the unarmed river for `symbol` and answer nothing but
@@ -944,10 +925,10 @@ impl Rivers {
         &self,
         key: &RiverKey,
         origin_ns: u64,
-    ) -> Result<Box<dyn TickSource + Send>, MaterializeRefusal> {
+    ) -> Result<Box<dyn RiverSource + Send>, MaterializeRefusal> {
         let river = self.river(key)?;
         reach_river(&river, origin_ns).map_err(MaterializeRefusal::Reach)?;
-        let mut positioned = locked(&river.checkpoints)
+        let positioned = locked(&river.checkpoints)
             .try_source_before(origin_ns)
             .ok_or_else(|| {
                 MaterializeRefusal::Reach(anyhow::anyhow!(
@@ -955,11 +936,7 @@ impl Rivers {
                     key.symbol()
                 ))
             })?;
-        let first = positioned.seek_to(origin_ns);
-        Ok(Box::new(BoatCursor {
-            first,
-            source: positioned,
-        }))
+        Ok(Box::new(Pushback::starting_at(positioned, Some(origin_ns))))
     }
 
     /// Generate and hold every instant up to `target_ns` on this river, so that
@@ -1010,22 +987,38 @@ fn reach_river(river: &River, target_ns: u64) -> anyhow::Result<usize> {
 /// `ceiling` is a parameter only so the tests can drive the refusal at a
 /// reachable size; every production caller passes
 /// `MAX_WARMUP_MATERIALIZATION_TICKS`.
+///
+/// The river advances whole parents, so the ceiling is enforced the way a
+/// whole-parent walk can honour it: each chunk is handed only what remains of
+/// the ceiling, and a chunk starts a parent only below its cap, so the
+/// cumulative walk exceeds the ceiling by at most one parent. That bound is
+/// checked first and is hard even on success; then a reached target is
+/// accepted; then a walk still short with the ceiling spent is refused
+/// without another chunk.
 fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::Result<usize> {
+    let hard_bound = ceiling.saturating_add(mogwai_data::MAX_PARENT_RECORDS - 1);
     let mut walked_total = 0usize;
     loop {
+        let remaining = ceiling.saturating_sub(walked_total);
         let (walked, frontier_ns, checkpoints) = {
             let mut guard = locked(&river.checkpoints);
-            let extended = guard.extend_toward(target_ns);
+            let extended = guard.extend_toward_within(target_ns, remaining);
             (extended, guard.frontier_ns(), guard.checkpoint_count())
         };
         walked_total = walked_total.saturating_add(walked);
         anyhow::ensure!(
-            walked_total <= ceiling,
-            "river generation exceeded its measured {ceiling}-tick per-call reach ceiling"
+            walked_total <= hard_bound,
+            "river generation exceeded its measured {ceiling}-record reach ceiling by more \
+             than one parent"
         );
         if frontier_ns >= target_ns {
             return Ok(checkpoints);
         }
+        anyhow::ensure!(
+            walked_total < ceiling,
+            "river generation exhausted its measured {ceiling}-record reach ceiling before \
+             {target_ns}"
+        );
         anyhow::ensure!(walked > 0, "generator stopped before {target_ns}");
     }
 }
@@ -1080,29 +1073,43 @@ impl Rivers {
             else {
                 anyhow::bail!("river {} cannot position at or before {ts}", key.symbol());
             };
+            // The last print at or before `ts` is only known once nothing
+            // later can still be one: a record strictly past `ts` - the river
+            // is time-ordered, so every record at `ts` has been read - or a
+            // clean end of the river. A spent budget proves neither, and
+            // answering from it would hand back an earlier print as the last
+            // one while a later qualifying print sat unread.
             let mut last = None;
             let mut drained = 0usize;
+            let mut complete = false;
             while drained < budget {
-                let Some(tick) = source.next_tick() else {
+                let Some(record) = source.next_record() else {
+                    if let Some(fault) = source.fault() {
+                        anyhow::bail!(
+                            "last-trade walk for {} hit a river fault before {ts}: {fault:?}",
+                            key.symbol()
+                        );
+                    }
+                    complete = true;
                     break;
                 };
                 drained += 1;
-                let TickEvent::Trade(trade) = tick else {
-                    continue;
-                };
-                if trade.ts_event > ts {
+                if record.ts() > ts {
+                    complete = true;
                     break;
                 }
-                last = Some(trade.price);
+                if let Record::Trade(trade) = record {
+                    last = Some(trade.px);
+                }
             }
-            if last.is_some() {
-                return Ok(last);
-            }
-            if drained == budget {
+            if !complete {
                 anyhow::bail!(
-                    "last-trade walk for {} exhausted its drain budget before finding a print at or before {ts}",
+                    "last-trade walk for {} exhausted its drain budget before proving the last print at or before {ts}",
                     key.symbol()
                 );
+            }
+            if let Some(px) = last {
+                return Ok(Some(source.scale().price(px)));
             }
             if exhausted {
                 return Ok(None);
@@ -1324,29 +1331,41 @@ mod river_tests {
         );
     }
 
+    /// A found print is not the last print until nothing later can be one.
+    ///
+    /// The walk used to return whatever it had found when its budget ran out,
+    /// so with two prints at or before the target and a budget spent between
+    /// them it answered the first as "the last" - a stale settlement or mark
+    /// presented as a current one. The budget that stops just before the
+    /// second print is the witness: it must refuse, and the budget that reaches
+    /// one record past the second print must answer with the second.
     #[test]
-    fn a_last_trade_read_reports_a_budget_refusal_but_keeps_a_found_print() {
+    fn a_last_trade_read_refuses_a_budget_that_stopped_before_completion() {
         let rivers = crate::fills::test_rivers();
         let key = rivers.test_key("BTCUSDT");
         let mut source = rivers.history_source(&key, None).unwrap();
-        let first_trade = loop {
-            match source.next_tick().expect("the fixture prints") {
-                TickEvent::Trade(trade) => break trade,
-                TickEvent::Quote(_) => {}
+        let mut trades = Vec::new();
+        let mut index = 0_usize;
+        while trades.len() < 2 {
+            if let Record::Trade(trade) = source.next_record().expect("the fixture prints") {
+                trades.push((index, trade));
             }
-        };
+            index += 1;
+        }
+        let (second_index, second) = trades[1];
+        let target = second.ts;
 
         let error = rivers
-            .last_trade_at_or_before_with_budget(&key, first_trade.ts_event, 1)
-            .expect_err("the opening quote spends a one-tick budget before the trade");
-        assert!(error.to_string().contains("drain budget"));
+            .last_trade_at_or_before_with_budget(&key, target, second_index)
+            .expect_err("a budget spent before the second print proves nothing");
+        assert!(error.to_string().contains("drain budget"), "{error:#}");
 
         assert_eq!(
             rivers
-                .last_trade_at_or_before_with_budget(&key, first_trade.ts_event, 2)
-                .expect("the trade fits exactly inside the budget"),
-            Some(first_trade.price),
-            "a walk that found its print on the final admitted tick keeps it"
+                .last_trade_at_or_before_with_budget(&key, target, second_index + 2)
+                .expect("the record after the second print proves it last"),
+            Some(source.scale().price(second.px)),
+            "the walk answers with the last print, proved by a later record"
         );
     }
 
@@ -1528,8 +1547,8 @@ mod river_tests {
             .history_source(&rivers.test_key("BTCUSDT"), Some(TAPE_ORIGIN_NS))
             .unwrap();
         assert_eq!(
-            cursor.next_tick().unwrap().ts_event(),
-            history.next_tick().unwrap().ts_event()
+            cursor.next_record().unwrap().ts(),
+            history.next_record().unwrap().ts()
         );
     }
 
@@ -1560,20 +1579,20 @@ mod river_tests {
         let mut expected = rivers
             .history_source(&rivers.test_key("BTCUSDT"), None)
             .unwrap();
-        let first = expected.next_tick().unwrap();
-        let instant = first.ts_event();
+        let first = expected.next_record().unwrap();
+        let instant = first.ts();
         let mut count = 1;
         while expected
-            .next_tick()
-            .is_some_and(|tick| tick.ts_event() == instant)
+            .next_record()
+            .is_some_and(|record| record.ts() == instant)
         {
             count += 1;
         }
         let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
         let mut actual = 0;
         while cursor
-            .next_tick()
-            .is_some_and(|tick| tick.ts_event() == instant)
+            .next_record()
+            .is_some_and(|record| record.ts() == instant)
         {
             actual += 1;
         }
@@ -1616,10 +1635,10 @@ mod river_tests {
         let mut boot_source = rivers
             .history_source(&rivers.test_key("BTCUSDT"), Some(TAPE_ORIGIN_NS))
             .expect("boot river history");
-        let boot_prints: Vec<_> = std::iter::from_fn(|| boot_source.next_tick())
-            .filter_map(|tick| match tick {
-                TickEvent::Trade(trade) => Some((trade.ts_event, trade.price)),
-                _ => None,
+        let boot_prints: Vec<_> = std::iter::from_fn(|| boot_source.next_record())
+            .filter_map(|record| match record {
+                Record::Trade(trade) => Some((trade.ts, trade.px)),
+                Record::Quote(_) => None,
             })
             .take(32)
             .collect();
@@ -1627,13 +1646,11 @@ mod river_tests {
         let mut second_source = rivers
             .history_source(&rivers.test_key("SECOND"), Some(TAPE_ORIGIN_NS))
             .expect("second river history");
-        let second_prints: Vec<_> = std::iter::from_fn(|| second_source.next_tick())
-            .filter_map(|tick| match tick {
-                TickEvent::Trade(trade) => {
-                    assert_eq!(trade.symbol.as_ref(), "SECOND");
-                    Some((trade.ts_event, trade.price))
-                }
-                _ => None,
+        assert_eq!(second_source.scale().symbol().as_ref(), "SECOND");
+        let second_prints: Vec<_> = std::iter::from_fn(|| second_source.next_record())
+            .filter_map(|record| match record {
+                Record::Trade(trade) => Some((trade.ts, trade.px)),
+                Record::Quote(_) => None,
             })
             .take(32)
             .collect();

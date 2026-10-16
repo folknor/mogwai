@@ -3,13 +3,21 @@
 
 //! The core path-dependent walk: [`GeneratedSource`] composes the arrival
 //! duration clock, the GARCH latent mid, the bounce/drift price process and
-//! the optional regime overlay into the [`crate::TickSource`] the running
+//! the optional regime overlay into the [`crate::RiverSource`] the running
 //! venue drives. Same seed plus tape anchor yields the same stream byte for
 //! byte - see `clean_regime_is_byte_identical` in the test module for the
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
 //!
-//! One consequence of that determinism is worth stating before it is
+//! The walk resolves one whole parent transaction at a time into a reused
+//! plan of compact records, and readers drain that plan. A parent's footprint
+//! is therefore known the moment it is drawn: a seek drops a parent that ends
+//! before its target without cloning the generator to try it, and a checkpoint
+//! extension advances whole parents only. Emitting and skipping a parent are
+//! one code path, because materializing a compact record is a handful of
+//! integer operations.
+//!
+//! One consequence of the determinism is worth stating before it is
 //! rediscovered as a bug: a drought is per-config, not intermittent. Every boot
 //! of a pinned epoch lands on the same stretch of tape, so a config whose epoch
 //! sits in a low-arrival stretch reproduces that stretch on every boot, for as
@@ -25,16 +33,17 @@
 
 use std::sync::Arc;
 
-use mogwai_protocol::{
-    AggressorSide, InstrumentDef, MarketRegime, QuoteTick, TradeTick, decimal_to_f64,
-};
+use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, decimal_to_f64};
 use rand::distr::{Bernoulli, OpenClosed01};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::Decimal;
 
-use crate::{TickEvent, TickFault, TickSource};
+use crate::record::{
+    ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, TradeRec,
+};
+use crate::{TickEvent, TickFault};
 
 use super::arrival::{
     ArrivalEnv, ArrivalKernel, ArrivalState, CadenceWalk, PendingReopen, RuntimeModifiers,
@@ -47,33 +56,47 @@ use super::cascade::{
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
-    ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
-    HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_INTENSITY_ARR_MULT,
-    LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
-    REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, CHILD_CAP, DRIFT_RECENTER_FRAC,
+    EVENT_PRICE_REPEAT_PROB, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
+    LOW_INTENSITY_ARR_MULT, LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING,
+    NS_PER_HOUR, REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
 };
 use super::dynamics::{
     ArrivalClock, BounceLaws, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
 };
-use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
-use super::numeric::{
-    PriceMemo, decimal_from_f64, decimal_from_f64_round_dp, round_lot_size, spot_round_lot,
+use super::fingerprint::{
+    Fingerprint, GeneratedSourceError, GeneratorScalars, ScalarError, SessionProfile,
 };
+use super::numeric::{PriceGrid, SIZE_UNITS_CEILING, SizeQuantizer, lot_exponent};
 use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
 
+/// The most records one parent can emit, on any path: a placed parent is one
+/// quote and at most `CHILD_CAP` children, and a discrete-book parent at most
+/// 65 trades (64 validated ladder ratios plus the touch, one split) and two
+/// quotes. The resolver asserts it, because the checkpoint extension's
+/// overshoot bound and the plan buffer's high-water mark are both proved from
+/// it.
+pub const MAX_PARENT_RECORDS: usize = CHILD_CAP as usize + 2;
+
 /// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
 /// generator is a path-dependent walk whose entire future is a pure function of
-/// its current state, so a clone taken at tick N, advanced, reproduces ticks
-/// N+1, N+2, ... byte-for-byte. Every field is `Clone`, including the
-/// `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped `Clone`, which is
-/// why the generator holds `ChaCha12Rng` directly).
+/// its current state, so a clone taken at a parent boundary, advanced,
+/// reproduces the records after it byte-for-byte. Every field is `Clone`,
+/// including the `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped
+/// `Clone`, which is why the generator holds `ChaCha12Rng` directly).
 #[derive(Clone)]
 pub struct GeneratedSource {
     scalars: Arc<GeneratorScalars>,
-    symbol: Arc<str>,
+    scale: Arc<RecordScale>,
     rng: ChaCha12Rng,
+    /// The last instant the walk has reserved: after a parent resolves, the
+    /// end of its reserved span - its last child on the placed paths, its
+    /// post-trade slot on the discrete-book path. It is not the consumed
+    /// position: a resolved parent may still hold records a reader has not
+    /// taken. At a parent boundary the two coincide in the sense the
+    /// checkpoint partition needs - every consumed record is at or before it.
     pub(super) clock_ns: u64,
     arrival: ArrivalClock,
     arrival_override: Option<bool>,
@@ -91,15 +114,18 @@ pub struct GeneratedSource {
     // derived from the seed under domain tags, so book parameters leave the
     // cascade realization untouched.
     book: Option<DiscreteBook>,
-    // The staged emission plan of the parent transaction in flight: resolved
-    // whole in `begin_cascade_book_event`, consumed record by record by
-    // `next_tick` and wholesale by `advance_parent_wire`, so both paths
-    // execute one schedule. `None` at a parent boundary.
-    book_plan: Option<BookPlan>,
     // The four-value snapshot last published on the wire, the deduplication
     // state: a quote whose four values equal it is suppressed with its
     // instant still reserved.
     last_published: Option<BookSnapshot>,
+    /// The resolved parent's records, in emission order, and how many a
+    /// reader has taken. Reused across parents, so its capacity is the
+    /// high-water parent footprint and never more than `MAX_PARENT_RECORDS`.
+    /// Cleared once drained, so a snapshot at a boundary copies no records.
+    plan: Vec<Record>,
+    cursor: usize,
+    plan_parent_ts: u64,
+    plan_trades: u32,
     fault: Option<TickFault>,
     pub(super) vol: GarchVol,
     session: SessionModulator,
@@ -113,16 +139,17 @@ pub struct GeneratedSource {
     chi_squared: ChiSquared<f64>,
     size_dist: LogNormal<f64>,
     // Read only by the test that pins the sampler's median; the walk reads
-    // the lots derived from it below.
+    // the quantizer derived from it below.
     #[cfg(test)]
     pub(super) size_median: f64,
-    // The two round-lot scales, fixed by `size_median` and so derived once
-    // rather than through a `log10` and a `powf` on every snapped draw.
-    spot_lot: f64,
-    integral_lot: f64,
-    size_grid: SizeGrid,
+    prices: PriceGrid,
+    sizes: SizeQuantizer,
+    /// The configured top-of-book sizes and the size increment as quantity
+    /// mantissas at the river's scale, converted exactly once at build.
+    top_bid_units: u64,
+    top_ask_units: u64,
+    min_units: u64,
     coins: ChildCoins,
-    price_memo: PriceMemo,
     calendar: Option<Arc<SessionCalendar>>,
     tick_f64: f64,
     regime: RegimeState,
@@ -137,14 +164,13 @@ pub struct GeneratedSource {
     pub(super) shape: SweepShape,
     pub(super) burst: SweepBurst,
     last_event_price_ticks: Option<f64>,
-    pending_quote: Option<QuoteTick>,
     last_book: Option<PublishedBook>,
     surge: Option<SurgeWindow>,
     // The observation-only volatility trace (the generator successor spec
     // 3.3): populated per parent event when enabled, consuming no draws
     // and changing nothing about the walk, which the byte-identity test
     // pins. `take_vol_trace` hands the last event's record to the offline
-    // forensic probe.
+    // forensic probe, and `next_parent` carries it on the parent view.
     vol_trace_enabled: bool,
     vol_trace: Option<VolTrace>,
     #[cfg(test)]
@@ -153,6 +179,12 @@ pub struct GeneratedSource {
     pub(super) repeat_draws: u64,
     #[cfg(test)]
     pub(super) rejected_repeat_draws: u64,
+    /// Trades the reader has taken from the current parent, for the tests that
+    /// ask where a reader stands inside a sweep. The walk's own `burst` is
+    /// drained the moment a parent resolves, so it no longer says anything
+    /// about the reader.
+    #[cfg(test)]
+    reader_emitted: u32,
     /// The main-stream stage order of the shipped (contract A) event path,
     /// recorded as the event executes and cleared at the top of every
     /// `begin_event`. One tag per stage, not one per RNG draw: the stochastic
@@ -192,26 +224,12 @@ pub struct SizeGrid {
 /// The generator has already consumed every child draw and updated all
 /// path-dependent state when this is returned. Consumers that only need tape
 /// composition can therefore count the quote and the fixed-stride child run
-/// without constructing protocol decimals or cloning the symbol. The regular
-/// [`TickSource`] path uses the same advancement primitives and materializes
-/// the wire objects afterwards.
+/// without reading the records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentSummary {
     pub parent_ts_ns: u64,
     pub child_count: u32,
     pub child_stride_ns: u64,
-}
-
-/// One parent transaction resolved into its wire records, on the discrete
-/// book path (see the `book` module). Immutable data: the schedule
-/// is fixed at resolution time, and the source consumes it front to back.
-/// `next_tick` pops one record; `advance_for_checkpoint` drains the whole
-/// deque. Suppressed quotes are absent from `records` but their instants
-/// were reserved when the schedule was laid, so the clock is already past
-/// them - which is why the plan carries only what is emitted.
-#[derive(Clone)]
-struct BookPlan {
-    records: std::collections::VecDeque<TickEvent>,
 }
 
 /// One parent event's volatility intermediates, observed off the real
@@ -323,6 +341,20 @@ impl SizeGrid {
             },
         }
     }
+
+    /// The decimal scale this grid's quantities are recorded at: whole units
+    /// on an integral grid; on a fractional one the draw precision
+    /// (`SIZE_DECIMALS`) or the finest place any configured quantity needs,
+    /// whichever is finer, so no configured quantity is rounded on the way in.
+    fn record_dp(&self, top_sizes: &super::quote::TopOfBookSizes) -> u32 {
+        if self.integral {
+            return 0;
+        }
+        [self.min_size, top_sizes.bid, top_sizes.ask]
+            .iter()
+            .map(|value| value.normalize().scale())
+            .fold(SIZE_DECIMALS, u32::max)
+    }
 }
 
 #[derive(Clone)]
@@ -333,10 +365,27 @@ struct SurgeWindow {
     children_mult: f64,
 }
 
+/// A configured quantity as a mantissa at the river's size scale, exact and
+/// under the ceiling, or the named refusal.
+fn configured_units(
+    scale: &RecordScale,
+    value: Decimal,
+    field: &'static str,
+) -> Result<u64, GeneratedSourceError> {
+    scale
+        .size_mantissa(value)
+        .filter(|units| *units <= SIZE_UNITS_CEILING)
+        .ok_or(GeneratedSourceError::Scalar(ScalarError::detailed(
+            field,
+            "not exactly representable at the record size scale, or above the quantity ceiling",
+        )))
+}
+
 impl GeneratedSource {
     #[cfg(test)]
     pub(super) fn shares_immutable_config_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.scalars, &other.scalars)
+            && Arc::ptr_eq(&self.scale, &other.scale)
             && match (&self.calendar, &other.calendar) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
@@ -512,12 +561,13 @@ impl GeneratedSource {
         .expect("generated source inputs are inside fingerprint ranges")
     }
 
-    // The only fallible inputs are `scalars`/`session`/`calendar`, guarded by
-    // the `?`-propagated `validate` calls at the top. The distribution
-    // constructors below (`LogNormal`/`Weibull`/`Normal`/`ChiSquared`) take
-    // compile-time constants that are always valid params, so their `expect`s cannot fire -
-    // `unwrap_in_result` is silenced here because there is no meaningful error
-    // variant to map them onto, not because a failure is being swallowed.
+    // The only fallible inputs are `scalars`/`session`/`calendar` and the
+    // record scale they imply, guarded by the `?`-propagated checks at the
+    // top. The distribution constructors below (`LogNormal`/`Weibull`/
+    // `Normal`/`ChiSquared`) take compile-time constants that are always
+    // valid params, so their `expect`s cannot fire - `unwrap_in_result` is
+    // silenced here because there is no meaningful error variant to map them
+    // onto, not because a failure is being swallowed.
     #[expect(
         clippy::unwrap_in_result,
         reason = "distribution params are constant and valid; only the validated scalars/session can fail"
@@ -545,17 +595,49 @@ impl GeneratedSource {
         // A fractional grid has no whole unit to count, so the book is
         // refused rather than silently rounding every quantity.
         if scalars.book.is_some() && !size_grid.integral {
-            return Err(GeneratedSourceError::Scalar(
-                super::fingerprint::ScalarError::detailed("book", "requires an integral size grid"),
-            ));
+            return Err(GeneratedSourceError::Scalar(ScalarError::detailed(
+                "book",
+                "requires an integral size grid",
+            )));
         }
         for size in [scalars.top_sizes.bid, scalars.top_sizes.ask] {
             if size < size_grid.min_size || (size_grid.integral && size.fract() != Decimal::ZERO) {
-                return Err(GeneratedSourceError::Scalar(
-                    super::fingerprint::ScalarError::field("top_sizes"),
-                ));
+                return Err(GeneratedSourceError::Scalar(ScalarError::field(
+                    "top_sizes",
+                )));
             }
         }
+        // The record scale. Price: `price_decimals`, which validation bounds
+        // so a mantissa at the latent mid's ceiling fits an `i64` with room
+        // for every emitted offset; the tick is exact there by validation.
+        // Size: see `SizeGrid::record_dp`. Every configured quantity is then
+        // converted exactly or refused - never rounded during compilation.
+        let scale = RecordScale::new(
+            Arc::from(scalars.symbol.as_str()),
+            scalars.price_decimals,
+            size_grid.record_dp(&scalars.top_sizes),
+        )
+        .map_err(|error| {
+            GeneratedSourceError::Scalar(match error {
+                crate::record::ScaleError::Scale { field: "price", .. } => ScalarError::detailed(
+                    "price_decimals",
+                    "needs more decimal places than a record can carry",
+                ),
+                _ => ScalarError::detailed(
+                    "size_increment",
+                    "needs more decimal places than a record can carry",
+                ),
+            })
+        })?;
+        let tick_mantissa =
+            scale
+                .price_mantissa(scalars.modal_tick)
+                .ok_or(GeneratedSourceError::Scalar(ScalarError::field(
+                    "modal_tick",
+                )))?;
+        let min_units = configured_units(&scale, size_grid.min_size, "size_increment")?;
+        let top_bid_units = configured_units(&scale, scalars.top_sizes.bid, "top_sizes")?;
+        let top_ask_units = configured_units(&scale, scalars.top_sizes.ask, "top_sizes")?;
         if let Some(calendar) = &calendar {
             calendar
                 .validate()
@@ -567,12 +649,10 @@ impl GeneratedSource {
                     .map_err(GeneratedSourceError::Scalar)?,
             )),
             (Some(_), None) => {
-                return Err(GeneratedSourceError::Scalar(
-                    super::fingerprint::ScalarError::detailed(
-                        "cascade",
-                        "requires a calendar with an activity envelope",
-                    ),
-                ));
+                return Err(GeneratedSourceError::Scalar(ScalarError::detailed(
+                    "cascade",
+                    "requires a calendar with an activity envelope",
+                )));
             }
             (None, _) => None,
         };
@@ -630,18 +710,24 @@ impl GeneratedSource {
             start_ts,
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
-        let symbol = Arc::from(scalars.symbol.as_str());
         let tick_f64 = decimal_to_f64(scalars.modal_tick);
         let coins = ChildCoins::new(scalars.size_round_frac, shape.level_step_prob);
-        let price_memo = PriceMemo::new(tick_f64, scalars.price_decimals);
+        let sizes = SizeQuantizer::new(
+            scale.size_dp(),
+            size_grid.integral,
+            min_units,
+            lot_exponent(size_median),
+        );
         let mut this = Self {
             tick_f64,
             coins,
-            price_memo,
-            spot_lot: spot_round_lot(size_median),
-            integral_lot: integral_lot(size_median),
+            prices: PriceGrid { tick_mantissa },
+            sizes,
+            top_bid_units,
+            top_ask_units,
+            min_units,
             scalars: Arc::new(scalars),
-            symbol,
+            scale: Arc::new(scale),
             rng: ChaCha12Rng::seed_from_u64(seed),
             clock_ns: start_ts,
             arrival: ArrivalClock {
@@ -660,8 +746,11 @@ impl GeneratedSource {
             cascade,
             cascade_state: None,
             book: None,
-            book_plan: None,
             last_published: None,
+            plan: Vec::new(),
+            cursor: 0,
+            plan_parent_ts: start_ts,
+            plan_trades: 0,
             fault: None,
             vol,
             session: SessionModulator::new(session, calendar.as_ref()),
@@ -673,8 +762,7 @@ impl GeneratedSource {
                 // bias is deliberate and left as-is: it is a start-of-stream
                 // transient (a real bounce process is equally free to open either
                 // way), it is fully deterministic, and re-seeding the side would
-                // consume an extra RNG draw and break the committed fingerprint's
-                // byte-identical golden stream for zero fidelity gain.
+                // consume an extra RNG draw for zero fidelity gain.
                 prev_side: AggressorSide::Buyer,
                 high_regime: false,
                 drift_ticks: 0,
@@ -689,14 +777,12 @@ impl GeneratedSource {
             size_dist,
             #[cfg(test)]
             size_median,
-            size_grid,
             calendar: calendar.map(Arc::new),
             regime,
             reopen_frontier_ns: start_ts,
             shape,
             burst: SweepBurst::empty(),
             last_event_price_ticks: None,
-            pending_quote: None,
             last_book: None,
             surge: None,
             vol_trace_enabled: false,
@@ -707,6 +793,8 @@ impl GeneratedSource {
             repeat_draws: 0,
             #[cfg(test)]
             rejected_repeat_draws: 0,
+            #[cfg(test)]
+            reader_emitted: 0,
             #[cfg(test)]
             draw_stages: Vec::new(),
         };
@@ -729,10 +817,9 @@ impl GeneratedSource {
         Ok(this)
     }
 
-    /// The simulated instant the generator has reached: the `ts_event` of the
-    /// last emitted tick, i.e. the clock the next `next_tick` advances from. A
-    /// fresh source sits at its `start_ts`. `CheckpointIndex` uses this to place
-    /// snapshots and to binary-search them against a seek target.
+    /// The last instant the walk has reserved; see the field. A fresh source
+    /// sits at its `start_ts`. `CheckpointIndex` reads it at parent boundaries
+    /// only, where every record consumed so far is at or before it.
     #[must_use]
     pub fn clock_ns(&self) -> u64 {
         self.clock_ns
@@ -817,13 +904,11 @@ impl GeneratedSource {
         let arr_mult = self.session.arrival_mult(self.clock_ns);
         if arr_mult >= LOW_INTENSITY_ARR_MULT {
             // Open-market path: the multiplier sampled at the instant the gap
-            // opens stretches the whole draw - the original math, unchanged
-            // bit for bit so the committed fingerprint's golden stream stays
-            // byte-identical (its multipliers never go near the gate). The
-            // trailing `.min` is a pure safety rail: for any multiplier above
-            // the gate and the validated thin_factor range it is far out of
-            // reach of realistic draws, so it never alters an open-market gap;
-            // it only guarantees the cast can never saturate to u64::MAX.
+            // opens stretches the whole draw. The trailing `.min` is a pure
+            // safety rail: for any multiplier above the gate and the validated
+            // thin_factor range it is far out of reach of realistic draws, so
+            // it never alters an open-market gap; it only guarantees the cast
+            // can never saturate to u64::MAX.
             //
             // Note the asymmetry with the closed-window path below, which
             // integrates the session envelope hour by hour: here an armed
@@ -852,17 +937,16 @@ impl GeneratedSource {
     /// cast at u64::MAX, pinning the parent clock there so every later parent
     /// carries the same `ts_event`.
     ///
-    /// Clock advancement is the real invariant, and it is stronger than this
-    /// comment used to claim. The old wording said "quote/first-child and
-    /// sibling ties are intentional"; siblings do not tie and must not - they
-    /// are stamped `parent + emitted * INTRA_EVENT_STEP_NS`, a 1 us stride, and
-    /// the arrival kernel floors a parent's own advance at that same stride. So
-    /// the trade stream is strictly increasing until the u64 nanosecond epoch is
-    /// exhausted, and a consumer paging history by a timestamp-only cursor
-    /// depends on that (see `a_river_never_prints_two_trades_at_one_instant`,
-    /// which is what would catch a change here). Only the quote and its first
-    /// child share an instant, deliberately and harmlessly: they are served on
-    /// separate pages, so the tie can never cut one.
+    /// Clock advancement is the real invariant. Siblings do not tie and must
+    /// not - they are stamped `parent + emitted * INTRA_EVENT_STEP_NS`, a 1 us
+    /// stride, and the arrival kernel floors a parent's own advance at that
+    /// same stride. So the trade stream is strictly increasing until the u64
+    /// nanosecond epoch is exhausted, and a consumer paging history by a
+    /// timestamp-only cursor depends on that (see
+    /// `a_river_never_prints_two_trades_at_one_instant`, which is what would
+    /// catch a change here). Only the quote and its first child share an
+    /// instant, deliberately and harmlessly: they are served on separate
+    /// pages, so the tie can never cut one.
     ///
     /// Here the draw is instead treated as a budget of un-modulated seconds
     /// and converted to wall time by integrating the piecewise-constant
@@ -879,10 +963,7 @@ impl GeneratedSource {
     /// Residual limitations, stated honestly:
     /// - only gaps that open below the gate take this path. A gap opening in
     ///   an open hour still crosses a later closed window at its open-hour
-    ///   rate (a tick can print inside the closed window). That artifact
-    ///   predates this path and is left in place deliberately: fixing it would
-    ///   change every boundary-crossing gap and break the committed
-    ///   fingerprint's byte-identical golden stream.
+    ///   rate (a tick can print inside the closed window).
     /// - a profile whose every hour is effectively closed can never spend the
     ///   budget; the walk caps at `MAX_SESSION_GAP_NS` per gap, so the clock
     ///   advances strictly (one tick per ~year) instead of freezing. Reaching
@@ -1022,44 +1103,65 @@ impl GeneratedSource {
         SizeDraw { base, lot_snap }
     }
 
-    fn materialize_size(&self, draw: SizeDraw) -> Decimal {
-        let SizeDraw { base, lot_snap } = draw;
-        if self.size_grid.integral {
-            let raw = if lot_snap {
-                // The lot on an integral grid is at least one contract, so a
-                // median below ten contracts snaps to whole contracts rather
-                // than to a fractional lot.
-                let lot = self.integral_lot;
-                decimal_from_f64((base / lot).round() * lot)
-            } else {
-                decimal_from_f64(base)
-            };
-            // Half-away-from-zero, not truncation (which biases every draw down
-            // and piles the whole sub-1.0 mass onto the floor twice over) and
-            // not banker's rounding (which measurably thins the odd sizes on a
-            // 0.5-heavy discrete grid).
-            return raw
-                .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
-                .max(self.size_grid.min_size);
-        }
-        // The spot arm is the pre-size-grid expression: the lot-snap branch is
-        // not re-rounded to SIZE_DECIMALS, because it never was, and
-        // `spot_draws_are_bit_identical_...` is only provable if this arm keeps
-        // its value rather than merely a similar one. The precomputed lot and
-        // the fast rounding are byte-identical by construction and by
-        // `fast_round_dp_matches_the_decimal_conversion` respectively.
-        let size = if lot_snap {
-            round_lot_size(base, self.spot_lot)
-        } else {
-            decimal_from_f64_round_dp(base, SIZE_DECIMALS)
-        };
-        size.max(self.size_grid.min_size)
-    }
-
     #[cfg(test)]
     pub(super) fn next_size(&mut self) -> Decimal {
         let draw = self.draw_size();
-        self.materialize_size(draw)
+        self.scale
+            .size(self.sizes.quantize(draw.base, draw.lot_snap))
+    }
+
+    /// A price coordinate in ticks as a record mantissa, or the terminal
+    /// fault that refuses it.
+    fn price(&self, ticks: f64) -> Result<i64, TickFault> {
+        self.prices
+            .mantissa(ticks)
+            .ok_or(TickFault::PriceUnrepresentable {
+                clock_ns: self.clock_ns,
+            })
+    }
+
+    fn book_price(&self, ticks: i64) -> Result<i64, TickFault> {
+        self.prices
+            .mantissa_of_ticks(ticks)
+            .ok_or(TickFault::PriceUnrepresentable {
+                clock_ns: self.clock_ns,
+            })
+    }
+
+    /// A discrete-book quantity in units of the size increment, as a record
+    /// mantissa, saturating at the quantity ceiling.
+    fn book_units(&self, units: u64) -> u64 {
+        units
+            .checked_mul(self.min_units)
+            .map_or(SIZE_UNITS_CEILING, |mantissa| {
+                mantissa.min(SIZE_UNITS_CEILING)
+            })
+    }
+
+    /// The placed book's quote record at the clock.
+    fn placed_quote(&self, book: &PublishedBook) -> Result<Record, TickFault> {
+        Ok(Record::Quote(QuoteRec {
+            ts: self.clock_ns,
+            bid_px: self.price(book.bid_ticks)?,
+            ask_px: self.price(book.ask_ticks)?,
+            bid_qty: self.top_bid_units,
+            ask_qty: self.top_ask_units,
+        }))
+    }
+
+    /// Step every child of the burst just begun and append its trade records.
+    fn emit_children(&mut self) -> Result<(), TickFault> {
+        while self.burst.remaining > 0 {
+            let draw = self.step_child();
+            let record = Record::Trade(TradeRec {
+                ts: self.clock_ns,
+                px: self.price(draw.price_ticks)?,
+                qty: self.sizes.quantize(draw.size.base, draw.size.lot_snap),
+                side: self.burst.side,
+            });
+            self.plan.push(record);
+        }
+        Ok(())
     }
 }
 
@@ -1067,6 +1169,7 @@ impl GeneratedSource {
 /// tiny derivation named makes its decade transitions directly testable: the
 /// old crypto notional proxy pinned it at one and left every larger-contract
 /// branch live but unexercised.
+#[cfg(test)]
 pub(super) fn integral_lot(latent_size_median: f64) -> f64 {
     10_f64.powf(latent_size_median.log10().floor()).max(1.0)
 }
@@ -1083,164 +1186,185 @@ pub(super) fn repeat_is_compatible(
     }
 }
 
-impl TickSource for GeneratedSource {
-    fn next_tick(&mut self) -> Option<TickEvent> {
-        if self.fault.is_some() {
-            return None;
+impl RiverSource for GeneratedSource {
+    fn scale(&self) -> &RecordScale {
+        &self.scale
+    }
+
+    fn next_record(&mut self) -> Option<Record> {
+        if self.cursor == self.plan.len() {
+            self.resolve_parent().ok()?;
         }
-        if self.book.is_some() {
-            return self.next_book_tick();
+        let record = self.plan[self.cursor];
+        #[cfg(test)]
+        {
+            if self.cursor == 0 {
+                self.reader_emitted = 0;
+            }
+            self.reader_emitted += u32::from(matches!(record, Record::Trade(_)));
         }
-        if let Some(quote) = self.pending_quote.take() {
-            return Some(TickEvent::Quote(quote));
+        self.cursor += 1;
+        if self.cursor == self.plan.len() {
+            self.plan.clear();
+            self.cursor = 0;
         }
-        if self.burst.remaining == 0 {
-            self.begin_event(true);
-            return self.pending_quote.take().map(TickEvent::Quote);
-        }
-        Some(TickEvent::Trade(self.next_child()))
+        Some(record)
     }
 
     fn fault(&self) -> Option<TickFault> {
         self.fault
     }
 
-    fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
+    /// Resolve forward, dropping each whole parent whose reserved span ends
+    /// before `start_ts` - no clone, no second resolution - and park inside
+    /// the first parent that reaches it, returning its first record at or
+    /// after `start_ts`. A parent's reserved end bounds every record it
+    /// emits, so a parent ending below the target has nothing in the window.
+    fn seek_to(&mut self, start_ts: u64) -> Option<Record> {
         loop {
-            if self.at_parent_boundary() {
-                let mut advanced = self.clone();
-                // A refusal ends the walk here. Adopting the faulted clone is
-                // what makes `fault()` report it; skipping the adoption would
-                // leave a caller unable to tell a refusal from exhaustion, and
-                // ignoring the refusal would spin forever on a stale summary.
-                let Ok(advance) = advanced.advance_for_checkpoint() else {
-                    *self = advanced;
-                    return None;
-                };
-                // `end_ns` is the last instant this parent reserves - the last
-                // child on the placed-book path, the reserved post-trade slot
-                // on the discrete-book path. Below the target, every tick this
-                // parent emits is too, so the whole parent is skippable.
-                if advance.end_ns < start_ts {
-                    *self = advanced;
+            if self.cursor == self.plan.len() {
+                self.resolve_parent().ok()?;
+                if self.clock_ns < start_ts {
+                    self.plan.clear();
+                    self.cursor = 0;
                     continue;
                 }
             }
-            let tick = self.next_tick()?;
-            if tick.ts_event() >= start_ts {
-                return Some(tick);
+            let record = self.next_record()?;
+            if record.ts() >= start_ts {
+                return Some(record);
             }
         }
     }
 }
 
-/// One parent's wire footprint, on either cascade path: the last instant it
-/// reserves and the number of records it emits. `CheckpointIndex` and
-/// `seek_to` skip a whole parent by it without materializing the records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct WireAdvance {
-    pub(super) end_ns: u64,
-    pub(super) wire_count: usize,
+impl ParentSource for GeneratedSource {
+    fn next_parent(&mut self) -> Option<ParentView<'_>> {
+        assert!(
+            self.at_parent_boundary(),
+            "next_parent called mid-parent, after a partial record read"
+        );
+        self.resolve_parent().ok()?;
+        // Consumed whole: the next call clears it before resolving.
+        self.cursor = self.plan.len();
+        Some(ParentView {
+            parent_ts: self.plan_parent_ts,
+            records: &self.plan,
+            trades: self.plan_trades,
+            trace: if self.vol_trace_enabled {
+                self.vol_trace
+            } else {
+                None
+            },
+        })
+    }
 }
 
 impl GeneratedSource {
-    pub(super) fn at_parent_boundary(&self) -> bool {
-        self.pending_quote.is_none() && self.burst.remaining == 0 && self.book_plan.is_none()
+    /// Whether no resolved record is still owed to a reader.
+    #[must_use]
+    pub fn at_parent_boundary(&self) -> bool {
+        self.cursor == self.plan.len()
     }
 
-    /// Pop the next record of the discrete-book path, resolving a fresh
-    /// parent plan when the current one is drained. A parent always emits at
-    /// least its trade records, so a freshly resolved plan is never empty.
-    fn next_book_tick(&mut self) -> Option<TickEvent> {
-        if self.book_plan.is_none() {
-            self.begin_event(true);
-            if self.fault.is_some() {
-                return None;
-            }
-        }
-        let plan = self.book_plan.as_mut()?;
-        let record = plan.records.pop_front();
-        if plan.records.is_empty() {
-            self.book_plan = None;
-        }
-        record
+    /// Trades of the current parent a reader has not taken yet.
+    #[cfg(test)]
+    pub(super) fn owed_children(&self) -> u32 {
+        self.plan[self.cursor..]
+            .iter()
+            .filter(|record| matches!(record, Record::Trade(_)))
+            .count() as u32
     }
 
-    /// Advance exactly one parent for the seek and checkpoint fast paths,
-    /// reporting its wire footprint without materializing records into a
-    /// caller. Handles both cascade paths: the placed-book path drains its
-    /// child burst, the discrete-book path resolves and discards its plan.
-    pub(super) fn advance_for_checkpoint(&mut self) -> Result<WireAdvance, TickFault> {
+    /// Trades of the current (or just drained) parent a reader has taken.
+    #[cfg(test)]
+    pub(super) fn emitted_children(&self) -> u32 {
+        self.reader_emitted
+    }
+
+    /// Drop the rest of the current parent unread, for the measurements that
+    /// want the parent stream and not its prints.
+    #[cfg(test)]
+    pub(super) fn discard_owed(&mut self) {
+        self.plan.clear();
+        self.cursor = 0;
+    }
+
+    /// The edge view of the next record: the protocol event it denotes. For
+    /// tests and offline readers that want `TickEvent`s; the serving path
+    /// reads records.
+    pub fn next_tick(&mut self) -> Option<TickEvent> {
+        let record = self.next_record()?;
+        Some(self.scale.event(&record))
+    }
+
+    /// Resolve the next whole parent into the plan. On success the plan holds
+    /// at least one and at most `MAX_PARENT_RECORDS` records and the cursor is
+    /// at its start; on failure the fault is latched and the plan is empty, so
+    /// a failed parent publishes nothing - neither emit nor skip can observe a
+    /// prefix of it. A latched fault is terminal: no later call draws again.
+    fn resolve_parent(&mut self) -> Result<(), TickFault> {
         if let Some(fault) = self.fault {
             return Err(fault);
         }
-        if self.book.is_some() {
-            assert!(
-                self.book_plan.is_none(),
-                "advance_for_checkpoint requires a parent boundary"
-            );
-            self.begin_event(false);
-            if let Some(fault) = self.fault {
-                return Err(fault);
+        self.plan.clear();
+        self.cursor = 0;
+        self.plan_trades = 0;
+        match self.begin_event() {
+            Ok(()) => {
+                assert!(
+                    (1..=MAX_PARENT_RECORDS).contains(&self.plan.len()),
+                    "a parent emitted {} records, outside [1, {MAX_PARENT_RECORDS}]",
+                    self.plan.len()
+                );
+                self.plan_trades = self
+                    .plan
+                    .iter()
+                    .filter(|record| matches!(record, Record::Trade(_)))
+                    .count() as u32;
+                Ok(())
             }
-            let plan = self
-                .book_plan
-                .take()
-                .expect("a book event resolves a plan when it does not fault");
-            // The clock is already at the last reserved slot.
-            return Ok(WireAdvance {
-                end_ns: self.clock_ns,
-                wire_count: plan.records.len(),
-            });
+            Err(fault) => {
+                self.plan.clear();
+                self.fault = Some(fault);
+                Err(fault)
+            }
         }
-        let summary = self.advance_parent()?;
-        let end_ns = summary.parent_ts_ns.saturating_add(
-            u64::from(summary.child_count.saturating_sub(1))
-                .saturating_mul(summary.child_stride_ns),
-        );
-        Ok(WireAdvance {
-            end_ns,
-            wire_count: 1 + summary.child_count as usize,
-        })
     }
 
-    /// Advance exactly one parent and all of its children without constructing
-    /// protocol objects.
+    /// Advance exactly one parent for the checkpoint extension, reporting how
+    /// many records it emitted. Requires a parent boundary.
+    pub(super) fn skip_parent(&mut self) -> Result<usize, TickFault> {
+        assert!(
+            self.at_parent_boundary(),
+            "skip_parent requires a parent boundary"
+        );
+        self.resolve_parent()?;
+        let emitted = self.plan.len();
+        self.plan.clear();
+        self.cursor = 0;
+        Ok(emitted)
+    }
+
+    /// Advance exactly one parent and all of its children, reporting its
+    /// timing and child count.
     ///
-    /// Every random draw belongs to the advancement side of the seam. In
-    /// particular, size draws and child price evolution still run even though
-    /// their `Decimal` representation is discarded. Starting this operation in
-    /// the middle of a wire parent would make its compact run ambiguous, so the
-    /// boundary is enforced rather than silently repaired.
-    ///
-    /// Fallible because the arrival kernel can refuse. `begin_event` latches a
-    /// refusal into `self.fault` and leaves `burst` untouched, so a summary
-    /// built unconditionally would describe a parent that was never drawn - the
-    /// previous parent's timestamp with zero children - and every caller would
-    /// advance over work that did not happen. The refusal is returned instead;
-    /// the fault stays latched on `self`, so `fault()` also reports it.
+    /// Fallible because the arrival kernel can refuse. The refusal is
+    /// returned; the fault stays latched on `self`, so `fault()` also reports
+    /// it, and nothing is drawn after it.
     pub fn advance_parent(&mut self) -> Result<ParentSummary, TickFault> {
         assert!(
-            self.pending_quote.is_none() && self.burst.remaining == 0,
+            self.at_parent_boundary(),
             "advance_parent requires a parent boundary"
         );
-        // A latched fault is terminal, exactly as it is for `next_tick`: an
-        // already-faulted source must not draw again.
-        if let Some(fault) = self.fault {
-            return Err(fault);
-        }
-        self.begin_event(false);
-        if let Some(fault) = self.fault {
-            return Err(fault);
-        }
+        self.resolve_parent()?;
         let summary = ParentSummary {
-            parent_ts_ns: self.burst.parent_ts_ns,
-            child_count: self.burst.remaining,
+            parent_ts_ns: self.plan_parent_ts,
+            child_count: self.plan_trades,
             child_stride_ns: INTRA_EVENT_STEP_NS,
         };
-        while self.burst.remaining > 0 {
-            self.step_child();
-        }
+        self.plan.clear();
+        self.cursor = 0;
         Ok(summary)
     }
 
@@ -1285,10 +1409,9 @@ impl GeneratedSource {
 
     fn begin_integrated_event(
         &mut self,
-        materialize_quote: bool,
         rate_mult: f64,
         children_mult: f64,
-    ) {
+    ) -> Result<(), TickFault> {
         let kernel = self.arrival_kernel.expect("integrated branch has kernel");
         // The kernel tests the crossing against its own walk start, which is the
         // clock after the previous burst's children stepped it past their
@@ -1305,31 +1428,27 @@ impl GeneratedSource {
                     at_ts_ns: at_ts_ns.max(self.clock_ns.saturating_add(1)),
                     shift_ns,
                 });
-        let draw = match kernel.next_parent(
-            self.arrival_state
-                .as_mut()
-                .expect("integrated branch has state"),
-            self.clock_ns,
-            super::arrival::cadence_base_mean_s(&self.scalars),
-            &self.shape,
-            self.arrival_env
-                .as_ref()
-                .expect("integrated branch has environment"),
-            RuntimeModifiers {
-                rate_mult,
-                children_mult,
-                pending_reopen,
-            },
-            self.cadence_rng
-                .as_mut()
-                .expect("integrated branch has cadence rng"),
-        ) {
-            Ok(draw) => draw,
-            Err(refusal) => {
-                self.fault = Some(TickFault::Arrival(refusal));
-                return;
-            }
-        };
+        let draw = kernel
+            .next_parent(
+                self.arrival_state
+                    .as_mut()
+                    .expect("integrated branch has state"),
+                self.clock_ns,
+                super::arrival::cadence_base_mean_s(&self.scalars),
+                &self.shape,
+                self.arrival_env
+                    .as_ref()
+                    .expect("integrated branch has environment"),
+                RuntimeModifiers {
+                    rate_mult,
+                    children_mult,
+                    pending_reopen,
+                },
+                self.cadence_rng
+                    .as_mut()
+                    .expect("integrated branch has cadence rng"),
+            )
+            .map_err(TickFault::Arrival)?;
         self.clock_ns = draw.parent_ts_ns;
         if draw.reopen_applied {
             let reopen = self
@@ -1353,14 +1472,9 @@ impl GeneratedSource {
             AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
         }
         .max(1.0);
-        self.pending_quote = materialize_quote.then(|| QuoteTick {
-            symbol: Arc::clone(&self.symbol),
-            bid_px: self.price_memo.price(book.bid_ticks),
-            ask_px: self.price_memo.price(book.ask_ticks),
-            bid_sz: book.bid_size,
-            ask_sz: book.ask_size,
-            ts_event: self.clock_ns,
-        });
+        self.plan_parent_ts = self.clock_ns;
+        let quote = self.placed_quote(&book)?;
+        self.plan.push(quote);
         self.last_book = Some(book);
         self.burst = SweepBurst {
             remaining: draw.child_count,
@@ -1369,6 +1483,7 @@ impl GeneratedSource {
             side: aggressor,
             price_ticks,
         };
+        self.emit_children()
     }
 
     /// Draw the next cascade parent and apply everything external to it: the
@@ -1376,16 +1491,11 @@ impl GeneratedSource {
     /// Returns the parent and the external log move (diffusion, jump and gap;
     /// never the propagator impact, which the two paths supply differently -
     /// the placed-book path adds the cascade propagator, the discrete-book
-    /// path takes the book's own anchor impact instead). `None` latches the
-    /// clock-exhausted fault, exactly as the inline draw did.
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "the cascade tables and state are present whenever this branch runs, invariant of begin_event's dispatch; the Option is the clock-exhausted refusal, not their absence"
-    )]
+    /// path takes the book's own anchor impact instead).
     fn draw_cascade_parent(
         &mut self,
         rate_mult: f64,
-    ) -> Option<(super::cascade::CascadeParent, f64)> {
+    ) -> Result<(super::cascade::CascadeParent, f64), TickFault> {
         let tables = Arc::clone(self.cascade.as_ref().expect("cascade branch has tables"));
         let mut state = self.cascade_state.take().expect("cascade branch has state");
         if !state.has_parent() {
@@ -1400,10 +1510,9 @@ impl GeneratedSource {
                 state.fill_next_bucket(&tables, &mut self.rng, self.clock_ns, modifiers)
             {
                 self.cascade_state = Some(state);
-                self.fault = Some(TickFault::CascadeClockExhausted {
+                return Err(TickFault::CascadeClockExhausted {
                     clock_ns: self.clock_ns,
                 });
-                return None;
             }
         }
         let parent = state.draw_parent(&tables, &mut self.rng, self.clock_ns);
@@ -1428,7 +1537,7 @@ impl GeneratedSource {
         }
         self.reopen_frontier_ns = self.clock_ns;
         self.cascade_state = Some(state);
-        Some((parent, log_move))
+        Ok((parent, log_move))
     }
 
     /// One parent under the activity cascade: the next parent the cascade
@@ -1436,10 +1545,8 @@ impl GeneratedSource {
     /// side the cascade drew, and the sweep from the declared child mixture.
     /// No GARCH step, no bounce regime, no drift, no price repeat: the mid is
     /// a martingale on the tick grid and the book follows it exactly.
-    fn begin_cascade_event(&mut self, materialize_quote: bool, rate_mult: f64, children_mult: f64) {
-        let Some((parent, log_move)) = self.draw_cascade_parent(rate_mult) else {
-            return;
-        };
+    fn begin_cascade_event(&mut self, rate_mult: f64, children_mult: f64) -> Result<(), TickFault> {
+        let (parent, log_move) = self.draw_cascade_parent(rate_mult)?;
         let mut log_move = log_move;
         let mid_before = self.vol.mid;
         // The propagator (tape protocol 34): the parent's impact move in
@@ -1499,14 +1606,9 @@ impl GeneratedSource {
         } else {
             self.shape.next_count_scaled(children_mult, &mut self.rng)
         };
-        self.pending_quote = materialize_quote.then(|| QuoteTick {
-            symbol: Arc::clone(&self.symbol),
-            bid_px: self.price_memo.price(book.bid_ticks),
-            ask_px: self.price_memo.price(book.ask_ticks),
-            bid_sz: book.bid_size,
-            ask_sz: book.ask_size,
-            ts_event: self.clock_ns,
-        });
+        self.plan_parent_ts = self.clock_ns;
+        let quote = self.placed_quote(&book)?;
+        self.plan.push(quote);
         self.last_book = Some(book);
         self.burst = SweepBurst {
             remaining: count,
@@ -1515,17 +1617,20 @@ impl GeneratedSource {
             side: aggressor,
             price_ticks,
         };
+        self.emit_children()
     }
 
     /// One parent on the discrete-book path (see the `book` module).
     /// The cascade still owns the clock and the external move (diffusion,
     /// jump, gap); everything the touch does - the spread, the depletion, the
-    /// impact, the printed prices and sizes - is the book's, resolved into an
-    /// immutable emission plan the wire and the checkpoint drain identically.
-    fn begin_cascade_book_event(&mut self, rate_mult: f64, children_mult: f64) {
-        let Some((parent, log_move)) = self.draw_cascade_parent(rate_mult) else {
-            return;
-        };
+    /// impact, the printed prices and sizes - is the book's, resolved into
+    /// the plan the wire and the checkpoint drain identically.
+    fn begin_cascade_book_event(
+        &mut self,
+        rate_mult: f64,
+        children_mult: f64,
+    ) -> Result<(), TickFault> {
+        let (parent, log_move) = self.draw_cascade_parent(rate_mult)?;
         let mid_before = self.vol.mid;
         // External move only: diffusion, jump and gap. The propagator is not
         // applied here - the book's anchor impact replaces it (step 5).
@@ -1533,7 +1638,7 @@ impl GeneratedSource {
         self.vol.mid = (self.vol.mid * ext.exp())
             .max(self.tick_f64)
             .min(MID_CEILING);
-        let plan = self.resolve_book_parent(parent.side, children_mult);
+        self.resolve_book_parent(parent.side, children_mult)?;
         if self.vol_trace_enabled {
             // The observation-only record, in the book path's terms: the
             // diffusive part is the cascade second's, and the realized
@@ -1563,18 +1668,23 @@ impl GeneratedSource {
                 mid_after: self.vol.mid,
             });
         }
-        self.book_plan = Some(plan);
+        Ok(())
     }
 
-    /// Resolve one book parent into its wire records, advancing the clock
-    /// across every reserved slot. The causal order is the spec's: project
-    /// against the externally moved anchor, draw the parent size, walk the
-    /// frozen ladder, settle the depletion, then move the anchor by the
-    /// book's impact and relax the spread against the moved anchor, and
-    /// project once more. Quotes whose four values repeat the last published
-    /// snapshot are suppressed, their instants still reserved.
-    fn resolve_book_parent(&mut self, side: AggressorSide, children_mult: f64) -> BookPlan {
-        let config = self.scalars.book.clone().expect("book path has a config");
+    /// Resolve one book parent into its records, advancing the clock across
+    /// every reserved slot. The causal order is the spec's: project against
+    /// the externally moved anchor, draw the parent size, walk the frozen
+    /// ladder, settle the depletion, then move the anchor by the book's
+    /// impact and relax the spread against the moved anchor, and project
+    /// once more. Quotes whose four values repeat the last published snapshot
+    /// are suppressed, their instants still reserved.
+    fn resolve_book_parent(
+        &mut self,
+        side: AggressorSide,
+        children_mult: f64,
+    ) -> Result<(), TickFault> {
+        let config = Arc::clone(&self.scalars);
+        let config = config.book.as_ref().expect("book path has a config");
         // The phase row is the law in effect at this minute of session. A
         // parent outside any session would silently take row zero's law, so
         // absence is an invariant failure rather than an implicit phase:
@@ -1587,7 +1697,7 @@ impl GeneratedSource {
             .expect("the book path requires a calendar")
             .session_position(self.clock_ns)
             .expect("a book parent was drawn outside any session window");
-        let knobs = config.knobs_at(minute as u32).clone();
+        let knobs = config.knobs_at(minute as u32);
         let struck = match side {
             AggressorSide::Buyer => Struck::Ask,
             AggressorSide::Seller => Struck::Bid,
@@ -1604,17 +1714,17 @@ impl GeneratedSource {
 
         let anchor_ext = self.vol.mid / self.tick_f64;
         let book = self.book.as_mut().expect("book path has a book");
-        book.project(anchor_ext, &knobs);
+        book.project(anchor_ext, knobs);
         // The replacement-queue renewal, at the ruled placement: after
         // the parent's projection, before its pre-trade book is
         // recorded.
-        book.renew(&knobs);
+        book.renew(knobs);
         let pre = book.snapshot();
-        let size_units = book.effective_size(struck, &knobs);
+        let size_units = book.effective_size(struck, knobs);
         let walk = book.execute(struck, size_units, &config.depth_ratios);
-        book.settle(struck, &walk, &knobs);
-        let reports = book.split_reports(&walk, &knobs);
-        let impact_ticks = book.anchor_impact_ticks(struck, &knobs);
+        book.settle(struck, &walk, knobs);
+        let reports = book.split_reports(&walk, knobs);
+        let impact_ticks = book.anchor_impact_ticks(struck, knobs);
 
         // Step 5's anchor half, applied to the latent mid, then the spread
         // relaxes and the book projects against the moved anchor (steps 5-6).
@@ -1624,81 +1734,70 @@ impl GeneratedSource {
             .min(MID_CEILING);
         let anchor_moved = self.vol.mid / self.tick_f64;
         let book = self.book.as_mut().expect("book path has a book");
-        book.relax(anchor_moved, &config.depth_ratios, &knobs);
-        book.project(anchor_moved, &knobs);
+        book.relax(anchor_moved, &config.depth_ratios, knobs);
+        book.project(anchor_moved, knobs);
         let post = book.snapshot();
 
         self.build_book_plan(&pre, &reports, &post, side)
     }
 
-    /// Lay the reserved-slot schedule and materialize the emitted records.
-    /// Slot zero is the pre-trade quote, slots one to `n` the `n` trade
-    /// records, slot `n + 1` the post-trade quote; every slot is one
-    /// intra-event step, and the clock advances to the last reserved slot
-    /// whether or not its quote was emitted. A quote equal in all four
-    /// published values to the last one is suppressed; the origin always
-    /// publishes.
+    /// Lay the reserved-slot schedule and write the emitted records. Slot
+    /// zero is the pre-trade quote, slots one to `n` the `n` trade records,
+    /// slot `n + 1` the post-trade quote; every slot is one intra-event step,
+    /// and the clock advances to the last reserved slot whether or not its
+    /// quote was emitted. A quote equal in all four published values to the
+    /// last one is suppressed; the origin always publishes.
     fn build_book_plan(
         &mut self,
         pre: &BookSnapshot,
         reports: &[super::book::LevelFill],
         post: &BookSnapshot,
         side: AggressorSide,
-    ) -> BookPlan {
+    ) -> Result<(), TickFault> {
         let parent_ts = self.clock_ns;
-        let mut records = std::collections::VecDeque::new();
-        if let Some(quote) = self.publish_quote(pre, parent_ts) {
-            records.push_back(TickEvent::Quote(quote));
-        }
+        self.plan_parent_ts = parent_ts;
+        self.publish_quote(pre, parent_ts)?;
         for (index, fill) in reports.iter().enumerate() {
             let ts =
                 parent_ts.saturating_add(((index as u64) + 1).saturating_mul(INTRA_EVENT_STEP_NS));
-            let price = decimal_from_f64(fill.price_ticks as f64 * self.tick_f64)
-                .round_dp(self.scalars.price_decimals);
-            let size = self.size_grid.min_size * Decimal::from(fill.units);
-            records.push_back(TickEvent::Trade(TradeTick {
-                symbol: Arc::clone(&self.symbol),
-                price,
-                size,
-                aggressor: side,
-                ts_event: ts,
-            }));
+            let record = Record::Trade(TradeRec {
+                ts,
+                px: self.book_price(fill.price_ticks)?,
+                qty: self.book_units(fill.units),
+                side,
+            });
+            self.plan.push(record);
         }
         let post_slot = (reports.len() as u64) + 1;
         let post_ts = parent_ts.saturating_add(post_slot.saturating_mul(INTRA_EVENT_STEP_NS));
-        if let Some(quote) = self.publish_quote(post, post_ts) {
-            records.push_back(TickEvent::Quote(quote));
-        }
+        self.publish_quote(post, post_ts)?;
         // The next parent floors strictly after the last reserved slot,
         // whether or not the post-trade quote was emitted.
         self.clock_ns = post_ts;
-        BookPlan { records }
+        Ok(())
     }
 
-    /// A published quote for a snapshot, or `None` when its four values
-    /// repeat the last published snapshot (deduplication). The origin - no
-    /// prior snapshot - always publishes. Updates the dedup state whenever a
-    /// quote is emitted.
-    fn publish_quote(&mut self, snap: &BookSnapshot, ts: u64) -> Option<QuoteTick> {
+    /// Append a published quote for a snapshot, or nothing when its four
+    /// values repeat the last published snapshot (deduplication). The origin,
+    /// with no prior snapshot, always publishes. Updates the dedup state
+    /// whenever a quote is emitted.
+    fn publish_quote(&mut self, snap: &BookSnapshot, ts: u64) -> Result<(), TickFault> {
         if self.last_published == Some(*snap) {
-            return None;
+            return Ok(());
         }
+        let record = Record::Quote(QuoteRec {
+            ts,
+            bid_px: self.book_price(snap.bid_ticks)?,
+            ask_px: self.book_price(snap.ask_ticks)?,
+            bid_qty: self.book_units(snap.bid_units),
+            ask_qty: self.book_units(snap.ask_units),
+        });
         self.last_published = Some(*snap);
-        let bid_px = decimal_from_f64(snap.bid_ticks as f64 * self.tick_f64)
-            .round_dp(self.scalars.price_decimals);
-        let ask_px = decimal_from_f64(snap.ask_ticks as f64 * self.tick_f64)
-            .round_dp(self.scalars.price_decimals);
-        Some(QuoteTick {
-            symbol: Arc::clone(&self.symbol),
-            bid_px,
-            ask_px,
-            bid_sz: self.size_grid.min_size * Decimal::from(snap.bid_units),
-            ask_sz: self.size_grid.min_size * Decimal::from(snap.ask_units),
-            ts_event: ts,
-        })
+        self.plan.push(record);
+        Ok(())
     }
 
-    fn begin_event(&mut self, materialize_quote: bool) {
+    fn begin_event(&mut self) -> Result<(), TickFault> {
         #[cfg(test)]
         self.draw_stages.clear();
         let (rate_mult, children_mult) = self
@@ -1710,15 +1809,12 @@ impl GeneratedSource {
             });
         if self.cascade.is_some() {
             if self.book.is_some() {
-                self.begin_cascade_book_event(rate_mult, children_mult);
-            } else {
-                self.begin_cascade_event(materialize_quote, rate_mult, children_mult);
+                return self.begin_cascade_book_event(rate_mult, children_mult);
             }
-            return;
+            return self.begin_cascade_event(rate_mult, children_mult);
         }
         if self.arrival_kernel.is_some() {
-            self.begin_integrated_event(materialize_quote, rate_mult, children_mult);
-            return;
+            return self.begin_integrated_event(rate_mult, children_mult);
         }
         let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
@@ -1782,14 +1878,13 @@ impl GeneratedSource {
         // surge-effective one, so no runtime path ever crosses between the
         // two arithmetics (the generator successor spec, 3.1). Above the
         // floor - base quiet mean over one child - the legacy identity
-        // holds and runs byte-for-byte; the crypto anchor at 8.49 lives
-        // here always, surged or not. At or below it, the legacy identity
-        // is broken by construction: the quiet mean clamps to one, the
-        // active residual clamps to zero, and any configured near-one mean
-        // generates ~1.44 with the single fraction collapsed - the July
-        // MNQ fit failure. The floor-aware solve re-derives both active
-        // parameters from the unconditional targets at the current
-        // effective mean, preserving them exactly.
+        // holds; the crypto anchor at 8.49 lives here always, surged or not.
+        // At or below it, the legacy identity is broken by construction: the
+        // quiet mean clamps to one, the active residual clamps to zero, and
+        // any configured near-one mean generates ~1.44 with the single
+        // fraction collapsed - the July MNQ fit failure. The floor-aware
+        // solve re-derives both active parameters from the unconditional
+        // targets at the current effective mean, preserving them exactly.
         let floor_branch = self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0;
         let (state_mean, state_single_frac) = if !floor_branch {
             let state_children_mult = if self.arrival.last_quiet {
@@ -1846,7 +1941,7 @@ impl GeneratedSource {
                 let mut event_shape = SweepShape::new(
                     state_mean,
                     state_single_frac,
-                    // Levels are not drawn here: `next_child` walks the grid
+                    // Levels are not drawn here: `step_child` walks the grid
                     // off `self.shape.level_step_prob`, which is solved once
                     // from the declared `levels_mean` and never
                     // state-conditioned. Any value in [1, mean] would do;
@@ -1897,14 +1992,9 @@ impl GeneratedSource {
         } else {
             normal_price_ticks
         };
-        self.pending_quote = materialize_quote.then(|| QuoteTick {
-            symbol: Arc::clone(&self.symbol),
-            bid_px: self.price_memo.price(book.bid_ticks),
-            ask_px: self.price_memo.price(book.ask_ticks),
-            bid_sz: book.bid_size,
-            ask_sz: book.ask_size,
-            ts_event: self.clock_ns,
-        });
+        self.plan_parent_ts = self.clock_ns;
+        let quote = self.placed_quote(&book)?;
+        self.plan.push(quote);
         self.last_book = Some(book);
         self.burst = SweepBurst {
             remaining: count,
@@ -1913,6 +2003,7 @@ impl GeneratedSource {
             side: aggressor,
             price_ticks,
         };
+        self.emit_children()
     }
 
     fn step_child(&mut self) -> ChildDraw {
@@ -1960,16 +2051,5 @@ impl GeneratedSource {
                 .round() as i64;
         }
         draw
-    }
-
-    fn next_child(&mut self) -> TradeTick {
-        let draw = self.step_child();
-        TradeTick {
-            symbol: Arc::clone(&self.symbol),
-            price: self.price_memo.price(draw.price_ticks),
-            size: self.materialize_size(draw.size),
-            aggressor: self.burst.side,
-            ts_event: self.clock_ns,
-        }
     }
 }

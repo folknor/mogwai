@@ -180,7 +180,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mogwai_data::TickEvent;
+use mogwai_data::Record;
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
 use mogwai_protocol::{
     AccountId, Command, OrderType, RunSeeds, Side, SubmitOrder, TimeInForce, VenueMessage,
@@ -316,8 +316,8 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                     // `read_last` currently answers at every scenario instant,
                     // so the arm is only reachable when it is load-bearing.
                     loop {
-                        if let TickEvent::Trade(trade) = tape.next_tick()? {
-                            return Some(trade.price);
+                        if let Record::Trade(trade) = tape.next_record()? {
+                            return Some(tape.scale().price(trade.px));
                         }
                     }
                 })

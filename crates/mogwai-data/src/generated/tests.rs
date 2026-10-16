@@ -13,7 +13,7 @@
 
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
-use crate::{TickEvent, TickFault, TickSource};
+use crate::{RiverSource, TickEvent, TickFault};
 
 use super::arrival::cadence_base_mean_s;
 use super::checkpoint::MAX_CHECKPOINTS;
@@ -256,7 +256,10 @@ fn compact_seek_is_wire_identical_and_preserves_continuation() {
     let mut wire = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
     let target = 60_000_000_000;
 
-    let compact_head = compact.seek_to(target).expect("infinite compact tape");
+    let compact_head = compact
+        .seek_to(target)
+        .map(|record| compact.scale().event(&record))
+        .expect("infinite compact tape");
     let wire_head = loop {
         let tick = wire.next_tick().expect("infinite wire tape");
         if tick.ts_event() >= target {
@@ -305,13 +308,16 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
         }
         ts
     };
-    let mut index = CheckpointIndex::new(
+    let surged = || {
         GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None)
-            .with_surge(opens_at, 600_000, 10.0, 4.0),
-        8_192,
-        1_000_000,
-    );
-    let mut clean = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+            .with_surge(opens_at, 600_000, 10.0, 4.0)
+    };
+    let mut index = CheckpointIndex::new(surged(), 8_192, 1_000_000);
+    // The canonical tape is the surged river walked from its origin; the
+    // chain is a second copy of the same river, so what is compared below is
+    // the chain's replay against the river itself.
+    let mut canonical_walk = surged();
+    let mut clean = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
 
     // Walked in lockstep from the origin. Advancing one side first would make
     // the two disagree from misalignment rather than from the surge, which is a
@@ -319,7 +325,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     let mut canonical = Vec::with_capacity(10_000);
     let mut first_mismatch = None;
     for _ in 0..10_000 {
-        let tick = index.next_tick().expect("infinite tape");
+        let tick = canonical_walk.next_tick().expect("infinite tape");
         let rendered = format!("{tick:?}");
         // Both sides unwrapped. Comparing a `TickEvent` against an
         // `Option<TickEvent>` renders `Trade(..)` against `Some(Trade(..))`,
@@ -375,16 +381,18 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
 fn a_checkpoint_that_consumed_the_last_print_still_answers_for_it() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-    // A trade whose successor prints strictly later than one nanosecond after
-    // it, so a target one nanosecond past it is answered by that trade and by
-    // nothing in the residual. The end of a parent's child run is the ordinary
-    // case; searching for it rather than hardcoding an instant keeps the
-    // fixture honest if the cadence moves.
+    // The last trade of a parent - the record a boundary snapshot has just
+    // consumed - whose successor, the next parent's quote, prints strictly
+    // later than one nanosecond after it. A target one nanosecond past it is
+    // answered by that trade and by nothing in the residual. Searching for it
+    // rather than hardcoding an instant keeps the fixture honest if the cadence
+    // moves.
     let mut probe = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
     let mut previous: Option<(u64, Decimal)> = None;
     let (trade_ts, trade_px) = loop {
         let tick = probe.next_tick().expect("infinite tape");
         if let Some((ts, px)) = previous
+            && matches!(tick, TickEvent::Quote(_))
             && tick.ts_event() > ts + 1
         {
             break (ts, px);
@@ -396,10 +404,10 @@ fn a_checkpoint_that_consumed_the_last_print_still_answers_for_it() {
     };
     let target = trade_ts + 1;
 
-    // k = 1 puts a checkpoint on every tick, so the strict partition lands
-    // exactly on the trade and the residual is guaranteed to be empty. The
-    // venue's K of 8192 hits the same shape whenever a checkpoint or a
-    // `FlowSurge` control boundary happens to land there.
+    // k = 1 puts a checkpoint on every parent boundary, so the strict
+    // partition lands exactly on the boundary after that trade and the
+    // residual is guaranteed to be empty. The venue's K of 8192 hits the same
+    // shape whenever a checkpoint happens to land there.
     let origin = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
     let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
 
@@ -512,9 +520,12 @@ fn coarsening_keeps_no_exception_on_a_surged_chain() {
         10_000_000,
     );
 
-    // Past MAX_CHECKPOINTS at k = 1, so coarsen must have run at least once.
+    // Past MAX_CHECKPOINTS parents at k = 1, a snapshot on every boundary,
+    // so coarsen must have run at least once. Each extension to one
+    // nanosecond past the frontier advances exactly one parent.
     for _ in 0..MAX_CHECKPOINTS + 500 {
-        index.next_tick().expect("infinite tape");
+        let next = index.frontier_ns() + 1;
+        assert!(index.extend_toward(next) > 0, "the walk advanced");
     }
     assert!(index.checkpoint_count() <= MAX_CHECKPOINTS);
 
@@ -1064,12 +1075,13 @@ fn checkpoint_resume_is_byte_identical() {
 }
 
 // Regression for the exact-ts collision the strictly-before partition in
-// `source_before` exists for: snapshots land on every K-th tick's
-// exact ts_event, and pollers pass an emitted tick's exact ts_event as the
-// seek target, so a seek target can equal a checkpoint's clock_ns. Under
-// the old `<=` partition the index handed back the checkpoint that had
-// already consumed the boundary tick, and the residual seek silently
-// skipped to the next tick - one tick dropped versus the from-origin path.
+// `source_before` exists for: a boundary snapshot's clock is the instant of
+// the last record its parent emitted, and pollers pass an emitted record's
+// exact instant as the seek target, so a seek target can equal a
+// checkpoint's clock_ns. Under a `<=` partition the index would hand back the
+// checkpoint that had already consumed that record, and the residual seek
+// would silently skip to the next one - one record dropped versus the
+// from-origin path.
 #[test]
 fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
     let fp = Fingerprint::from_repo_json();
@@ -1079,31 +1091,31 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
     let k = 128usize;
 
     // From-origin reference, captured as full debug strings so the
-    // comparison pins every field of every tick, not just (ts, price).
+    // comparison pins every field of every record, not just (ts, price).
     let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
-    let ref_ticks: Vec<(u64, String)> = (0..600)
+    let ref_ticks: Vec<(u64, String)> = (0..2_000)
         .map(|_| {
             let tick = reference.next_tick().expect("trade");
             (tick.ts_event(), format!("{tick:?}"))
         })
         .collect();
 
-    // The 3K-th tick (0-based index 3K-1) is exactly where extend_toward
-    // pushes its third interior snapshot, so that snapshot's clock_ns
-    // equals this tick's ts_event - the forced collision. The from-origin
-    // seek semantics (first tick with ts_event >= target) return this
-    // boundary tick itself; the checkpointed path must return the
-    // identical tick and stay byte-identical afterwards.
-    let boundary = 3 * k - 1;
-    let target = ref_ticks[boundary].0;
-
+    // The collision is taken from a retained snapshot rather than assumed
+    // from a record count: build the chain past the reference's midpoint,
+    // read the third interior snapshot's clock, and target exactly it.
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, k, 100_000);
+    index.extend_toward(ref_ticks[1_000].0);
+    let target = index.checkpoint_clocks()[3];
+    let boundary = ref_ticks
+        .iter()
+        .position(|(ts, _)| *ts >= target)
+        .expect("the snapshot sits inside the reference");
+    assert_eq!(
+        ref_ticks[boundary].0, target,
+        "the snapshot's clock is an emitted record's instant - the collision"
+    );
     let mut resumed = index.source_before(target);
-    // Origin plus exactly three interior snapshots: extend_toward stops the
-    // moment the lead reaches the target, right after snapshotting it -
-    // proof the collision this test is about actually occurred.
-    assert_eq!(index.checkpoint_count(), 4);
     assert!(
         resumed.clock_ns() < target,
         "an exact-ts target must resume strictly before the boundary tick \
@@ -1125,11 +1137,12 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
     }
 }
 
-// Coarsening bounds the index's memory (its unbounded per-`k`-ticks growth
-// was the S14/D7 finding) without breaking the byte-identity guarantee.
-// Drive the index past `MAX_CHECKPOINTS` at k=1 (a snapshot every tick) so
-// `coarsen` fires, then assert the snapshot count stayed capped and that
-// resumes off the coarsened grid still reproduce the from-origin tape.
+// Coarsening bounds the index's memory (its unbounded per-`k` growth was the
+// S14/D7 finding) without breaking the byte-identity guarantee. Drive the
+// index past `MAX_CHECKPOINTS` parents at k=1 (a snapshot on every parent
+// boundary) so `coarsen` fires, then assert the snapshot count stayed capped
+// and that resumes off the coarsened grid still reproduce the from-origin
+// tape.
 #[test]
 fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
     let fp = Fingerprint::from_repo_json();
@@ -1137,22 +1150,27 @@ fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
     let origin_ts = 1_000u64;
     let seed = 42u64;
 
-    // Enough ticks that a k=1 index would hold more than MAX_CHECKPOINTS
-    // snapshots, so at least one coarsening pass must run.
-    let n = MAX_CHECKPOINTS + 500;
+    // Enough parents that a k=1 index would hold more than MAX_CHECKPOINTS
+    // snapshots, so at least one coarsening pass must run. Counted in
+    // parents, read off the reference as quotes, since one parent is one
+    // snapshot here.
+    let parents = MAX_CHECKPOINTS + 500;
     let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
-    let ref_ticks: Vec<(u64, String)> = (0..n)
-        .map(|_| {
-            let tick = reference.next_tick().expect("trade");
-            (tick.ts_event(), format!("{tick:?}"))
-        })
-        .collect();
+    let mut ref_ticks: Vec<(u64, String)> = Vec::new();
+    let mut quotes = 0;
+    while quotes <= parents {
+        let tick = reference.next_tick().expect("trade");
+        quotes += usize::from(matches!(tick, TickEvent::Quote(_)));
+        ref_ticks.push((tick.ts_event(), format!("{tick:?}")));
+    }
+    let n = ref_ticks.len();
 
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
     let _ = index.source_before(ref_ticks[n - 1].0);
-    // Without coarsening a k=1 walk of `n > MAX_CHECKPOINTS` ticks would hold
-    // n+1 snapshots; the cap proves coarsen() ran and holds the ceiling.
+    // Without coarsening a k=1 walk of more than MAX_CHECKPOINTS parents
+    // would hold one snapshot per parent; the cap proves coarsen() ran and
+    // holds the ceiling.
     assert!(
         index.checkpoint_count() <= MAX_CHECKPOINTS,
         "coarsening must hold the snapshot count at or below the cap, got {}",
@@ -1164,6 +1182,12 @@ fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
     // now-sparse grid and assert byte-identical tails.
     for &probe in &[n / 4, n / 2, (3 * n) / 4, n - 100] {
         let probe_target = ref_ticks[probe].0;
+        // The first record at the probe's instant: a quote and its parent's
+        // first child share one, and a seek returns the first of a tie.
+        let probe = ref_ticks
+            .iter()
+            .position(|(ts, _)| *ts == probe_target)
+            .expect("the probe's own instant");
         let mut resumed = index.source_before(probe_target);
         assert!(
             resumed.clock_ns() < probe_target,
@@ -1203,18 +1227,29 @@ fn checkpoint_extension_is_capped() {
     // walk stops at the bound instead of running forever. A second call can
     // make another bounded chunk, which lets a legitimate boot release its
     // external lock between chunks without weakening this per-call ceiling.
+    // A call starts a parent only below the cap and charges every record the
+    // parent emits, so it walks at least the cap and at most one parent past
+    // it.
     let unreachable_target = origin_ts + 315_360_000_000_000_000;
-    assert_eq!(index.extend_toward(unreachable_target), cap);
+    let within = cap..cap + MAX_PARENT_RECORDS;
+    let first = index.extend_toward(unreachable_target);
+    assert!(within.contains(&first), "walked {first}");
     let first_frontier = index.frontier_ns();
-    assert_eq!(index.extend_toward(unreachable_target), cap);
+    let second = index.extend_toward(unreachable_target);
+    assert!(within.contains(&second), "walked {second}");
     assert!(index.frontier_ns() > first_frontier);
     assert!(index.try_source_before(unreachable_target).is_none());
-    // Three bounded calls were made, so at most `3 * cap / K` interior
-    // snapshots were taken beyond the origin.
-    assert!(
-        index.checkpoint_count() <= 1 + 3 * cap / 64 + 1,
-        "each bounded walk took at most cap/K interior checkpoints"
-    );
+    // The spacing claim, read off the recorded positions: consecutive
+    // snapshots are at most one parent's footprint past `k` apart, and the
+    // chain's last snapshot sits within one spacing of everything walked.
+    let positions = index.checkpoint_positions();
+    for pair in positions.windows(2) {
+        assert!(
+            pair[1] - pair[0] <= (64 + MAX_PARENT_RECORDS - 1) as u64,
+            "snapshots {pair:?} are further apart than k plus one parent"
+        );
+    }
+    assert!(positions.len() > 1, "three bounded calls took snapshots");
 }
 
 #[test]
@@ -1260,11 +1295,14 @@ fn clean_regime_is_byte_identical() {
     let expected = [
         r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00016711, aggressor: Buyer, ts_event: 1651680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.002, aggressor: Buyer, ts_event: 1652680 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.001, aggressor: Buyer, ts_event: 1653680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00200000, aggressor: Buyer, ts_event: 1652680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00100000, aggressor: Buyer, ts_event: 1653680 }))"#,
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00118992, aggressor: Buyer, ts_event: 1654680 }))"#,
         r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 2085712 }))"#,
     ];
+    // Re-blessed at tape protocol 35: the same instants, prices, sides and
+    // size values as protocol 34, with sizes now spelled at the river's fixed
+    // eight-place scale (`0.002` reads `0.00200000`).
     let actual: Vec<_> = (0..expected.len())
         .map(|_| format!("{:?}", src.next_tick()))
         .collect();
@@ -2115,6 +2153,10 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     // latent median is the same calibrated value. Bit identity is provable
     // rather than merely asserted, and this golden keeps it provable across
     // the next edit to either arm.
+    //
+    // Compared as values, not as text. Tape protocol 35 records sizes at the
+    // river's fixed scale, so `0.001` now reads `0.00100000`; that is the
+    // spelling moving, and this test's claim is that the draws did not.
     const PRE_GRID_HEAD: [&str; 12] = [
         "0.00289574",
         "0.00361598",
@@ -2130,12 +2172,15 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
         "0.003",
     ];
     assert_eq!(default_draws, gridded_draws);
-    let head: Vec<String> = default_draws
+    let pre_grid: Vec<Decimal> = PRE_GRID_HEAD
         .iter()
-        .take(PRE_GRID_HEAD.len())
-        .map(std::string::ToString::to_string)
+        .map(|text| text.parse().expect("a decimal literal"))
         .collect();
-    assert_eq!(head, PRE_GRID_HEAD, "the spot grid moved the spot draws");
+    assert_eq!(
+        &default_draws[..PRE_GRID_HEAD.len()],
+        pre_grid.as_slice(),
+        "the spot grid moved the spot draws"
+    );
 }
 
 // A 2M-parent-event walk: see the heavy-walk cfg note at the top of this file.
@@ -2239,7 +2284,7 @@ fn sweep_structure() {
     let mut total_levels = 0_u64;
     let mut prior_ts = 0_u64;
     for _ in 0..5_000 {
-        assert_eq!(src.burst.remaining, 0);
+        assert_eq!(src.owed_children(), 0);
         let updates_before = src.latent_updates;
         let quote = src.next_tick().expect("quote");
         assert!(matches!(quote, TickEvent::Quote(_)));
@@ -2251,7 +2296,7 @@ fn sweep_structure() {
         let mut children = 1_u64;
         let mut levels = 1_u64;
         assert!(parent_ts > prior_ts);
-        while src.burst.remaining > 0 {
+        while src.owed_children() > 0 {
             let child = next_trade(&mut src);
             assert_eq!(child.aggressor, side);
             assert_eq!(
@@ -2281,13 +2326,14 @@ fn sweep_structure() {
     assert!((total_levels as f64 / events / scalars.levels_mean - 1.0).abs() < 0.15);
 }
 
-// A snapshot taken mid-sweep must restore mid-sweep. `SweepBurst` lives in
-// generator state exactly so this holds, and the failure mode is invisible
-// outside the seek path: a burst that did not survive a snapshot would only
-// show up as a seek returning a tape that re-opened its parent. Asserted
-// through the real `CheckpointIndex`, not through `Clone`, because `Clone` is
-// the substrate the index is built on and would pass no matter what the index
-// did with it.
+// A seek whose target falls mid-sweep must land mid-sweep. Snapshots sit at
+// parent boundaries only, so the resume replays the whole parent the target
+// falls inside and parks the reader at the target's child; a resume that
+// re-opened the parent at the target, or skipped its earlier children's draws,
+// would show up here as a tail that diverges from the from-origin tape.
+// Asserted through the real `CheckpointIndex`, not through `Clone`, because
+// `Clone` is the substrate the index is built on and would pass no matter
+// what the index did with it.
 #[test]
 fn checkpoint_resume_mid_sweep_is_byte_identical() {
     let fp = Fingerprint::from_repo_json();
@@ -2298,11 +2344,11 @@ fn checkpoint_resume_mid_sweep_is_byte_identical() {
     let mut ticks = Vec::with_capacity(4_000);
     let mut mid_sweep = Vec::with_capacity(4_000);
     for _ in 0..4_000 {
-        let opens_event = reference.burst.remaining == 0;
+        let opens_event = reference.owed_children() == 0;
         let t = next_trade(&mut reference);
         // Mid-sweep means: this child did not open its event AND its event is
         // not finished, so a snapshot at this instant carries `remaining > 0`.
-        mid_sweep.push(!opens_event && reference.burst.remaining > 0);
+        mid_sweep.push(!opens_event && reference.owed_children() > 0);
         ticks.push((t.ts_event, t.price, t.size, t.aggressor));
     }
     let at = (1_000..3_000)
@@ -2353,7 +2399,7 @@ fn a_reopen_gap_never_splits_a_sweep() {
     let mut prior_ts = 0;
     let mut event_start_ts = 0;
     for _ in 0..200_000 {
-        let opens_event = src.burst.remaining == 0;
+        let opens_event = src.owed_children() == 0;
         let tick = src.next_tick().expect("unbounded generated source");
         if opens_event {
             event_start_ts = tick.ts_event();
@@ -2713,7 +2759,7 @@ fn assert_dwell_is_bounded(measured: &Dwell, scalars: &GeneratorScalars, fp: &Fi
 // `dow_weight` assertions below need several whole weeks to separate a weekend
 // from a weekday; halving the draw halves the span to two weeks, which does not
 // fail sooner, it passes on less evidence. The harness already throws every
-// child away (`src.burst.remaining = 0`), so what is left is the arrival draw
+// child away (`src.owed_children() = 0`), so what is left is the arrival draw
 // itself at about 500 ns per event in dev - there is no fat to take.
 //
 // The watchdog headroom is 2.6x, measured, not the ~1.6x a static estimate
@@ -2862,7 +2908,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     let mut off_grid_prices = 0;
     let mut neutral_aggressors = 0;
     while prices.len() < draw {
-        let starts_event = src.burst.remaining == 0;
+        let starts_event = src.owed_children() == 0;
         let trade = next_trade(src);
         if (trade.price / scalars.modal_tick).fract() != Decimal::ZERO {
             off_grid_prices += 1;
@@ -2881,7 +2927,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         if starts_event {
             parent_timestamps.push(trade.ts_event);
         }
-        if src.burst.remaining == 0 {
+        if src.owed_children() == 0 {
             prices.push(decimal_to_f64(trade.price));
         }
         let size = decimal_to_f64(trade.size);
@@ -3096,7 +3142,7 @@ fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(draw.saturating_sub(1));
     let mut prior_ts = None;
     while prior_ts.is_none() || out.len() < draw.saturating_sub(1) {
-        let starts_event = src.burst.remaining == 0;
+        let starts_event = src.owed_children() == 0;
         let tick = src.next_tick().expect("unbounded generated source");
         if !starts_event {
             continue;
@@ -3113,7 +3159,7 @@ fn latent_returns(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(draw.saturating_sub(1));
     let mut prior_mid = src.vol.mid;
     while out.len() < draw {
-        let starts_event = src.burst.remaining == 0;
+        let starts_event = src.owed_children() == 0;
         let _tick = src.next_tick().expect("unbounded generated source");
         if !starts_event {
             continue;
@@ -3134,7 +3180,7 @@ fn windowed_latent_returns(
     let mut out_window = Vec::new();
     let mut prior_mid = src.vol.mid;
     while in_window.len() + out_window.len() < draw {
-        let starts_event = src.burst.remaining == 0;
+        let starts_event = src.owed_children() == 0;
         let _tick = src.next_tick().expect("unbounded generated source");
         if !starts_event {
             continue;
@@ -3172,7 +3218,7 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
         let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
             continue;
         };
-        let starts_event = src.burst.emitted == 1;
+        let starts_event = src.emitted_children() == 1;
         if !starts_event {
             continue;
         }
@@ -3185,7 +3231,7 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
         // different position in the RNG stream. That makes this a statistically
         // equivalent path, not a byte-identical one, which is all a curve-shape
         // assertion needs.
-        src.burst.remaining = 0;
+        src.discard_owed();
         events += 1;
         let (hour, dow) = utc_hour_dow(trade.ts_event);
         hour_count[hour] += 1;
@@ -4145,7 +4191,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let tick = decimal_to_f64(scalars.modal_tick);
 
     // The burst grouping rule, and it is part of the estimator contract rather than
-    // an implementation detail. Here it is exact: `burst.remaining` is the
+    // an implementation detail. Here it is exact: `owed_children()` is the
     // generator's own structure, so first and last child are known without
     // inference. Real data has no such field and must approximate the grouping
     // from equal timestamp plus aggressor side - which makes timestamp
@@ -4177,7 +4223,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
             }
             continue;
         };
-        let starts_event = src.burst.emitted == 1;
+        let starts_event = src.emitted_children() == 1;
         let price = decimal_to_f64(trade.price);
         print_prices.push(price);
         if starts_event {
@@ -4191,7 +4237,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
             first_latent_mids.push(src.vol.mid);
             base_returns.push(src.vol.prev_return);
         }
-        if src.burst.remaining == 0 {
+        if src.owed_children() == 0 {
             last_prices.push(price);
             sides.push(trade.aggressor);
             prior_last_price = Some(price);
@@ -4584,7 +4630,7 @@ fn a_quote_precedes_every_parent_burst() {
                     !need_quote,
                     "a parent trade arrived without a governing quote"
                 );
-                if src.burst.remaining == 0 {
+                if src.owed_children() == 0 {
                     need_quote = true;
                 }
             }
@@ -4629,7 +4675,7 @@ fn published_books_govern_parent_trades_and_stay_on_grid() {
             AggressorSide::NoAggressor => panic!("generated parents have a native side"),
         }
         let mut last_price = trade.price;
-        while src.burst.remaining > 0 {
+        while src.owed_children() > 0 {
             last_price = next_trade(&mut src).price;
         }
         previous_quote = Some(quote);
@@ -4726,7 +4772,7 @@ fn non_repeat_parents_print_at_the_touch_at_unit_width() {
             );
         }
         let mut last = parent.price;
-        while src.burst.remaining > 0 {
+        while src.owed_children() > 0 {
             last = next_trade(&mut src).price;
         }
         previous_last = Some(last);
@@ -4757,7 +4803,7 @@ fn a_repeat_parent_republishes_the_frozen_book() {
             return;
         }
         let mut last = parent.price;
-        while src.burst.remaining > 0 {
+        while src.owed_children() > 0 {
             last = next_trade(&mut src).price;
         }
         previous_last = Some(last);
@@ -4835,7 +4881,7 @@ fn no_parent_print_crosses_the_wrong_side_of_its_governing_book() {
             AggressorSide::Seller => assert!(twice_price <= quote.bid_px + quote.ask_px),
             AggressorSide::NoAggressor => panic!(),
         }
-        while src.burst.remaining > 0 {
+        while src.owed_children() > 0 {
             let _ = next_trade(&mut src);
         }
     }
@@ -5013,14 +5059,14 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
         let TickEvent::Trade(t) = src.next_tick().expect("infinite tape") else {
             continue;
         };
-        let starts = src.burst.emitted == 1;
+        let starts = src.emitted_children() == 1;
         let p = decimal_to_f64(t.price);
         prints.push(p);
         parent_of_print.push(parent_index);
         if starts {
             first.push(p);
         }
-        if src.burst.remaining == 0 {
+        if src.owed_children() == 0 {
             last.push(p);
             parent_index += 1;
         }
@@ -6191,7 +6237,10 @@ fn a_book_walk_is_byte_identical_across_a_seek_resume() {
         ts
     };
     let mut resumed = book_source(23, BOOK_START_NS);
-    let first = resumed.seek_to(target_ts).expect("seek reaches the target");
+    let first = resumed
+        .seek_to(target_ts)
+        .map(|record| resumed.scale().event(&record))
+        .expect("seek reaches the target");
     assert_eq!(
         format!("{first:?}"),
         reference[target_index],
@@ -6222,7 +6271,9 @@ fn a_book_checkpoint_resume_matches_the_from_origin_walk() {
     let mut resumed = index.source_before(target_ts);
     // Drain to the target and compare the tail.
     let mut expected_iter = reference.iter().skip_while(|(ts, _)| *ts < target_ts);
-    let mut tick = resumed.seek_to(target_ts);
+    let mut tick = resumed
+        .seek_to(target_ts)
+        .map(|record| resumed.scale().event(&record));
     while let Some(event) = tick {
         let Some((_, expected)) = expected_iter.next() else {
             break;

@@ -8,7 +8,9 @@ Part of the architecture reference. The map and the reading order are in
 
 Seven crates. `mogwai-protocol` owns the wire types and the shipped launcher and
 imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
-exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
+exchange core. `mogwai-data` owns the compact record representation and the
+single-river `RiverSource` interface the serving path reads, the event-facing
+`TickSource` and k-way merge the heterogeneous offline lineage reads, and the
 `GeneratedSource` synthetic generator fitted to the committed fingerprint.
 `mogwai-venue` is a library - it owns the sockets, the clock and the replay
 pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` binary: a

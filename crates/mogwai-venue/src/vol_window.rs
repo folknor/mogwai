@@ -19,8 +19,9 @@
 //! things keep them one implementation rather than two:
 //!
 //! - The arithmetic is `mogwai_data::vol_reading_from_trades`, the single
-//!   shared fold both the walk and this reader call. Neither side owns a copy
-//!   of the estimator's math.
+//!   shared fold both the walk and this reader call, over the same record
+//!   mantissas read at the same `RecordScale`. Neither side owns a copy of the
+//!   estimator's math or of the price conversion.
 //! - The proof rules mirror the walk's exactly. An instant is covered only
 //!   when an event at a strictly later instant has been pulled (the walk's
 //!   `reached_ns` rule), or the source ended (`close`). A read whose upper
@@ -53,7 +54,7 @@
 
 use std::{collections::VecDeque, sync::Mutex};
 
-use mogwai_data::{BookState, VolReading};
+use mogwai_data::{BookState, QuoteRec, Record, RecordScale, VolReading};
 use rust_decimal::Decimal;
 
 /// Prints retained. At the raw fill cadence a 300 s window is ~15,000 prints,
@@ -67,13 +68,13 @@ const MAX_TRADES: usize = 65_536;
 #[derive(Debug, Clone, Copy)]
 struct WindowTrade {
     ts_ns: u64,
-    px: Decimal,
+    px: i64,
     cum_events: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct WindowQuote {
-    book: BookState,
+    quote: QuoteRec,
     cum_events: u64,
 }
 
@@ -103,16 +104,20 @@ struct Inner {
 /// per boat, written by that boat's tape thread, read under a brief lock.
 #[derive(Debug)]
 pub(crate) struct VolWindow {
+    /// The boat's river scale, which every retained mantissa is read at.
+    scale: RecordScale,
     inner: Mutex<Inner>,
 }
 
 impl VolWindow {
-    /// A window for a boat whose cursor starts at `origin_ns`. Nothing before
-    /// the origin is covered: the first `VOL_WINDOW_NS` of readings after
-    /// boarding reach into warmup water this thread never saw, and fall back
-    /// to the walk exactly as every reading did before this type existed.
-    pub(crate) fn starting_at(origin_ns: u64) -> Self {
+    /// A window for a boat whose cursor starts at `origin_ns` on a river read
+    /// at `scale`. Nothing before the origin is covered: the first
+    /// `VOL_WINDOW_NS` of readings after boarding reach into warmup water this
+    /// thread never saw, and fall back to the walk exactly as every reading
+    /// did before this type existed.
+    pub(crate) fn starting_at(origin_ns: u64, scale: RecordScale) -> Self {
         Self {
+            scale,
             inner: Mutex::new(Inner {
                 trades: VecDeque::new(),
                 quotes: VecDeque::new(),
@@ -125,34 +130,35 @@ impl VolWindow {
         }
     }
 
-    /// Fold one pulled event in. Called by the tape thread for every tick, at
-    /// pull time; `px` carries the price when the event is a trade and `None`
-    /// for a quote, which still advances the frontier and the event count.
-    pub(crate) fn fold(&self, ts_ns: u64, px: Option<Decimal>, book: Option<BookState>) {
+    /// Fold one pulled record in. Called by the tape thread for every record,
+    /// at pull time; a quote still advances the frontier and the event count.
+    pub(crate) fn fold(&self, record: &Record) {
+        let ts_ns = record.ts();
         let mut inner = self.locked();
         inner.events_seen += 1;
         inner.frontier_ns = inner.frontier_ns.max(ts_ns.saturating_sub(1));
         inner.last_event_ts = Some(ts_ns);
-        if let Some(px) = px {
-            let cum_events = inner.events_seen;
-            inner.trades.push_back(WindowTrade {
-                ts_ns,
-                px,
-                cum_events,
-            });
-            while inner.trades.len() > MAX_TRADES {
-                let evicted = inner.trades.pop_front().expect("len checked above");
-                inner.covered_from_ns = inner.covered_from_ns.max(evicted.ts_ns);
-                inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
+        let cum_events = inner.events_seen;
+        match *record {
+            Record::Trade(trade) => {
+                inner.trades.push_back(WindowTrade {
+                    ts_ns,
+                    px: trade.px,
+                    cum_events,
+                });
+                while inner.trades.len() > MAX_TRADES {
+                    let evicted = inner.trades.pop_front().expect("len checked above");
+                    inner.covered_from_ns = inner.covered_from_ns.max(evicted.ts_ns);
+                    inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
+                }
             }
-        }
-        if let Some(book) = book {
-            let cum_events = inner.events_seen;
-            inner.quotes.push_back(WindowQuote { book, cum_events });
-            while inner.quotes.len() > MAX_TRADES {
-                let evicted = inner.quotes.pop_front().expect("len checked above");
-                inner.covered_from_ns = inner.covered_from_ns.max(evicted.book.ts_ns);
-                inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
+            Record::Quote(quote) => {
+                inner.quotes.push_back(WindowQuote { quote, cum_events });
+                while inner.quotes.len() > MAX_TRADES {
+                    let evicted = inner.quotes.pop_front().expect("len checked above");
+                    inner.covered_from_ns = inner.covered_from_ns.max(evicted.quote.ts);
+                    inner.covered_cum = inner.covered_cum.max(evicted.cum_events);
+                }
             }
         }
     }
@@ -178,7 +184,7 @@ impl VolWindow {
         to_ns: u64,
         budget: usize,
     ) -> Option<Option<VolReading>> {
-        let window: Vec<(u64, Decimal)> = {
+        let window: Vec<(u64, i64)> = {
             let inner = self.locked();
             if to_ns > inner.frontier_ns || from_ns < inner.covered_from_ns {
                 return None;
@@ -194,7 +200,7 @@ impl VolWindow {
                 .map(|t| (t.ts_ns, t.px))
                 .collect()
         };
-        Some(mogwai_data::vol_reading_from_trades(&window))
+        Some(mogwai_data::vol_reading_from_trades(&self.scale, &window))
     }
 
     pub(crate) fn book_at(&self, ts_ns: u64, budget: usize) -> Option<Option<BookState>> {
@@ -207,9 +213,14 @@ impl VolWindow {
         }
         let hi = inner
             .quotes
-            .partition_point(|quote| quote.book.ts_ns <= ts_ns);
+            .partition_point(|quote| quote.quote.ts <= ts_ns);
         let index = hi.checked_sub(1)?;
-        Some(inner.quotes.get(index).map(|quote| quote.book))
+        Some(
+            inner
+                .quotes
+                .get(index)
+                .map(|quote| BookState::from_quote(&self.scale, &quote.quote)),
+        )
     }
 
     /// The last print at or before `ts_ns`, or `None` where this window is not
@@ -230,8 +241,12 @@ impl VolWindow {
             return None;
         }
         let hi = inner.trades.partition_point(|trade| trade.ts_ns <= ts_ns);
-        hi.checked_sub(1)
-            .and_then(|index| inner.trades.get(index).map(|trade| trade.px))
+        hi.checked_sub(1).and_then(|index| {
+            inner
+                .trades
+                .get(index)
+                .map(|trade| self.scale.price(trade.px))
+        })
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -244,45 +259,38 @@ impl VolWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mogwai_data::{MemorySource, TickEvent, vol_reading};
-    use mogwai_protocol::{AggressorSide, TradeTick};
+    use mogwai_data::{MemoryRiver, TradeRec, vol_reading};
+    use mogwai_protocol::AggressorSide;
 
-    fn trade(ts_event: u64, price: i64) -> TickEvent {
-        TickEvent::Trade(TradeTick {
-            symbol: "BTCUSDT".into(),
-            price: Decimal::from(price),
-            size: Decimal::ONE,
-            aggressor: AggressorSide::NoAggressor,
-            ts_event,
+    /// Two places, so the float conversion the window and the walk share is
+    /// a real division rather than the identity.
+    fn scale() -> RecordScale {
+        RecordScale::new("BTCUSDT".into(), 2, 0).expect("a valid scale")
+    }
+    fn window_at(origin_ns: u64) -> VolWindow {
+        VolWindow::starting_at(origin_ns, scale())
+    }
+    fn trade(ts: u64, price: i64) -> Record {
+        Record::Trade(TradeRec {
+            ts,
+            px: price * 100 + 37,
+            qty: 1,
+            side: AggressorSide::NoAggressor,
         })
     }
-    fn quote(ts_event: u64, bid: i64, ask: i64) -> TickEvent {
-        TickEvent::Quote(mogwai_protocol::QuoteTick {
-            symbol: "BTCUSDT".into(),
-            bid_px: Decimal::from(bid),
-            ask_px: Decimal::from(ask),
-            bid_sz: Decimal::ONE,
-            ask_sz: Decimal::ONE,
-            ts_event,
+    fn quote(ts: u64, bid: i64, ask: i64) -> Record {
+        Record::Quote(QuoteRec {
+            ts,
+            bid_px: bid * 100,
+            ask_px: ask * 100,
+            bid_qty: 1,
+            ask_qty: 1,
         })
     }
 
-    fn fold_all(window: &VolWindow, ticks: &[TickEvent]) {
-        for tick in ticks {
-            match tick {
-                TickEvent::Trade(t) => window.fold(t.ts_event, Some(t.price), None),
-                TickEvent::Quote(q) => window.fold(
-                    q.ts_event,
-                    None,
-                    Some(BookState {
-                        bid_px: q.bid_px,
-                        ask_px: q.ask_px,
-                        bid_sz: q.bid_sz,
-                        ask_sz: q.ask_sz,
-                        ts_ns: q.ts_event,
-                    }),
-                ),
-            }
+    fn fold_all(window: &VolWindow, records: &[Record]) {
+        for record in records {
+            window.fold(record);
         }
     }
 
@@ -297,10 +305,10 @@ mod tests {
             ticks.push(quote(i * 10, 99, 101));
             ticks.push(trade(i * 10, 100 + (i as i64 % 7)));
         }
-        let window = VolWindow::starting_at(0);
+        let window = window_at(0);
         fold_all(&window, &ticks);
         for (from_ns, to_ns) in [(0, 250), (35, 250), (100, 390), (0, 390)] {
-            let mut source = MemorySource::new(ticks.clone());
+            let mut source = MemoryRiver::new(scale(), ticks.clone());
             let walked = vol_reading(&mut source, from_ns, to_ns, 10_000);
             let resident = window
                 .read(from_ns, to_ns, 10_000)
@@ -324,7 +332,7 @@ mod tests {
 
     #[test]
     fn an_unproven_upper_bound_falls_back_rather_than_answering() {
-        let window = VolWindow::starting_at(0);
+        let window = window_at(0);
         fold_all(
             &window,
             &(1..=20).map(|i| trade(i * 10, 100)).collect::<Vec<_>>(),
@@ -337,7 +345,7 @@ mod tests {
 
     #[test]
     fn close_proves_the_final_instant() {
-        let window = VolWindow::starting_at(0);
+        let window = window_at(0);
         fold_all(
             &window,
             &(1..=20).map(|i| trade(i * 10, 100)).collect::<Vec<_>>(),
@@ -352,7 +360,7 @@ mod tests {
         // The boat boarded at 1_000; warmup water before that was never folded
         // here, so a span touching it must go to the walk however much the
         // ring holds.
-        let window = VolWindow::starting_at(1_000);
+        let window = window_at(1_000);
         fold_all(
             &window,
             &(1..=20)
@@ -365,10 +373,10 @@ mod tests {
 
     #[test]
     fn eviction_moves_the_covered_boundary_and_evicted_spans_fall_back() {
-        let window = VolWindow::starting_at(0);
+        let window = window_at(0);
         let count = MAX_TRADES as u64 + 100;
         for i in 1..=count {
-            window.fold(i, Some(Decimal::from(100)), None);
+            window.fold(&trade(i, 100));
         }
         // The first 100 prints are gone, so the boundary sits at print 100 and
         // a span opening before it is refused while one opening at it reads.
@@ -378,7 +386,7 @@ mod tests {
 
     #[test]
     fn a_span_the_walk_might_refuse_on_budget_falls_back() {
-        let window = VolWindow::starting_at(0);
+        let window = window_at(0);
         fold_all(
             &window,
             &(1..=20).map(|i| trade(i * 10, 100)).collect::<Vec<_>>(),

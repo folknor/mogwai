@@ -15,7 +15,7 @@
 //! through the venue's own `Config::load` path exactly as the Python's
 //! scratch-config walks did.
 
-use mogwai_data::{TickEvent, TickSource};
+use mogwai_data::{ParentSource, Record, RecordScale};
 use mogwai_protocol::AggressorSide;
 use rust_decimal::Decimal;
 
@@ -24,9 +24,9 @@ use rust_decimal::Decimal;
 // bounded sufficient statistics per run (one seed per invocation; the harness
 // pools seeds). Every distributional field is a histogram or a
 // count/sum/sum-of-squares accumulator, never a raw array - a simulated month
-// is order 10^7 parents. Consumes the full `next_tick()` walk: every draw
-// (sizes, prices, sides, quotes) is materialized, which `advance_parent()`'s
-// compact summary deliberately is not.
+// is order 10^7 parents. Consumes the full record walk a parent at a time:
+// every draw (sizes, prices, sides, quotes) is read as a compact record,
+// which `advance_parent()`'s summary deliberately does not carry.
 // ---------------------------------------------------------------------------
 
 /// Signed-displacement bin width in ticks. Wrong-side observations land in
@@ -289,27 +289,38 @@ fn displacement_key(d_ticks: f64) -> String {
     format!("{bin:.2}")
 }
 
-/// One inferred parent in flight: the quote that preceded it and what its
-/// children have printed so far. Parents are delimited by quote emissions -
-/// protocol 7 publishes exactly one book before every parent burst.
+/// One parent being folded: the book in force at its first trade and what its
+/// children have printed so far. Parents are delimited by the source's own
+/// `next_parent`, never inferred from quote emissions: the discrete-book path
+/// can publish two quotes for one parent or none. Prices and sizes are record
+/// mantissas at the river's scale.
 struct OpenParent {
     quote_mid: f64,
     width_ticks: u64,
-    bid_sz: Decimal,
-    ask_sz: Decimal,
+    bid_sz: u64,
+    ask_sz: u64,
     first_ts: u64,
-    first_price: Decimal,
+    first_price: i64,
     first_side: AggressorSide,
     rows: u64,
-    levels: Vec<Decimal>,
+    levels: Vec<i64>,
 }
 
-/// Fold the tick stream into the summary. Accumulation covers exactly
-/// `[start, end)` by each parent's first child timestamp; a burn-in walk
-/// before `start` is consumed and discarded. The source must already sit at
-/// its walk start (possibly `start - burn_in`).
+/// Fold the river into the summary, one whole parent at a time.
+///
+/// Parent statistics count a parent exactly when its first trade's timestamp
+/// lies in `[start, end)`, and then count the whole parent - every trade
+/// child, including one that prints at or after `end`. Per-record statistics
+/// (sizes, minute ranges, quote and horizon state) are selected per record:
+/// trades by their own timestamp in `[start, end)`, quotes by `ts < end`.
+/// The two selections are deliberately separate, because a parent can
+/// straddle `end` or a minute boundary. A parent with no trade, or whose
+/// first trade precedes every quote of the walk, has no book to attribute
+/// and counts as no parent. A burn-in walk before `start` is consumed and
+/// discarded. The source must already sit at a parent boundary at its walk
+/// start (possibly `start - burn_in`).
 pub fn summarize(
-    source: &mut dyn TickSource,
+    source: &mut dyn ParentSource,
     profile: &mogwai_venue::source::InstrumentProfile,
     seed: u64,
     start: u64,
@@ -318,6 +329,9 @@ pub fn summarize(
     let tick = profile.scalars.modal_tick;
     let tick_f = f64::try_from(tick).unwrap_or(f64::NAN);
     let calendar = profile.calendar.as_ref();
+    // The scale is fixed for the river's life; held by value because each
+    // parent view borrows the source.
+    let scale: RecordScale = source.scale().clone();
 
     let mut acc = SummaryAcc {
         seed,
@@ -369,9 +383,9 @@ pub fn summarize(
     // observed harness resets its chain.
     let mut seg_state: Option<(SessionBounds, HorizonState, Option<f64>)> = None;
     // Worst-minute detail: minute index -> (low, high, trade_count) on the
-    // exact price grid, plus parents by first-child minute (spec 4.7).
-    let mut minute_detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
-        Default::default();
+    // exact price grid as record mantissas, plus parents by first-child
+    // minute (spec 4.7).
+    let mut minute_detail: std::collections::BTreeMap<u64, (i64, i64, u64)> = Default::default();
     let mut minute_parents: std::collections::BTreeMap<u64, u64> = Default::default();
 
     // Advance the active segment's boundaries up to `until_ts` - exclusive
@@ -452,14 +466,21 @@ pub fn summarize(
     let mut asof_start: Option<f64> = None;
     let mut asof_start_frozen = false;
 
-    let mut pending_quote: Option<(f64, u64, Decimal, Decimal)> = None;
-    let mut open: Option<OpenParent> = None;
+    // (mid, width_ticks, bid_sz mantissa, ask_sz mantissa) of the last quote.
+    let mut pending_quote: Option<(f64, u64, u64, u64)> = None;
     let mut prev_parent: Option<(u64, f64)> = None; // (first_ts, quote_mid)
-    // (minute index, low, high) of the in-window minute being accumulated.
-    let mut minute_state: Option<(u64, f64, f64)> = None;
+    // (minute index, low, high mantissas) of the in-window minute being
+    // accumulated.
+    let mut minute_state: Option<(u64, i64, i64)> = None;
 
-    fn flush_minute(acc: &mut SummaryAcc, state: &mut Option<(u64, f64, f64)>, tick_f: f64) {
+    fn flush_minute(
+        acc: &mut SummaryAcc,
+        state: &mut Option<(u64, i64, i64)>,
+        scale: &RecordScale,
+        tick_f: f64,
+    ) {
         if let Some((_minute, lo, hi)) = state.take() {
+            let (lo, hi) = (scale.price_f64(lo), scale.price_f64(hi));
             let range_ticks = ((hi - lo) / tick_f).round().max(0.0) as u64;
             *acc.minute_range_ticks_hist.entry(range_ticks).or_insert(0) += 1;
         }
@@ -509,13 +530,13 @@ pub fn summarize(
             .entry(parent.width_ticks)
             .or_insert(0) += 1;
         *acc.bid_size_histogram
-            .entry(decimal_key(parent.bid_sz))
+            .entry(decimal_key(scale.size(parent.bid_sz)))
             .or_insert(0) += 1;
         *acc.ask_size_histogram
-            .entry(decimal_key(parent.ask_sz))
+            .entry(decimal_key(scale.size(parent.ask_sz)))
             .or_insert(0) += 1;
         if parent.quote_mid.is_finite() && tick_f.is_finite() {
-            let first = f64::try_from(parent.first_price).unwrap_or(f64::NAN);
+            let first = scale.price_f64(parent.first_price);
             let raw = (first - parent.quote_mid) / tick_f;
             match parent.first_side {
                 AggressorSide::Buyer => {
@@ -546,186 +567,195 @@ pub fn summarize(
         *prev = Some((parent.first_ts, parent.quote_mid));
     };
 
-    while let Some(event) = source.next_tick() {
-        let ts = event.ts_event();
-        if ts >= end {
+    while let Some(view) = source.next_parent() {
+        // Records are in time order, so a parent whose first record is at or
+        // past `end` holds nothing any selection below admits, and neither
+        // does any later parent.
+        if view.records[0].ts() >= end {
             break;
         }
-        match event {
-            TickEvent::Quote(q) => {
-                // A quote closes the parent that ran under the previous book.
-                if let Some(parent) = open.take() {
-                    finalize(
-                        &mut acc,
-                        &mut prev_parent,
-                        &mut sessions,
-                        &mut prev_vol_parent,
-                        &mut minute_parents,
-                        parent,
-                    );
-                }
-                // Protocol-11 segment horizon state: settle the outgoing
-                // segment's remaining boundaries before switching, then
-                // advance the active one strictly past-boundary (rule 6).
-                if let Some(offset) = cal_offset
-                    && let Some(seg) = session_segment_at(ts, offset)
-                {
-                    let switch = match &seg_state {
-                        Some((current, _, _)) => *current != seg,
-                        None => true,
-                    };
-                    if switch {
-                        if let Some((old_seg, mut horizons, old_mid)) = seg_state.take() {
+        let mut open: Option<OpenParent> = None;
+        // Set at the parent's first trade, attributed or not: a parent whose
+        // first trade had no book is unattributed as a whole, never reopened
+        // as a fragment at a later child.
+        let mut seen_trade = false;
+        for record in view.records {
+            let ts = record.ts();
+            match *record {
+                Record::Quote(q) => {
+                    // A quote at or past `end` must not move the as-of mid the
+                    // closing flush reads.
+                    if ts >= end {
+                        continue;
+                    }
+                    // Protocol-11 segment horizon state: settle the outgoing
+                    // segment's remaining boundaries before switching, then
+                    // advance the active one strictly past-boundary (rule 6).
+                    if let Some(offset) = cal_offset
+                        && let Some(seg) = session_segment_at(ts, offset)
+                    {
+                        let switch = match &seg_state {
+                            Some((current, _, _)) => *current != seg,
+                            None => true,
+                        };
+                        if switch {
+                            if let Some((old_seg, mut horizons, old_mid)) = seg_state.take() {
+                                advance_segment_boundaries(
+                                    &mut sessions,
+                                    &old_seg,
+                                    &mut horizons,
+                                    old_seg.segment_end_ns,
+                                    true,
+                                    old_mid,
+                                    (start, end),
+                                );
+                            }
+                            seg_state = Some((
+                                seg,
+                                SUMMARY_VOL_HORIZONS_S
+                                    .iter()
+                                    .map(|h| (h * 1_000_000_000, 1, None))
+                                    .collect(),
+                                None,
+                            ));
+                        }
+                        if let Some((current, horizons, seg_mid)) = &mut seg_state {
                             advance_segment_boundaries(
                                 &mut sessions,
-                                &old_seg,
-                                &mut horizons,
-                                old_seg.segment_end_ns,
-                                true,
-                                old_mid,
+                                current,
+                                horizons,
+                                ts,
+                                false,
+                                *seg_mid,
                                 (start, end),
                             );
                         }
-                        seg_state = Some((
-                            seg,
-                            SUMMARY_VOL_HORIZONS_S
-                                .iter()
-                                .map(|h| (h * 1_000_000_000, 1, None))
-                                .collect(),
-                            None,
-                        ));
                     }
-                    if let Some((current, horizons, seg_mid)) = &mut seg_state {
-                        advance_segment_boundaries(
-                            &mut sessions,
-                            current,
-                            horizons,
-                            ts,
-                            false,
-                            *seg_mid,
-                            (start, end),
-                        );
+                    let mid = (scale.price_f64(q.bid_px) + scale.price_f64(q.ask_px)) / 2.0;
+                    let (bid_px, ask_px) = (scale.price(q.bid_px), scale.price(q.ask_px));
+                    let width = ((ask_px - bid_px) / tick)
+                        .round()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    pending_quote = Some((mid, width, q.bid_qty, q.ask_qty));
+                    if ts >= start && acc.first_book_mid.is_none() {
+                        acc.first_book_mid = Some(decimal_key((bid_px + ask_px) / Decimal::TWO));
                     }
-                }
-                let bid = f64::try_from(q.bid_px).unwrap_or(f64::NAN);
-                let ask = f64::try_from(q.ask_px).unwrap_or(f64::NAN);
-                let mid = (bid + ask) / 2.0;
-                let width = ((q.ask_px - q.bid_px) / tick)
-                    .round()
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                pending_quote = Some((mid, width, q.bid_sz, q.ask_sz));
-                if ts >= start && acc.first_book_mid.is_none() {
-                    acc.first_book_mid = Some(decimal_key((q.bid_px + q.ask_px) / Decimal::TWO));
-                }
-                // The fixed-horizon as-of state advances on quotes only: the
-                // mid IS the quote mid, and a boundary takes the last mid at
-                // or before it.
-                if ts > start && !asof_start_frozen {
-                    asof_start = last_mid;
-                    asof_start_frozen = true;
-                }
-                for (h_ns, next_k, prev_boundary_mid) in &mut horizon_state {
-                    let horizon = *h_ns;
-                    loop {
-                        let boundary = start.saturating_add(*next_k * horizon);
-                        if ts <= boundary {
-                            break;
+                    // The fixed-horizon as-of state advances on quotes only: the
+                    // mid IS the quote mid, and a boundary takes the last mid at
+                    // or before it.
+                    if ts > start && !asof_start_frozen {
+                        asof_start = last_mid;
+                        asof_start_frozen = true;
+                    }
+                    for (h_ns, next_k, prev_boundary_mid) in &mut horizon_state {
+                        let horizon = *h_ns;
+                        loop {
+                            let boundary = start.saturating_add(*next_k * horizon);
+                            if ts <= boundary {
+                                break;
+                            }
+                            let window_start = boundary - horizon;
+                            let prev = prev_boundary_mid.or(asof_start);
+                            if let (Some(prev), Some(cur)) = (prev, last_mid)
+                                && prev > 0.0
+                                && cur > 0.0
+                                && open_throughout(calendar, window_start, boundary)
+                            {
+                                let key = (horizon / 1_000_000_000).to_string();
+                                if let Some(m) = acc.horizon_vol.get_mut(&key) {
+                                    m.push((cur / prev).ln());
+                                }
+                            }
+                            *prev_boundary_mid = last_mid;
+                            *next_k += 1;
                         }
-                        let window_start = boundary - horizon;
-                        let prev = prev_boundary_mid.or(asof_start);
-                        if let (Some(prev), Some(cur)) = (prev, last_mid)
-                            && prev > 0.0
-                            && cur > 0.0
-                            && open_throughout(calendar, window_start, boundary)
-                        {
-                            let key = (horizon / 1_000_000_000).to_string();
-                            if let Some(m) = acc.horizon_vol.get_mut(&key) {
-                                m.push((cur / prev).ln());
+                    }
+                    last_mid = Some(mid);
+                    // Segment-local as-of: only a quote inside the active
+                    // segment feeds it - never one from closed time or another
+                    // segment (rule 1's independence).
+                    if let Some(offset) = cal_offset
+                        && let Some((current, _, seg_mid)) = &mut seg_state
+                        && session_segment_at(ts, offset).as_ref() == Some(current)
+                    {
+                        *seg_mid = Some(mid);
+                    }
+                }
+                Record::Trade(t) => {
+                    if t.ts >= start && t.ts < end {
+                        *acc.size_histogram
+                            .entry(decimal_key(scale.size(t.qty)))
+                            .or_insert(0) += 1;
+                        let minute = t.ts / 60_000_000_000;
+                        let price = t.px;
+                        match &mut minute_state {
+                            Some((current, lo, hi)) if *current == minute => {
+                                *lo = (*lo).min(price);
+                                *hi = (*hi).max(price);
+                            }
+                            _ => {
+                                flush_minute(&mut acc, &mut minute_state, &scale, tick_f);
+                                minute_state = Some((minute, price, price));
                             }
                         }
-                        *prev_boundary_mid = last_mid;
-                        *next_k += 1;
+                        // Protocol-11 worst-minute detail on the exact grid: the
+                        // records serialize decimal prices and an exact integer
+                        // tick range, where the legacy histogram rounds in f64.
+                        minute_detail
+                            .entry(minute)
+                            .and_modify(|(lo, hi, count)| {
+                                if t.px < *lo {
+                                    *lo = t.px;
+                                }
+                                if t.px > *hi {
+                                    *hi = t.px;
+                                }
+                                *count += 1;
+                            })
+                            .or_insert((t.px, t.px, 1));
                     }
-                }
-                last_mid = Some(mid);
-                // Segment-local as-of: only a quote inside the active
-                // segment feeds it - never one from closed time or another
-                // segment (rule 1's independence).
-                if let Some(offset) = cal_offset
-                    && let Some((current, _, seg_mid)) = &mut seg_state
-                    && session_segment_at(ts, offset).as_ref() == Some(current)
-                {
-                    *seg_mid = Some(mid);
-                }
-            }
-            TickEvent::Trade(t) => {
-                if t.ts_event >= start && t.ts_event < end {
-                    *acc.size_histogram.entry(decimal_key(t.size)).or_insert(0) += 1;
-                    let minute = t.ts_event / 60_000_000_000;
-                    let price = f64::try_from(t.price).unwrap_or(f64::NAN);
-                    match &mut minute_state {
-                        Some((current, lo, hi)) if *current == minute => {
-                            *lo = lo.min(price);
-                            *hi = hi.max(price);
-                        }
-                        _ => {
-                            flush_minute(&mut acc, &mut minute_state, tick_f);
-                            minute_state = Some((minute, price, price));
-                        }
-                    }
-                    // Protocol-11 worst-minute detail on the exact grid: the
-                    // records serialize decimal prices and an exact integer
-                    // tick range, where the legacy histogram rounds in f64.
-                    minute_detail
-                        .entry(minute)
-                        .and_modify(|(lo, hi, count)| {
-                            if t.price < *lo {
-                                *lo = t.price;
+                    match &mut open {
+                        Some(parent) => {
+                            parent.rows += 1;
+                            if !parent.levels.contains(&t.px) {
+                                parent.levels.push(t.px);
                             }
-                            if t.price > *hi {
-                                *hi = t.price;
-                            }
-                            *count += 1;
-                        })
-                        .or_insert((t.price, t.price, 1));
-                }
-                match &mut open {
-                    Some(parent) => {
-                        parent.rows += 1;
-                        if !parent.levels.contains(&t.price) {
-                            parent.levels.push(t.price);
                         }
+                        None if !seen_trade => {
+                            // The book in force at the parent's first trade: the
+                            // last quote at or before it, in this parent or an
+                            // earlier one. None before the walk's first quote.
+                            if let Some((mid, width, bid_sz, ask_sz)) = pending_quote {
+                                open = Some(OpenParent {
+                                    quote_mid: mid,
+                                    width_ticks: width,
+                                    bid_sz,
+                                    ask_sz,
+                                    first_ts: t.ts,
+                                    first_price: t.px,
+                                    first_side: t.side,
+                                    rows: 1,
+                                    levels: vec![t.px],
+                                });
+                            }
+                        }
+                        None => {}
                     }
-                    None => {
-                        let Some((mid, width, bid_sz, ask_sz)) = pending_quote else {
-                            continue; // pre-first-quote trade: no book to attribute
-                        };
-                        open = Some(OpenParent {
-                            quote_mid: mid,
-                            width_ticks: width,
-                            bid_sz,
-                            ask_sz,
-                            first_ts: t.ts_event,
-                            first_price: t.price,
-                            first_side: t.aggressor,
-                            rows: 1,
-                            levels: vec![t.price],
-                        });
-                    }
+                    seen_trade = true;
                 }
             }
         }
-    }
-    if let Some(parent) = open.take() {
-        finalize(
-            &mut acc,
-            &mut prev_parent,
-            &mut sessions,
-            &mut prev_vol_parent,
-            &mut minute_parents,
-            parent,
-        );
+        if let Some(parent) = open.take() {
+            finalize(
+                &mut acc,
+                &mut prev_parent,
+                &mut sessions,
+                &mut prev_vol_parent,
+                &mut minute_parents,
+                parent,
+            );
+        }
     }
     // Settle the active segment's remaining boundaries: to the segment end
     // for a segment the window fully covers, to `end` (inclusive, matching
@@ -776,7 +806,7 @@ pub fn summarize(
             *next_k += 1;
         }
     }
-    flush_minute(&mut acc, &mut minute_state, tick_f);
+    flush_minute(&mut acc, &mut minute_state, &scale, tick_f);
     // The two largest minute ranges observed (not distinct values): a
     // repeated maximum is its own second maximum.
     let mut ranges = acc.minute_range_ticks_hist.iter().rev();
@@ -788,6 +818,10 @@ pub fn summarize(
             ranges.next().map_or(0, |(&next, _)| next)
         };
     }
+    let minute_detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> = minute_detail
+        .into_iter()
+        .map(|(minute, (lo, hi, count))| (minute, (scale.price(lo), scale.price(hi), count)))
+        .collect();
     acc.top_minutes = rank_top_minutes(&minute_detail, &minute_parents, tick);
     acc.session_cells = sessions.into_values().collect();
     acc
@@ -838,4 +872,80 @@ pub fn rank_top_minutes(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mogwai_data::{MemoryParents, QuoteRec, TradeRec};
+
+    /// 2026-07-06T23:00Z, inside the July 7 MNQ session.
+    const T0: u64 = 1_783_378_800_000_000_000;
+    const S: u64 = 1_000_000_000;
+
+    fn px(level: i64) -> i64 {
+        2_300_000 + 25 * level
+    }
+
+    fn quote(ts: u64, level: i64) -> Record {
+        Record::Quote(QuoteRec {
+            ts,
+            bid_px: px(level - 1),
+            ask_px: px(level + 1),
+            bid_qty: 1,
+            ask_qty: 1,
+        })
+    }
+
+    fn trade(ts: u64, level: i64, qty: u64) -> Record {
+        Record::Trade(TradeRec {
+            ts,
+            px: px(level),
+            qty,
+            side: AggressorSide::Buyer,
+        })
+    }
+
+    /// Parent statistics follow the source's divisions, and the per-record
+    /// window stays separate from parent selection. Quote inference would
+    /// read four parents here - the two quoteless parents merged into the
+    /// first, the two-quote parent split - where the source divides five;
+    /// the straddling parent counts both its trades as rows while its
+    /// post-window print stays out of the size histogram.
+    #[test]
+    fn parents_come_from_the_source_and_the_record_window_is_separate() {
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").expect("MNQ preset");
+        let end = T0 + 3 * S;
+        let scale = RecordScale::new(mogwai_protocol::Symbol::from("MNQ"), 2, 0).expect("scale");
+        let mut source = MemoryParents::new(
+            scale,
+            vec![
+                vec![quote(T0, 0), trade(T0, 0, 1)],
+                vec![trade(T0 + S, 0, 1)],
+                vec![trade(T0 + 3 * S / 2, 0, 1)],
+                vec![
+                    quote(T0 + 2 * S, 4),
+                    trade(T0 + 2 * S, 4, 1),
+                    quote(T0 + 2 * S + 1, 8),
+                    trade(T0 + 2 * S + 1, 8, 1),
+                ],
+                vec![
+                    quote(T0 + 5 * S / 2, 0),
+                    trade(T0 + 5 * S / 2, 0, 1),
+                    trade(end + 1, 0, 7),
+                ],
+                vec![quote(end, 0), trade(end, 0, 1)],
+            ],
+        );
+        let acc = summarize(&mut source, &profile, 1, T0, end);
+        assert_eq!(acc.parents(), 5);
+        assert_eq!(acc.sided_rows(), 7);
+        let value = serde_json::to_value(&acc).expect("serialize");
+        let sizes = value["size_histogram"].as_object().expect("size_histogram");
+        assert_eq!(sizes.get("1").and_then(serde_json::Value::as_u64), Some(6));
+        assert!(
+            !sizes.contains_key("7"),
+            "a print at or past `end` entered the record window: {sizes:?}"
+        );
+    }
 }

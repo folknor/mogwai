@@ -59,6 +59,7 @@ split. The sections each file carries:
 - `architecture-generator.md` - the generator, the tape identity and the fingerprint:
   - The tape identity, and what each bump changed
   - The synthetic top of book
+  - The record representation and the parent plan
   - The generator's volatility process and its three rails
   - Two structural fidelity limits no parameter can remove
   - Fingerprint ranges diagnose; mechanism validation gates

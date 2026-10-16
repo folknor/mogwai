@@ -7,8 +7,8 @@
 //!
 //! - the observed side ([`observed`]) feeds TBBO rows through the phase-1
 //!   stream layer, inferring parents from contiguous `(ts, side)` runs;
-//! - the generated side ([`generated`]) feeds `mogwai-data` `TickEvent`s and
-//!   per-parent `VolTrace` records from a walk.
+//! - the generated side ([`generated`]) reads a `mogwai-data` walk one whole
+//!   parent at a time, its compact records and its `VolTrace`.
 //!
 //! Until this engine lands, the two sides were two independent
 //! implementations - the retired Python fit implementation's `_M12aSession`/`_m12a_block*`

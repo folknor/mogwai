@@ -1,20 +1,27 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Tick storage + replay. A [`TickSource`] yields ticks in time order and the
-//! venue fans them out to subscribers as market data; a [`Permutation`] can
-//! transform them in flight (e.g. tick-rule aggressor inference).
+//! Tape storage + replay, in two representations.
 //!
-//! Two source lineages implement [`TickSource`], and they are not
-//! interchangeable - the running venue only ever uses the first:
+//! A [`RiverSource`] yields one river's compact [`Record`]s in time order:
+//! integer price and quantity mantissas at a decimal scale fixed for the river
+//! (see the `record` module). It is what the running venue reads and fans out
+//! to subscribers. A [`TickSource`] yields protocol [`TickEvent`]s, each
+//! carrying its own symbol and exact decimals, for heterogeneous offline
+//! streams; a [`Permutation`] can transform those in flight (e.g. tick-rule
+//! aggressor inference), and [`EventView`] adapts a river into that world.
 //!
-//! - [`GeneratedSource`] - the synthetic generator the running venue uses. It
-//!   synthesizes ticks from a committed fingerprint fitted offline to Kraken
-//!   trade history; it opens no file, is a pure path-dependent walk (same seed
-//!   plus tape anchor yields the same stream byte for byte), and is effectively
-//!   infinite. [`CheckpointIndex`] turns a from-origin seek over it from
-//!   O(distance) into O(K) by snapshotting the walk every K ticks and replaying
-//!   only the residual.
+//! The source lineages are not interchangeable - the running venue only ever
+//! uses the first:
+//!
+//! - [`GeneratedSource`] - the synthetic generator the running venue uses, a
+//!   [`RiverSource`] and a [`ParentSource`]. It synthesizes records from a
+//!   committed fingerprint fitted offline to Kraken trade history; it opens no
+//!   file, is a pure path-dependent walk (same seed plus tape anchor yields the
+//!   same stream byte for byte), and is effectively infinite.
+//!   [`CheckpointIndex`] turns a from-origin seek over it from O(distance)
+//!   into roughly O(K) by snapshotting the walk at parent boundaries about
+//!   every K records and replaying only the residual.
 //! - [`KrakenCsvSource`] - the offline-analysis lineage, retained for fitting
 //!   the fingerprint rather than for serving. Reads the Kraken trade-history CSV
 //!   dump: one file per pair (symbol taken from the file stem), no header, three
@@ -25,7 +32,7 @@
 //! [`MergeSource`] linearly k-way merges several single-symbol sources into one
 //! time-ordered stream, and [`MemorySource`] backs tests and the wiring skeleton.
 //!
-//! [`scan_triggers`] and [`vol_reading`] are the two bounded tape walks behind
+//! [`scan_triggers`] and [`vol_reading`] are the two bounded river walks behind
 //! the venue's fill band - one asks whether a print went through a drawn
 //! trigger, the other reads the trailing realized volatility that sized the band
 //! the trigger was drawn from. They live here, next to the sources they drain,
@@ -34,6 +41,7 @@
 
 mod bars;
 mod generated;
+mod record;
 pub mod segment;
 mod trigger;
 
@@ -62,14 +70,19 @@ pub use generated::{
     BookSnapshot, CadenceParts, CadenceWalk, CalendarError, CalibrationProvenance, CascadeConfig,
     CheckpointIndex, DepthGrowth, DepthLevels, DiscreteBook, EmpiricalRanges, Fingerprint,
     GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets, LevelFill, LogOuParams,
-    MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MinMedianMax,
-    ParentDraw, ParentSummary, PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers,
-    SIZE_LAW_ENTRIES, ScalarDiagnostic, ScalarError, SelfExcitingParams, SessionCalendar,
-    SessionEnvelope, SessionProfile, SessionProfileError, ShotNoiseParams, SizeGrid, Struck,
-    SweepShape, TickTraversal, TopOfBookSizes, TradeDisplacement, Trichotomy, VolTrace,
-    WalkOutcome, WallMmppParams, WeeklyWindow, book_mid_ticks, ladder_level_units, place_book,
+    MAX_CASCADE_COMPONENTS, MAX_LOG_OU_SIGMA_Y, MAX_MEAN_EVENT_DURATION_S, MAX_PARENT_RECORDS,
+    MAX_PRICE_DECIMALS, MinMedianMax, ParentDraw, ParentSummary, PendingReopen, PublishedBook,
+    QuotedWidth, RuntimeModifiers, SIZE_LAW_ENTRIES, SIZE_UNITS_CEILING, ScalarDiagnostic,
+    ScalarError, SelfExcitingParams, SessionCalendar, SessionEnvelope, SessionProfile,
+    SessionProfileError, ShotNoiseParams, SizeGrid, Struck, SweepShape, TickTraversal,
+    TopOfBookSizes, TradeDisplacement, Trichotomy, VolTrace, WalkOutcome, WallMmppParams,
+    WeeklyWindow, book_mid_ticks, ladder_level_units, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
+pub use record::{
+    EventView, MAX_RECORD_DP, MemoryParents, MemoryRiver, ParentSource, ParentView, Pushback,
+    QuoteRec, Record, RecordScale, RiverSource, Round, ScaleError, TradeRec, record_from_event,
+};
 pub use trigger::{
     BookState, FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk,
     book_reading, market_snapshot_reading, scan_triggers, vol_reading, vol_reading_from_trades,
@@ -216,7 +229,17 @@ pub use trigger::{
 /// shows; the protocol 33 tape's response was zero. The variance the term
 /// supplies over a minute is given up by `event_log_sigma`. Every MNQ and
 /// MES tape moves; calendar-less presets are byte-identical.
-pub const TAPE_PROTOCOL_VERSION: u32 = 34;
+/// 35 replaces the tape's representation with compact records: a generated
+/// river emits integer price and quantity mantissas at a decimal scale fixed
+/// for the river, and its wire text is written at that fixed scale (`0.00270000`
+/// where it was `0.0027`). Sizes are quantized once onto the integer grid - the
+/// spot lot-snap branch, which the decimal path never re-rounded, now lands on
+/// the eight-place grid like every other draw - and the fill band's realized
+/// volatility reads prices through one mantissa-to-float division instead of
+/// `Decimal::to_f64`. No draw moves: every stochastic stage runs in the order
+/// it did. Every generated tape's bytes move, and the protocol-9 oracle is
+/// retired with them.
+pub const TAPE_PROTOCOL_VERSION: u32 = 35;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -276,6 +299,13 @@ pub enum TickFault {
     /// The activity cascade could not advance its clock: the calendar never
     /// opens again, or the nanosecond epoch is exhausted.
     CascadeClockExhausted {
+        clock_ns: u64,
+    },
+    /// A generated river reached a price level its record cannot carry: a
+    /// tick coordinate that is not a positive integer inside the exact float
+    /// range, or whose mantissa at the river's scale overflows. The parent
+    /// that reached it publishes nothing.
+    PriceUnrepresentable {
         clock_ns: u64,
     },
 }
@@ -649,13 +679,14 @@ impl TickSource for MemorySource {
 /// Merges several already-time-ordered sources into one time-ordered stream.
 ///
 /// Each input file is sorted ascending. A linear scan of the per-source heads
-/// yields a global ordering with one buffered tick per source. Production uses
-/// one source; the offline CSV intake may merge several.
+/// yields a global ordering with one buffered tick per source. It belongs to
+/// the heterogeneous event lineage: the serving path reads one river through
+/// [`RiverSource`] and positions it with a one-record [`Pushback`], and the
+/// offline CSV intake may merge several sources here.
 ///
 /// Four behaviours here are contracts, not incidental implementation, and a
 /// 2026-08 proposal to delete this type as redundant was rejected on exactly
-/// that ground - production running one source makes the merge look like dead
-/// weight, but the offline intake path depends on all four:
+/// that ground - the offline intake path depends on all four:
 ///
 /// - The merge itself: the emitted stream is globally time-ordered across
 ///   sources, not merely per-source ordered.

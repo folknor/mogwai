@@ -946,6 +946,17 @@ impl ParentSource for ParentWalk {
                     canonical_params: None,
                     seed: None,
                 },
+                // Reachable: the generator itself raises it when a drawn
+                // price leaves the river's record range, so the screen walks
+                // straight into it and refuses with the venue's own name.
+                TickFault::PriceUnrepresentable { clock_ns } => ScreenRefusal {
+                    variant: "generated.price_unrepresentable".to_string(),
+                    clock_ns,
+                    detail: "a generated price left the river's record range".to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
                 TickFault::SegmentClockExhausted { clock_ns } => ScreenRefusal {
                     variant: "segment.clock_exhausted".to_string(),
                     clock_ns,

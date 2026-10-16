@@ -254,7 +254,7 @@ fn history_or_warn(
     river: &source::RiverKey,
     start: u64,
     what: &'static str,
-) -> Option<Box<dyn mogwai_data::TickSource>> {
+) -> Option<Box<dyn mogwai_data::RiverSource>> {
     let symbol = river.symbol();
     match rivers.history_source(river, Some(start)) {
         Ok(source) => Some(source),
@@ -312,8 +312,10 @@ pub(crate) fn scan_triggers(
 /// Unpaced tape publication can run arbitrarily ahead of its boat clock, so
 /// its tape-thread accumulator cannot describe the clock-bounded span the
 /// engine is allowed to observe. The sweeper regenerates that short span from
-/// the same river instead. The outer `None` is a failed read; the inner `None`
-/// is the ordinary answer that the span contained no trade.
+/// the same river instead. The outer `None` is a failed read - including a
+/// river that faulted inside the span, which proves nothing about the rest of
+/// it; the inner `None` is the ordinary answer that the span contained no
+/// trade.
 pub(crate) fn price_span(
     river: &source::RiverKey,
     from_ns: u64,
@@ -329,20 +331,29 @@ pub(crate) fn price_span(
     let mut span = None;
     let mut drained = 0usize;
     while drained < SWEEP_DRAIN_BUDGET {
-        let Some(tick) = source.next_tick() else {
+        let Some(record) = source.next_record() else {
+            if let Some(fault) = source.fault() {
+                tracing::warn!(
+                    symbol = river.symbol(),
+                    ?fault,
+                    "price-extremes scan hit a river fault"
+                );
+                return None;
+            }
             break;
         };
-        if tick.ts_event() > to_ns {
+        if record.ts() > to_ns {
             return Some(span);
         }
         drained += 1;
-        if let mogwai_data::TickEvent::Trade(trade) = tick {
+        if let mogwai_data::Record::Trade(trade) = record {
+            let price = source.scale().price(trade.px);
             match &mut span {
                 Some(span) => {
-                    span.fold(trade.price, trade.ts_event);
+                    span.fold(price, trade.ts);
                 }
                 slot @ None => {
-                    *slot = Some(crate::extremes::PriceSpan::of(trade.price, trade.ts_event));
+                    *slot = Some(crate::extremes::PriceSpan::of(price, trade.ts));
                 }
             }
         }
@@ -382,6 +393,19 @@ fn scan_triggers_with_budget(
         })
         .collect();
     let mut walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, budget);
+    // A faulted walk still reports the frontier it proved before the fault,
+    // and the caller advances to exactly that and no further, so the fault
+    // cannot retire a span the river never produced. It is named here because
+    // nothing downstream of the walk would otherwise say why the frontier
+    // stopped moving.
+    if let Some(fault) = walk.fault {
+        tracing::warn!(
+            symbol = river.symbol(),
+            ?fault,
+            reached_ns = walk.reached_ns,
+            "fill scan stopped on a river fault"
+        );
+    }
     // The walk read the river; only this side of the seam can resolve the
     // instrument. Stamping the ladder here is what turns the walk's unresolved
     // books into ones the engine may cross, and it is the same resolution the
@@ -635,7 +659,7 @@ pub(crate) fn test_rivers_with_a_second_symbol() -> std::sync::Arc<source::River
 
 #[cfg(test)]
 mod tests {
-    use mogwai_data::{TickEvent, TickSource};
+    use mogwai_data::{Record, RiverSource};
     use mogwai_engine::PendingScan;
     use mogwai_protocol::Side;
 
@@ -647,7 +671,7 @@ mod tests {
         super::test_rivers()
     }
 
-    fn tape(start: u64) -> Box<dyn TickSource> {
+    fn tape(start: u64) -> Box<dyn RiverSource> {
         let rivers = profiles();
         let river = rivers.test_key("BTCUSDT");
         rivers.history_source(&river, Some(start)).expect("history")
@@ -657,11 +681,26 @@ mod tests {
         let mut tape = tape(start);
         let mut out = Vec::with_capacity(count);
         while out.len() < count {
-            if let TickEvent::Trade(tick) = tape.next_tick().expect("infinite generated tape") {
-                out.push((tick.ts_event, tick.price));
+            if let Record::Trade(trade) = tape.next_record().expect("infinite generated tape") {
+                out.push((trade.ts, tape.scale().price(trade.px)));
             }
         }
         out
+    }
+
+    /// A resident window fed from `start` through the first record past
+    /// `horizon`, the way the boat's tape thread feeds it.
+    fn fed_window(start: u64, horizon: u64) -> crate::vol_window::VolWindow {
+        let mut feed = tape(start + 1);
+        let window = crate::vol_window::VolWindow::starting_at(start, feed.scale().clone());
+        loop {
+            let record = feed.next_record().expect("infinite generated tape");
+            window.fold(&record);
+            if record.ts() > horizon {
+                break;
+            }
+        }
+        window
     }
 
     fn scan(id: &str, side: Side, trigger_px: Decimal, from_ns: u64) -> PendingScan {
@@ -881,29 +920,7 @@ mod tests {
         let rivers = profiles();
         let bucket = (TEST_ORIGIN + 3_600_000_000_000) / BUCKET_NS * BUCKET_NS;
         let from = bucket - VOL_WINDOW_NS;
-        let window = crate::vol_window::VolWindow::starting_at(from);
-        let mut source = tape(from + 1);
-        loop {
-            let tick = source.next_tick().expect("infinite generated tape");
-            let (ts, px, book) = match tick {
-                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price), None),
-                TickEvent::Quote(quote) => (
-                    quote.ts_event,
-                    None,
-                    Some(mogwai_data::BookState {
-                        bid_px: quote.bid_px,
-                        ask_px: quote.ask_px,
-                        bid_sz: quote.bid_sz,
-                        ask_sz: quote.ask_sz,
-                        ts_ns: quote.ts_event,
-                    }),
-                ),
-            };
-            window.fold(ts, px, book);
-            if ts > bucket {
-                break;
-            }
-        }
+        let window = fed_window(from, bucket);
         let resident = MarketReadingCache::for_symbol("BTCUSDT", &rivers);
         let walked = MarketReadingCache::for_symbol("BTCUSDT", &rivers);
         let a = resident
@@ -1212,29 +1229,8 @@ mod tests {
         // above regenerated. Fed here the way the boat's tape thread feeds it,
         // from a source positioned the way `read_market` positions its own.
         let window_from = base_ts.saturating_sub(VOL_WINDOW_NS);
-        let window = crate::vol_window::VolWindow::starting_at(window_from);
-        let mut feed = tape(window_from + 1);
         let horizon = base_ts + 100 * INTERVAL_MS * 1_000_000;
-        loop {
-            let (ts, px, book) = match feed.next_tick().expect("infinite generated tape") {
-                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price), None),
-                TickEvent::Quote(quote) => (
-                    quote.ts_event,
-                    None,
-                    Some(mogwai_data::BookState {
-                        bid_px: quote.bid_px,
-                        ask_px: quote.ask_px,
-                        bid_sz: quote.bid_sz,
-                        ask_sz: quote.ask_sz,
-                        ts_ns: quote.ts_event,
-                    }),
-                ),
-            };
-            window.fold(ts, px, book);
-            if ts > horizon {
-                break;
-            }
-        }
+        let window = fed_window(window_from, horizon);
         let resident_cache = MarketReadingCache::for_symbol("BTCUSDT", &profiles);
         let mut resident_samples = Vec::with_capacity(100);
         for k in 0..100_u64 {

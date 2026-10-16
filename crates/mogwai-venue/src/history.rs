@@ -144,7 +144,7 @@ pub(crate) struct PageRequest<'a> {
 
 /// Synthesize one page of this passenger's own river.
 ///
-/// Runs the generator walk, so it belongs on a blocking thread: `next_tick`
+/// Runs the generator walk, so it belongs on a blocking thread: `next_record`
 /// never blocks on IO but never ends either, and a page grinds until it fills
 /// or crosses its cutoff.
 pub(crate) fn serve_page(rivers: &Rivers, request: &PageRequest<'_>) -> Result<Page, Refusal> {

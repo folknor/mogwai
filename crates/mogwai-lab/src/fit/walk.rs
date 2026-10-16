@@ -328,6 +328,14 @@ pub fn run_summary_walk(
         start_ns as u64,
         end as u64,
     );
+    // `summarize` stops at the first parent past `end` or at the source's
+    // terminal `None`; only the second can be a fault, and a fault-cut walk is
+    // not a summary of the window it was asked for.
+    if let Some(fault) = mogwai_data::RiverSource::fault(&source) {
+        return Err(LabError::refusal(format!(
+            "the generator faulted before the window's end: {fault:?}"
+        )));
+    }
     Ok(serde_json::to_value(&acc)?)
 }
 

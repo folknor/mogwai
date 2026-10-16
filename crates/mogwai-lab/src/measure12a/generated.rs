@@ -12,15 +12,22 @@
 //! so the 12a landing owed no `TAPE_PROTOCOL_VERSION` bump (spec 2.3; the
 //! constant has since moved for unrelated generator changes).
 //!
-//! Parent inference on this side is event-shaped, not row-shaped: a quote
-//! closes the parent that ran under the previous book and becomes the pending
-//! book; the next sided trade opens a parent against it; an unsided print
-//! terminates the open parent, exactly as an `N` row does on the observed
-//! side.
+//! Parents come from the source, not from inference: [`GeneratedAcc::walk`]
+//! and [`GeneratedAcc::push_parent`] read one whole parent at a time from a
+//! `ParentSource`, because quotes are not a parent boundary signal - the
+//! discrete-book path can publish two quotes for one parent or none. Within a
+//! parent the first sided trade opens it against the book in force (the last
+//! quote at or before that trade, in this parent or an earlier one) and the
+//! parent's own `VolTrace`; an unsided print terminates the open parent,
+//! exactly as an `N` row does on the observed side.
+//!
+//! [`GeneratedAcc::push_quote`] and [`GeneratedAcc::push_trade`] remain as
+//! the event-shaped entry for hand-built streams with no parent divisions:
+//! there a quote closes the open parent and stands in for the boundary.
 
 use std::collections::BTreeMap;
 
-use mogwai_data::VolTrace;
+use mogwai_data::{ParentSource, ParentView, Record, RecordScale, VolTrace};
 use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 use rust_decimal::Decimal;
 
@@ -52,6 +59,33 @@ fn price_nanos(value: Decimal) -> LabResult<i64> {
         .map_err(|_| LabError::refusal(format!("price {value} overflows i64 nano units")))
 }
 
+/// A record price mantissa at `dp` places in exact 1e-9 units, by integer
+/// arithmetic alone. A scale coarser than nine places multiplies, checked; a
+/// finer one divides only when the mantissa lies on the 1e-9 grid, and
+/// refuses otherwise rather than truncating - the same two refusals
+/// [`price_nanos`] makes for a decimal.
+pub(crate) fn mantissa_nanos(mantissa: i64, dp: u32) -> LabResult<i64> {
+    if dp <= 9 {
+        let up = 10_i64.pow(9 - dp);
+        mantissa.checked_mul(up).ok_or_else(|| {
+            LabError::refusal(format!(
+                "price mantissa {mantissa} at {dp} places overflows i64 nano units"
+            ))
+        })
+    } else {
+        // `dp` is at most `MAX_RECORD_DP` (18), so `10^(dp - 9)` fits.
+        let down = 10_i64.checked_pow(dp - 9).ok_or_else(|| {
+            LabError::refusal(format!("a {dp}-place price scale is past the record limit"))
+        })?;
+        if mantissa % down != 0 {
+            return Err(LabError::refusal(format!(
+                "price mantissa {mantissa} at {dp} places is off the 1e-9 grid"
+            )));
+        }
+        Ok(mantissa / down)
+    }
+}
+
 /// The previous measured parent (first child in `[start, end)`), for
 /// `sigma_start` and the deferred ARCH share. Burn-in parents never enter.
 struct PrevParent {
@@ -81,7 +115,12 @@ pub struct GeneratedAcc {
     tick_f: f64,
     session: Option<SessionAcc>,
     sessions_out: Vec<serde_json::Value>,
+    /// The event path's pending book: set by a quote, taken by the parent it
+    /// opens.
     pending_quote: Option<(i64, i64, Option<VolTrace>)>,
+    /// The parent path's book in force: the last quote read, in nano units.
+    /// Never taken, because a parent need not publish a quote of its own.
+    book_in_force: Option<(i64, i64)>,
     open_parent: Option<OpenParent>,
     minutes: BTreeMap<u64, MinuteRec>,
     open_minute: Option<u64>,
@@ -130,6 +169,7 @@ impl GeneratedAcc {
             session: None,
             sessions_out: Vec::new(),
             pending_quote: None,
+            book_in_force: None,
             open_parent: None,
             minutes: BTreeMap::new(),
             open_minute: None,
@@ -139,8 +179,68 @@ impl GeneratedAcc {
         }
     }
 
+    /// Drive the accumulator over `source` a whole parent at a time, stopping
+    /// before the first parent that begins at or past the measured window's
+    /// end. A walk the source cut short by a fault refuses: exhaustion would
+    /// otherwise read as a complete window and emit its sessions as measured.
+    pub fn walk(&mut self, source: &mut dyn ParentSource) -> LabResult<()> {
+        let scale = source.scale().clone();
+        while let Some(view) = source.next_parent() {
+            if view.records[0].ts() >= self.end {
+                return Ok(());
+            }
+            self.push_parent(&scale, &view)?;
+        }
+        match source.fault() {
+            Some(fault) => Err(LabError::refusal(format!(
+                "the generator faulted before the measured window's end: {fault:?}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Fold one whole parent read at `scale`. The view is the boundary: any
+    /// parent still open from an earlier view is closed first, and at most one
+    /// parent opens per view, at its first sided trade, against the book in
+    /// force and the view's own trace.
+    pub fn push_parent(&mut self, scale: &RecordScale, view: &ParentView<'_>) -> LabResult<()> {
+        self.close_open_parent()?;
+        let dp = scale.price_dp();
+        let mut opened = false;
+        for record in view.records {
+            match *record {
+                Record::Quote(q) => {
+                    self.book_in_force =
+                        Some((mantissa_nanos(q.bid_px, dp)?, mantissa_nanos(q.ask_px, dp)?));
+                }
+                Record::Trade(t) => {
+                    self.print(t.ts, || mantissa_nanos(t.px, dp))?;
+                    if matches!(t.side, AggressorSide::NoAggressor) {
+                        self.close_open_parent()?;
+                        continue;
+                    }
+                    if !opened && self.open_parent.is_none() {
+                        opened = true;
+                        let Some((bid, ask)) = self.book_in_force else {
+                            continue; // a pre-first-quote trade: no book
+                        };
+                        self.open_parent = Some(OpenParent {
+                            first_ts: t.ts,
+                            bid_nanos: bid,
+                            ask_nanos: ask,
+                            normal_book: bid < ask && bid > 0,
+                            trace: view.trace,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A quote closes the parent that ran under the previous book and becomes
-    /// the pending book for the next one.
+    /// the pending book for the next one. The event-shaped entry; see the
+    /// module documentation.
     pub fn push_quote(&mut self, q: &QuoteTick, trace: Option<VolTrace>) -> LabResult<()> {
         self.close_open_parent()?;
         self.pending_quote = Some((price_nanos(q.bid_px)?, price_nanos(q.ask_px)?, trace));
@@ -148,53 +248,7 @@ impl GeneratedAcc {
     }
 
     pub fn push_trade(&mut self, t: &TradeTick) -> LabResult<()> {
-        // Measured means inside the window and inside a segment of the lab's
-        // session frame. The frame carves a 15:15 to 15:30 Chicago halt that
-        // the exchange does not have (its status feed shows none, and the
-        // venue's MNQ calendar stopped carving it at tape protocol 31), so a
-        // generated print can now land in a minute the frame calls closed.
-        // The observed pass drops the real prints in that minute because they
-        // resolve to no usable session; this pass drops the generated ones
-        // for the same reason, so the two sides of the measurement exclude
-        // the same fifteen minutes rather than one side refusing the tape.
-        let in_window = t.ts_event >= self.start
-            && t.ts_event < self.end
-            && session_segment_at(t.ts_event, self.offset).is_some();
-        // Session rotation on the trade's own instant.
-        if in_window && let Some(seg) = session_segment_at(t.ts_event, self.offset) {
-            let rotate = self
-                .session
-                .as_ref()
-                .is_none_or(|s| s.session_start_ns != seg.session_start_ns);
-            if rotate {
-                self.close_open_parent()?;
-                self.close_session()?;
-                self.session = Some(self.new_session(&seg));
-            }
-        }
-        if in_window {
-            let price = price_nanos(t.price)?;
-            let minute = t.ts_event / NS_PER_MIN;
-            if let Some(session) = &mut self.session {
-                session.push_print(t.ts_event, price);
-            }
-            let rec = self.forensic_minute(minute, t.ts_event)?;
-            rec.trade_count += 1;
-            match (&mut rec.trade_lo, &mut rec.trade_hi) {
-                (Some(lo), Some(hi)) => {
-                    if price < *lo {
-                        *lo = price;
-                    }
-                    if price > *hi {
-                        *hi = price;
-                    }
-                }
-                _ => {
-                    rec.trade_lo = Some(price);
-                    rec.trade_hi = Some(price);
-                }
-            }
-        }
+        self.print(t.ts_event, || price_nanos(t.price))?;
         // An unsided print terminates the parent, like the observed side.
         if matches!(t.aggressor, AggressorSide::NoAggressor) {
             self.close_open_parent()?;
@@ -211,6 +265,60 @@ impl GeneratedAcc {
                 normal_book: bid < ask && bid > 0,
                 trace,
             });
+        }
+        Ok(())
+    }
+
+    /// The per-print half of a trade, shared by both entries: session
+    /// rotation and the in-window print and forensic-minute accumulation.
+    /// `price` is converted only for a measured print, so an off-grid print
+    /// outside the window refuses nothing.
+    fn print(&mut self, ts: u64, price: impl FnOnce() -> LabResult<i64>) -> LabResult<()> {
+        // Measured means inside the window and inside a segment of the lab's
+        // session frame. The frame carves a 15:15 to 15:30 Chicago halt that
+        // the exchange does not have (its status feed shows none, and the
+        // venue's MNQ calendar stopped carving it at tape protocol 31), so a
+        // generated print can now land in a minute the frame calls closed.
+        // The observed pass drops the real prints in that minute because they
+        // resolve to no usable session; this pass drops the generated ones
+        // for the same reason, so the two sides of the measurement exclude
+        // the same fifteen minutes rather than one side refusing the tape.
+        let in_window =
+            ts >= self.start && ts < self.end && session_segment_at(ts, self.offset).is_some();
+        // Session rotation on the trade's own instant.
+        if in_window && let Some(seg) = session_segment_at(ts, self.offset) {
+            let rotate = self
+                .session
+                .as_ref()
+                .is_none_or(|s| s.session_start_ns != seg.session_start_ns);
+            if rotate {
+                self.close_open_parent()?;
+                self.close_session()?;
+                self.session = Some(self.new_session(&seg));
+            }
+        }
+        if in_window {
+            let price = price()?;
+            let minute = ts / NS_PER_MIN;
+            if let Some(session) = &mut self.session {
+                session.push_print(ts, price);
+            }
+            let rec = self.forensic_minute(minute, ts)?;
+            rec.trade_count += 1;
+            match (&mut rec.trade_lo, &mut rec.trade_hi) {
+                (Some(lo), Some(hi)) => {
+                    if price < *lo {
+                        *lo = price;
+                    }
+                    if price > *hi {
+                        *hi = price;
+                    }
+                }
+                _ => {
+                    rec.trade_lo = Some(price);
+                    rec.trade_hi = Some(price);
+                }
+            }
         }
         Ok(())
     }
@@ -278,7 +386,10 @@ impl GeneratedAcc {
         };
         let index = u8::from(seg.segment_origin_ns != seg.session_start_ns);
         let minute = parent.first_ts / NS_PER_MIN;
-        let sum = parent.bid_nanos + parent.ask_nanos;
+        let sum = parent
+            .bid_nanos
+            .checked_add(parent.ask_nanos)
+            .ok_or_else(|| LabError::refusal("a quote mid overflows i64 nano units".to_string()))?;
         let half_tick_mid = if parent.normal_book {
             Some(exact_div(sum, self.tick_nanos, "quote-mid half-ticks")?)
         } else {

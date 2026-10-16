@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use mogwai_data::{TickEvent, TickSource};
 use mogwai_venue::source::InstrumentProfile;
 use serde_json::{Value, json};
 
@@ -376,18 +375,7 @@ pub fn control_generated_pass(
         i32::from(calendar.utc_offset_minutes),
         profile.scalars.modal_tick,
     );
-    while let Some(event) = source.next_tick() {
-        if event.ts_event() >= end {
-            break;
-        }
-        match event {
-            TickEvent::Quote(q) => {
-                let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace)?;
-            }
-            TickEvent::Trade(t) => acc.push_trade(&t)?,
-        }
-    }
+    acc.walk(&mut source)?;
     acc.finish()
 }
 
@@ -843,8 +831,8 @@ mod tests {
     /// It is not `#[ignore]`d and does not want to be: it measures comfortably
     /// inside the per-test watchdog in every sweep. No number is pinned here on
     /// purpose - a wall stated in a doc comment has to be re-measured forever to
-    /// stay true, which is the same ground on which this round deleted a stale
-    /// cost string from `protocol9_tape_oracle`.
+    /// stay true, which is the same ground on which a stale cost string was
+    /// once deleted from the tape oracle in `mogwai-cli`'s `gen` module.
     #[test]
     fn the_control_walk_pair_replays_one_tape() {
         let binding = GeneratedBinding {

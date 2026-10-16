@@ -377,7 +377,10 @@ impl Boatyard {
             // passenger closes and drops its ticket.
             let sim = crate::config::delivery_clock(origin_ns, now_ns(), speed);
             let extremes = Arc::new(crate::extremes::PriceExtremes::default());
-            let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(origin_ns));
+            let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(
+                origin_ns,
+                cursor.scale().clone(),
+            ));
             let (tape, worker) = Tape::start(
                 cursor,
                 TapeSpawn {

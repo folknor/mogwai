@@ -15,7 +15,7 @@ autotests = false
 # the fits, synthesis, arrival instruments and sidecar built on them.
 #
 # It depends on mogwai-data and mogwai-protocol for the generated measurement
-# side - the TickEvent/VolTrace/Decimal types a walk emits - and only ever
+# side - the Record/RecordScale/VolTrace types a walk emits - and only ever
 # reads them. Nothing here adds, changes or observes a draw, so the crate
 # carries no TAPE_PROTOCOL_VERSION obligation of its own (spec 2.3, the same
 # consumer-only standing measure12a.rs has).

@@ -137,7 +137,6 @@ fn parity12a_observed_per_session_matches_the_committed_artifact() {
 /// `FINAL_START_NS - SUMMARY_BURN_IN` with the vol trace enabled, measuring
 /// `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.
 fn run_final_walk(seed: u64) -> serde_json::Value {
-    use mogwai_data::{TickEvent, TickSource};
     use mogwai_lab::subcontract::{FINAL_LENGTH, FINAL_START_NS, SUMMARY_BURN_IN};
 
     let profile = mogwai_venue::config::profile_from_preset("MNQ")
@@ -180,18 +179,7 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
         offset,
         profile.scalars.modal_tick,
     );
-    while let Some(event) = source.next_tick() {
-        if event.ts_event() >= end {
-            break;
-        }
-        match event {
-            TickEvent::Quote(q) => {
-                let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace).expect("quote");
-            }
-            TickEvent::Trade(t) => acc.push_trade(&t).expect("trade"),
-        }
-    }
+    acc.walk(&mut source).expect("the generated walk refused");
     acc.finish()
         .expect("the generated measurement pass refused")
 }

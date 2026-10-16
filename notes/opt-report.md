@@ -499,6 +499,18 @@ BTCUSDT stream the walk went from 5.8 s to 2.5 s; what remains is about
 1.5 s of draws (unoptimized ChaCha12 and the samplers), 1.2 s of
 `Decimal` Display in the harness, and the rest materialization.
 
+### Priorities 1 and 2, landed as tape protocol 35
+
+Compact records (`mogwai_data::record`), whole-parent plans, boundary-only
+checkpoints, the wire frame written straight from integers, compiled integer
+trigger thresholds, and parent views for the lab consumers. Byte-moving: the
+protocol-9 oracle is retired for a wire-frame oracle
+(`analysis/tape-oracle-hashes.json`), goldens re-blessed with only the
+spelling moved. Lateral fixes that rode along: `last_trade_at_or_before`
+returned an earlier print when its budget ran out between two qualifying
+prints; several walks read a river fault as clean exhaustion. Not yet
+measured for speed; the debug-slow tests below have not been re-timed.
+
 ### Not done, and why
 
 - Chi-squared closed form (local change 5): byte-moving.
@@ -542,6 +554,39 @@ watchdog. Its lag-50 autocorrelations need one continuous series, so it
 cannot be split the way the dwell arms were. Options are a split into
 shorter multi-seed arms after measuring their margins, a release sweep
 inside the gate, or priority 4.
+
+### Failing under the gate, not timing out
+
+Both bind a loopback listener, so only `brokkr check --gate` runs them, and
+both fail an assertion rather than the watchdog. They fail identically on
+the 2026-10-16 committed tree, before the record rewrite, so the rewrite did
+not cause them.
+
+| Test | File | Observed |
+|---|---|---|
+| `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline` | `crates/mogwai-cli/tests/completion.rs` | serves about 1.968 s of a declared 2 s, below the 1.98 s `boat_skew_floor` |
+| `a_short_accelerated_run_is_not_over_before_it_is_ready` | `crates/mogwai-cli/tests/completion.rs` | fails in the same gate run; not yet examined alone |
+
+The shortfall is about 32 ms on every run, and `elapsed_ns` counts from the
+boat's placement, so the likely cause is a slower placement (the warmup
+reach) in an unoptimized dev build. Not yet confirmed.
+
+### Failing under the gate, not timing out
+
+Both bind a loopback listener, so only `brokkr check --gate` runs them, and
+both fail an assertion rather than the watchdog. The first fails identically
+on the 2026-10-16 committed tree, before the record rewrite, so the rewrite
+did not cause it. Either fallout of the debug-build slowdown or something
+else; needs looking into once the planned work lands.
+
+| Test | File | Observed |
+|---|---|---|
+| `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline` | `crates/mogwai-cli/tests/completion.rs` | serves about 1.968 s of a declared 2 s, below the 1.98 s `boat_skew_floor` |
+| `a_short_accelerated_run_is_not_over_before_it_is_ready` | `crates/mogwai-cli/tests/completion.rs` | failed in the same gate run; not yet examined alone |
+
+The shortfall is about 32 ms on every run, and `elapsed_ns` counts from the
+boat's placement, so the likely cause is a slower placement (the warmup
+reach) in an unoptimized dev build. Not yet confirmed.
 
 ### Near the watchdog, still enabled
 

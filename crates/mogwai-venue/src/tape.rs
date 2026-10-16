@@ -4,7 +4,7 @@
 //! One boat-owned paced tape and its bounded broadcast fanout.
 
 use crate::config::{now_ns, sim_now_ns};
-use mogwai_data::TickFault;
+use mogwai_data::{Record, RiverSource, TickFault};
 use mogwai_protocol::{FundingTerms, SimClock, Symbol, VenueMessage};
 use rust_decimal::Decimal;
 use std::{
@@ -63,7 +63,7 @@ pub(crate) struct TapeFunding {
 }
 impl Tape {
     pub(crate) fn start(
-        mut cursor: Box<dyn mogwai_data::TickSource + Send>,
+        mut cursor: Box<dyn RiverSource + Send>,
         spawn: TapeSpawn,
     ) -> (Arc<Self>, thread::JoinHandle<()>) {
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
@@ -87,14 +87,27 @@ impl Tape {
             // scheduling point. Only an unpaced tape uses it; a paced one sleeps
             // to a wall deadline and yields by doing so.
             let mut since_yield: u32 = 0;
-            let mut last_mark: Option<Decimal> = None;
+            // The boat's river scale, fixed for its life, and one frame buffer
+            // reused for every record: a frame is written straight from the
+            // record's integers, then copied once into the shared payload.
+            let scale = cursor.scale().clone();
+            let mut frame = String::new();
+            // The last trade's price mantissa; read as a decimal only when a
+            // funding instant actually needs a mark.
+            let mut last_mark: Option<i64> = None;
             let mut prev_ts: Option<u64> = None;
             while !worker.cancel.load(Ordering::Relaxed) {
-                let Some(tick) = cursor.next_tick() else {
+                let Some(record) = cursor.next_record() else {
                     if let (Some(funding), Some(mark), Some(prev)) =
                         (&spawn.funding, last_mark, prev_ts)
                     {
-                        publish_funding_span(&worker, funding, prev, sim_now_ns(spawn.sim), mark);
+                        publish_funding_span(
+                            &worker,
+                            funding,
+                            prev,
+                            sim_now_ns(spawn.sim),
+                            scale.price(mark),
+                        );
                     }
                     if let Some(fault) = cursor.fault() {
                         *worker
@@ -107,30 +120,12 @@ impl Tape {
                     spawn.vol_window.close();
                     break;
                 };
-                match &tick {
-                    mogwai_data::TickEvent::Trade(trade) => {
-                        spawn
-                            .vol_window
-                            .fold(trade.ts_event, Some(trade.price), None);
-                    }
-                    mogwai_data::TickEvent::Quote(quote) => {
-                        spawn.vol_window.fold(
-                            quote.ts_event,
-                            None,
-                            Some(mogwai_data::BookState {
-                                bid_px: quote.bid_px,
-                                ask_px: quote.ask_px,
-                                bid_sz: quote.bid_sz,
-                                ask_sz: quote.ask_sz,
-                                ts_ns: quote.ts_event,
-                            }),
-                        );
-                    }
-                }
+                spawn.vol_window.fold(&record);
+                let ts_event = record.ts();
                 pace(
                     &worker,
                     &spawn,
-                    tick.ts_event(),
+                    ts_event,
                     wall_anchor,
                     instant_anchor,
                     &mut since_yield,
@@ -138,45 +133,36 @@ impl Tape {
                 if worker.cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                let ts_event = tick.ts_event();
                 if let (Some(funding), Some(mark), Some(prev)) =
                     (&spawn.funding, last_mark, prev_ts)
                 {
-                    publish_funding_span(&worker, funding, prev, ts_event, mark);
+                    publish_funding_span(&worker, funding, prev, ts_event, scale.price(mark));
                 }
+                let next_mark = match record {
+                    Record::Trade(trade) => Some(trade.px),
+                    Record::Quote(_) => None,
+                };
                 // Trades only, and that is the same rule the mark reads follow:
                 // a mark is a last-print read, so an extreme drawn from quotes
                 // would be an extreme no fill or valuation could ever have been
                 // taken at. Recorded before publication, so a reader that takes
                 // the span after seeing a frame cannot miss that frame's price.
                 if spawn.speed != 0.0
-                    && let mogwai_data::TickEvent::Trade(trade) = &tick
+                    && let Some(px) = next_mark
                 {
-                    spawn.extremes.record(&mut span, trade.price, ts_event);
+                    spawn.extremes.record(&mut span, scale.price(px), ts_event);
                 }
-                let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));
-                let next_mark = match &tick {
-                    mogwai_data::TickEvent::Trade(trade) => Some(trade.price),
-                    mogwai_data::TickEvent::Quote(_) => None,
-                };
-                let event = match tick {
-                    mogwai_data::TickEvent::Trade(trade) => {
-                        mogwai_protocol::VenueMessage::Trade(trade)
-                    }
-                    mogwai_data::TickEvent::Quote(quote) => {
-                        mogwai_protocol::VenueMessage::Quote(quote)
-                    }
-                };
-                let Ok(payload) = serde_json::to_string(&event) else {
-                    break;
-                };
-                let frame = TapeFrame {
-                    payload: Arc::from(payload),
-                    ts_event,
-                };
-                worker.publish(frame, is_quote);
-                if let Some(mark) = next_mark {
-                    last_mark = Some(mark);
+                frame.clear();
+                scale.write_frame(&record, &mut frame);
+                worker.publish(
+                    TapeFrame {
+                        payload: Arc::from(frame.as_str()),
+                        ts_event,
+                    },
+                    matches!(record, Record::Quote(_)),
+                );
+                if next_mark.is_some() {
+                    last_mark = next_mark;
                 }
                 prev_ts = Some(ts_event);
             }
@@ -587,8 +573,8 @@ mod snapshot_tests {
 #[cfg(test)]
 mod funding_emission_tests {
     use super::*;
-    use mogwai_data::{MemorySource, TickEvent, TickSource};
-    use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
+    use mogwai_data::{MemoryRiver, QuoteRec, RecordScale, TradeRec};
+    use mogwai_protocol::AggressorSide;
 
     const INTERVAL: u64 = 28_800_000_000_000;
     /// One minute, for the tests that actually read the index river. An instant
@@ -605,36 +591,43 @@ mod funding_emission_tests {
     /// before it existed - so the test would pass or fail on a race.
     struct GatedSource {
         gate: Option<std::sync::mpsc::Receiver<()>>,
-        inner: MemorySource,
+        inner: MemoryRiver,
     }
 
-    impl TickSource for GatedSource {
-        fn next_tick(&mut self) -> Option<TickEvent> {
+    impl RiverSource for GatedSource {
+        fn scale(&self) -> &RecordScale {
+            self.inner.scale()
+        }
+
+        fn next_record(&mut self) -> Option<Record> {
             if let Some(gate) = self.gate.take() {
                 let _opened = gate.recv();
             }
-            self.inner.next_tick()
+            self.inner.next_record()
         }
     }
 
-    fn trade(price: i64, ts_event: u64) -> TickEvent {
-        TickEvent::Trade(TradeTick {
-            symbol: SYMBOL.into(),
-            price: Decimal::from(price),
-            size: Decimal::ONE,
-            aggressor: AggressorSide::Buyer,
-            ts_event,
+    /// Whole-unit prices and sizes, so `price` below is the decimal it reads as.
+    fn scale() -> RecordScale {
+        RecordScale::new(SYMBOL.into(), 0, 0).expect("a valid scale")
+    }
+
+    fn trade(price: i64, ts: u64) -> Record {
+        Record::Trade(TradeRec {
+            ts,
+            px: price,
+            qty: 1,
+            side: AggressorSide::Buyer,
         })
     }
 
-    fn quote(ts_event: u64) -> TickEvent {
-        TickEvent::Quote(QuoteTick {
-            symbol: SYMBOL.into(),
-            bid_px: Decimal::from(99),
-            ask_px: Decimal::from(101),
-            bid_sz: Decimal::ONE,
-            ask_sz: Decimal::ONE,
-            ts_event,
+    fn quote(ts: u64) -> Record {
+        Record::Quote(QuoteRec {
+            ts,
+            bid_px: 99,
+            ask_px: 101,
+            bid_qty: 1,
+            ask_qty: 1,
         })
     }
 
@@ -699,7 +692,7 @@ mod funding_emission_tests {
 
     /// Every frame the tape published, in publication order, decoded.
     fn frames(
-        ticks: Vec<TickEvent>,
+        ticks: Vec<Record>,
         funding: Option<TapeFunding>,
         sim_now_ns: u64,
     ) -> Vec<VenueMessage> {
@@ -707,7 +700,7 @@ mod funding_emission_tests {
         let (open, gate) = std::sync::mpsc::channel();
         let cursor = GatedSource {
             gate: Some(gate),
-            inner: MemorySource::new(ticks),
+            inner: MemoryRiver::new(scale(), ticks),
         };
         let (tape, handle) = Tape::start(
             Box::new(cursor),
@@ -724,7 +717,7 @@ mod funding_emission_tests {
                 fanout_depth: 256,
                 fault_tx,
                 extremes: Arc::new(crate::extremes::PriceExtremes::default()),
-                vol_window: Arc::new(crate::vol_window::VolWindow::starting_at(0)),
+                vol_window: Arc::new(crate::vol_window::VolWindow::starting_at(0, scale())),
                 funding,
             },
         );

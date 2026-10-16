@@ -21,16 +21,16 @@
 //!   depletion, the frozen ladder and the projection against the latent
 //!   anchor. Pure state and transitions;
 //!   the emission plan and the wire stay in `source`.
-//! - `numeric` - small numeric helpers (range checks, saturating decimal
-//!   conversion, round-lot snapping).
-//! - `source` - `GeneratedSource` itself, the `TickSource` the running venue
-//!   drives.
-//! - `checkpoint` - `CheckpointIndex`, the O(K) seek accelerator over a
-//!   `GeneratedSource` realization.
+//! - `numeric` - small numeric helpers: the saturating decimal conversion, and
+//!   the checked conversions of tick counts and size draws onto a river's
+//!   integer record scale.
+//! - `source` - `GeneratedSource` itself, the `RiverSource` the running venue
+//!   drives, resolving one whole parent at a time into a plan of records.
+//! - `checkpoint` - `CheckpointIndex`, the boundary-snapshot seek accelerator
+//!   over a `GeneratedSource` realization.
 //!
-//! Behavior preservation across this split is byte-for-byte: the module
-//! boundaries only regroup code, they never reorder an RNG draw or an
-//! arithmetic expression relative to the original single-file generator.
+//! The module boundaries only regroup code: they never reorder an RNG draw or
+//! an arithmetic expression relative to the original single-file generator.
 
 mod arrival;
 mod book;
@@ -70,11 +70,12 @@ pub(crate) use consts::MID_CEILING;
 pub use dynamics::SweepShape;
 pub use fingerprint::{
     AbsReturnAcf, AnchorRange, EmpiricalRanges, Fingerprint, GeneratedSourceError,
-    GeneratorScalars, GoldenTargets, MAX_MEAN_EVENT_DURATION_S, MinMedianMax, ScalarDiagnostic,
-    ScalarError, SessionProfile, SessionProfileError, TickTraversal,
+    GeneratorScalars, GoldenTargets, MAX_MEAN_EVENT_DURATION_S, MAX_PRICE_DECIMALS, MinMedianMax,
+    ScalarDiagnostic, ScalarError, SessionProfile, SessionProfileError, TickTraversal,
 };
+pub use numeric::SIZE_UNITS_CEILING;
 pub use quote::{
     CalibrationProvenance, DepthGrowth, DepthLevels, PublishedBook, QuotedWidth, TopOfBookSizes,
     TradeDisplacement, book_mid_ticks, place_book,
 };
-pub use source::{GeneratedSource, ParentSummary, SizeGrid, VolTrace};
+pub use source::{GeneratedSource, MAX_PARENT_RECORDS, ParentSummary, SizeGrid, VolTrace};

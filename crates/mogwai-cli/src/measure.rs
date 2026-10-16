@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use clap::Args;
-use mogwai_data::{TickEvent, TickSource};
 use mogwai_lab::aggregate::artifact::{
     GeneratedSeed, assemble_measure12a_artifact, load_brick_g_walks, measure12a_schema_errors,
     measure12a_semantic_errors, write_json_atomic,
@@ -668,18 +667,8 @@ pub(crate) fn run_final_walk_with_count_windows(
         profile.scalars.modal_tick,
         windows,
     );
-    while let Some(event) = source.next_tick() {
-        if event.ts_event() >= end {
-            break;
-        }
-        match event {
-            TickEvent::Quote(q) => {
-                let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace).map_err(|e| anyhow!("{e}"))?;
-            }
-            TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow!("{e}"))?,
-        }
-    }
+    acc.walk(&mut source)
+        .map_err(|e| anyhow!("the generated walk refused: {e}"))?;
     acc.finish()
         .map_err(|e| anyhow!("the generated measurement pass refused: {e}"))
 }

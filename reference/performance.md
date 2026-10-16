@@ -928,8 +928,8 @@ instrumented tests.
 - `scan_mapping_50` - the `PendingScan` to `TriggerScan` mapping the venue
   wrapper builds once per symbol per pass, allocation included.
 - `source_positioning` - the sweeper's fixed per-pass cost: a checkpoint restore
-  out of a long-lived index taken under a lock, then the residual drain through
-  `MergeSource::starting_at` behind a `Box<dyn TickSource>`.
+  out of a long-lived index taken under a lock, then the residual seek through
+  the one-record `Pushback` the venue's history source wraps it in.
 - `mark_pass_1_future` / `mark_pass_4_futures` - the engine-owned portion of
   one mark pass over one and four open futures positions: mark application,
   unrealized P&L, maintenance-equity evaluation, and the authoritative account
@@ -939,9 +939,9 @@ instrumented tests.
 Every benchmark builds its state in the setup closure and hands it back as part
 of the output. Both matter: an engine reused across iterations grows without
 bound (retained client order ids, closed orders, fill history, resting orders)
-and would report the average of a ramp as a latency; a `TickSource` reused
+and would report the average of a ramp as a latency; a river reused
 across iterations is already drained past `to_ns` and would report one
-`next_tick` as the cost of a pass. And because `iter_batched` drops outputs
+`next_record` as the cost of a pass. And because `iter_batched` drops outputs
 after stopping the timer but drops a consumed input inside the timed region,
 returning the state is what keeps a teardown out of the reading - it was worth
 roughly 45 percent of `apply_scans_50` and took its deviation from 15.3 percent

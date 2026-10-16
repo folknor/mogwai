@@ -37,8 +37,9 @@ binds work on it.
   depend on the adapter; `mogwai-adapter` re-exports it.
 - `mogwai-engine` - the venue-agnostic exchange core, with the seam that
   injects armed divergences into the event stream.
-- `mogwai-data` - the `TickSource` seam and the `GeneratedSource` synthetic
-  generator the running venue uses, fitted to the committed fingerprint.
+- `mogwai-data` - the compact record seam (`RiverSource`) and the
+  `GeneratedSource` synthetic generator the running venue uses, fitted to the
+  committed fingerprint.
 - `mogwai-venue` - the axum library that owns the sockets, the clocks and the
   pacing. It ships no binary and has no daemon mode: `serve` runs one
   foreground venue, reports its bound address as one JSON readiness line on
@@ -112,7 +113,7 @@ one-leaf correction of `analysis/fingerprint.json`
 an exhaustive reader audit proved its sole consumer advisory and never on the
 generator's path. It does not generalize to any other leaf: the rule stays
 unconditional, and the next leaf needs its own audit and its own ruling.
-`TAPE_PROTOCOL_VERSION` next takes 35. If a non-tape artifact revision ever
+`TAPE_PROTOCOL_VERSION` next takes 36. If a non-tape artifact revision ever
 needs an identity of its own, give it a content hash or a method version
 rather than overloading this constant.
 

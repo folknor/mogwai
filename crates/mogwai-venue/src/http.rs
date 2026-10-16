@@ -16,7 +16,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, Command, CommandClass, DEFAULT_HISTORY_LIMIT, InstrumentDef,
@@ -993,6 +992,13 @@ pub(crate) fn classify_fault(fault: mogwai_data::TickFault) -> FaultClass {
             clock_ns,
             detail: format!("the activity cascade's clock cannot advance past clock_ns={clock_ns}"),
         },
+        TickFault::PriceUnrepresentable { clock_ns } => FaultClass {
+            kind: "generated.price_unrepresentable",
+            clock_ns,
+            detail: format!(
+                "a generated price left the river's record range at clock_ns={clock_ns}"
+            ),
+        },
     }
 }
 
@@ -1877,8 +1883,8 @@ pub(crate) async fn trades(
     let end = Some(end.map_or(run_now, |end| end.min(run_now)));
 
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
-    // generator (the source never blocks on IO), and `next_tick` never returns
-    // `None`, so a request grinds until it fills `limit` or crosses the
+    // generator (the source never blocks on IO), and `next_record` returns
+    // `None` only on a fault, so a request grinds until it fills `limit` or crosses the
     // effective `end`. Run it on a blocking thread rather than inline on the
     // tokio worker, so a burst of `/trades` requests cannot stall the async
     // runtime's worker pool.
@@ -2880,26 +2886,42 @@ pub(crate) fn bounded_trades(
         return Ok(Vec::new());
     }
 
-    let mut merged = rivers.history_source(river, start)?;
+    let mut source = rivers.history_source(river, start)?;
     let mut out = Vec::new();
 
-    while let Some(tick) = merged.next_tick() {
+    while let Some(record) = next_or_fault(source.as_mut(), river)? {
         if let Some(end) = end
-            && tick.ts_event() > end
+            && record.ts() > end
         {
             break;
         }
 
-        let TickEvent::Trade(trade) = tick else {
+        let mogwai_data::Record::Trade(trade) = record else {
             continue;
         };
-        out.push(trade);
+        out.push(source.scale().trade(&trade));
         if out.len() >= limit {
             break;
         }
     }
 
     Ok(out)
+}
+
+/// The next record of a history page, or an error when the river ended on a
+/// fault. A page cut short by a fault is not a page that ran out of water,
+/// and serving it as one would tell the consumer nothing more traded.
+fn next_or_fault(
+    source: &mut dyn mogwai_data::RiverSource,
+    river: &source::RiverKey,
+) -> anyhow::Result<Option<mogwai_data::Record>> {
+    match source.next_record() {
+        Some(record) => Ok(Some(record)),
+        None => match source.fault() {
+            Some(fault) => anyhow::bail!("river {} faulted: {fault:?}", river.symbol()),
+            None => Ok(None),
+        },
+    }
 }
 
 pub(crate) fn bounded_quotes(
@@ -2912,26 +2934,26 @@ pub(crate) fn bounded_quotes(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut merged = rivers.history_source(river, start)?;
+    let mut source = rivers.history_source(river, start)?;
     let mut out = Vec::new();
-    while let Some(tick) = merged.next_tick() {
+    while let Some(record) = next_or_fault(source.as_mut(), river)? {
         if let Some(end) = end
-            && tick.ts_event() > end
+            && record.ts() > end
         {
             break;
         }
-        let TickEvent::Quote(quote) = tick else {
+        let mogwai_data::Record::Quote(quote) = record else {
             continue;
         };
         // No `>= start` guard, and deliberately none: `history_source` hands
-        // `start` to `MergeSource::starting_at`, which seeks each child and
-        // retains the first tick at or after it, and every `seek_to` - the
-        // default drain and `GeneratedSource`'s checkpoint-skipping one alike -
-        // returns only `ts_event >= start_ts`. Nothing this loop sees can
-        // precede `start`. A guard here used to compensate for a contract that
-        // already holds, and its asymmetry with `bounded_trades` read as one of
-        // the two being wrong.
-        out.push(quote);
+        // `start` to `Pushback::starting_at`, which seeks the river and retains
+        // the first record at or after it, and every `seek_to` - the default
+        // drain and `GeneratedSource`'s parent-skipping one alike - returns
+        // only `ts >= start_ts`. Nothing this loop sees can precede `start`. A
+        // guard here used to compensate for a contract that already holds, and
+        // its asymmetry with `bounded_trades` read as one of the two being
+        // wrong.
+        out.push(source.scale().quote(&quote));
         if out.len() >= limit {
             break;
         }
@@ -3114,8 +3136,8 @@ mod calendar_tests {
             .expect("live source");
         let mut live_quotes = Vec::new();
         while live_quotes.len() < history.len() {
-            if let TickEvent::Quote(quote) = live.next_tick().unwrap() {
-                live_quotes.push(quote);
+            if let mogwai_data::Record::Quote(quote) = live.next_record().unwrap() {
+                live_quotes.push(live.scale().quote(&quote));
             }
         }
         assert_eq!(

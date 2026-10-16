@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
-use mogwai_data::{BarAcc, TickEvent, TickSource, fold_trade};
+use mogwai_data::{BarAcc, ParentSource, RiverSource, TickEvent, fold_trade};
 use mogwai_protocol::{
     AggressorSide, ConnHavoc, HavocSpec, InboundHavoc, MarketRegime, TradeTick,
     validate_conn_havoc, validate_divergence, validate_inbound_havoc, validate_market_regime,
@@ -313,7 +313,8 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
 /// surface used to drive a second, CLI-local twin
 /// (`crate::measure12a::Measure12aAcc`, retired at phase 2c-iii); the walk
 /// itself is unchanged, still the shipped one. The consumer reads events
-/// and per-parent `VolTrace` records only.
+/// and per-parent `VolTrace` records only, fed a whole parent at a time by
+/// `GeneratedAcc::walk`, which refuses a walk a fault cut short.
 pub(crate) fn run_measure12a(
     source: &mut mogwai_data::GeneratedSource,
     profile: &mogwai_venue::source::InstrumentProfile,
@@ -330,19 +331,7 @@ pub(crate) fn run_measure12a(
         i32::from(offset),
         profile.scalars.modal_tick,
     );
-    while let Some(event) = source.next_tick() {
-        if event.ts_event() >= end {
-            break;
-        }
-        match event {
-            TickEvent::Quote(q) => {
-                let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-            TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow::anyhow!("{e}"))?,
-        }
-    }
+    acc.walk(source).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut value = acc.finish().map_err(|e| anyhow::anyhow!("{e}"))?;
     value.as_object_mut().expect("a record").insert(
         "cost".to_string(),
@@ -379,11 +368,17 @@ fn self_peak_rss_bytes() -> u64 {
 /// `[from, until)`: the parent timestamp, its child count, and the
 /// volatility intermediates the source observed on the real step path.
 ///
-/// `child_count` is the parent's whole brood - every trade between that parent
-/// and the next parent, regardless of where those children fall relative to
-/// `until`. That is the contract the record shape admits, and it is why the
-/// walk's only stopping point is the next parent: a count truncated at some
-/// other instant would be a different quantity emitted under the same name.
+/// `child_count` is the parent's whole brood - every trade the parent emits,
+/// regardless of where those children fall relative to `until`. That is the
+/// contract the record shape admits, and it is why the walk reads whole
+/// parents from `next_parent` and stops only at one: a count truncated at
+/// some other instant would be a different quantity emitted under the same
+/// name. Parents come from the source rather than from quotes, because a
+/// quote is not a parent boundary in general - the discrete-book path can
+/// publish two for one parent or none.
+///
+/// A walk that ends on a terminal fault before `until` is an error, not a
+/// short trace: the fault proves nothing about the parents it cut off.
 ///
 /// The walk itself runs identically with the trace enabled - pinned by
 /// `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`.
@@ -401,47 +396,33 @@ fn write_trace(
         vol: mogwai_data::VolTrace,
     }
 
-    let mut pending: Option<TraceRecord> = None;
-    let emit = |record: Option<TraceRecord>, out: &mut dyn Write| -> anyhow::Result<()> {
-        if let Some(record) = record
-            && record.parent_ts >= from
-            && record.parent_ts < until
-        {
+    while let Some(parent) = source.next_parent() {
+        if parent.parent_ts >= until {
+            // Every later parent sits past the window. The next parent is the
+            // only legal stopping point: a brood's children carry
+            // `child_stride_ns` spacing, so stopping on a child's timestamp
+            // (this loop once broke on `ts >= start + length`, which
+            // `--trace-until` is allowed to equal) truncates the last
+            // parent's `child_count` and emits the short record anyway.
+            return Ok(());
+        }
+        if parent.parent_ts < from {
+            continue;
+        }
+        if let Some(vol) = parent.trace {
+            let record = TraceRecord {
+                parent_ts: parent.parent_ts,
+                child_count: parent.trades,
+                vol,
+            };
             serde_json::to_writer(&mut *out, &record).context("writing a trace record")?;
             writeln!(out)?;
         }
-        Ok(())
-    };
-    while let Some(event) = source.next_tick() {
-        match event {
-            TickEvent::Quote(q) => {
-                emit(pending.take(), out)?;
-                if q.ts_event >= until {
-                    // Every later parent sits past the window; the walk can
-                    // stop - the tape up to here is already fully realized.
-                    // The next parent is the only legal stopping point: a
-                    // brood's children carry `child_stride_ns` spacing, so
-                    // stopping on a child's timestamp (this loop used to break
-                    // on `ts >= start + length`, which `--trace-until` is
-                    // allowed to equal) truncates the last parent's
-                    // `child_count` and emits the short record anyway.
-                    break;
-                }
-                pending = source.take_vol_trace().map(|vol| TraceRecord {
-                    parent_ts: q.ts_event,
-                    child_count: 0,
-                    vol,
-                });
-            }
-            TickEvent::Trade(_) => {
-                if let Some(record) = &mut pending {
-                    record.child_count += 1;
-                }
-            }
-        }
     }
-    emit(pending.take(), out)?;
-    Ok(())
+    match source.fault() {
+        Some(fault) => bail!("the generated walk faulted before --trace-until {until}: {fault:?}"),
+        None => bail!("the generated walk exhausted before --trace-until {until}"),
+    }
 }
 
 /// `<n><unit>` -> nanoseconds. `<n>` is one-or-more ASCII digits (`>= 1`);
@@ -811,7 +792,6 @@ fn write_bars(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt::Write as _;
     // The rest of the moved summary surface is exercised by these tests
     // alone; the shipping paths need only `summarize`/`SummaryAcc`.
     use mogwai_lab::summary::{
@@ -829,8 +809,8 @@ mod tests {
         }
     }
 
-    /// A trace record's `child_count` is the parent's whole brood - the
-    /// trades between it and the next parent - and the doc comment on
+    /// A trace record's `child_count` is the parent's whole brood - every
+    /// trade the parent emits - and the doc comment on
     /// `write_trace` says so. The walk's own span (`--length`) must therefore
     /// not be able to move it. The window is legal at `trace_until == end`
     /// (the validation admits `until <= end`), which puts the last in-window
@@ -874,34 +854,26 @@ mod tests {
 
         // Walk the tape independently for the oracle: a parent past the origin
         // that owns a child strictly after it, and its whole brood - every
-        // trade up to the next parent. The window then closes one nanosecond
-        // past that parent, so the parent is inside `[from, until)` and every
-        // child but the first sits at or beyond the close.
+        // trade record the parent emits, counted here off the records rather
+        // than taken from the view's own `trades` field that `write_trace`
+        // reports. The window then closes one nanosecond past that parent,
+        // so the parent is inside `[from, until)` and every child after the
+        // straddling one sits at or beyond the close.
         let mut walk = source();
-        // (parent ts, children seen so far, any child strictly after the parent)
-        let mut brood: Option<(u64, u32, bool)> = None;
-        loop {
-            let event = walk.next_tick().expect("the generator never exhausts");
-            match event {
-                TickEvent::Quote(q) => {
-                    if let Some((_, _, straddles)) = brood
-                        && straddles
-                    {
-                        break;
-                    }
-                    brood = Some((q.ts_event, 0, false));
-                }
-                TickEvent::Trade(t) => {
-                    if let Some((p, count, straddles)) = &mut brood {
-                        *count += 1;
-                        if *p > 0 && t.ts_event > *p {
-                            *straddles = true;
-                        }
-                    }
-                }
+        let (parent_ts, children) = loop {
+            let parent = walk.next_parent().expect("the generator never exhausts");
+            let trades: Vec<u64> = parent
+                .records
+                .iter()
+                .filter_map(|record| match record {
+                    mogwai_data::Record::Trade(t) => Some(t.ts),
+                    mogwai_data::Record::Quote(_) => None,
+                })
+                .collect();
+            if parent.parent_ts > 0 && trades.iter().any(|&ts| ts > parent.parent_ts) {
+                break (parent.parent_ts, trades.len() as u32);
             }
-        }
-        let (parent_ts, children, _) = brood.expect("a brood was under construction");
+        };
         // `straddles` already guarantees one child strictly past the parent,
         // so this restates the precondition rather than narrowing it: a brood
         // of exactly one such child exhibits the truncation as 0 versus 1 and
@@ -1763,41 +1735,43 @@ mod tests {
         );
     }
 
-    /// Brick O of the retired protocol-10 successor spec: the protocol-9
-    /// tape oracle. Walks the resolved crypto preset profiles directly -
-    /// quotes and trades, every field via canonical named-separator lines -
-    /// and hashes each stream with FNV-1a 64 into the committed fixture.
-    /// Write-once semantics: a missing fixture is written only at
-    /// TAPE_PROTOCOL_VERSION 9 and refused by name under any other
-    /// protocol, so it can never re-bless later-protocol output; a
-    /// present fixture always asserts equality. This is the frozen
-    /// oracle the successor's byte-identity tests compare against.
+    /// The generated-tape wire-frame oracle: an exact-equality gate over the
+    /// bytes a consumer actually receives. Walks the resolved BTCUSDT preset
+    /// at two seeds and once with a flow surge armed, draws every record of a
+    /// six-hour window by `next_record`, and hashes the `VenueMessage` JSON
+    /// frame `RecordScale::write_frame` produces for each record, in order,
+    /// with FNV-1a 64 into `analysis/tape-oracle-hashes.json`. Frames are
+    /// self-delimiting JSON objects, so the concatenation the hash runs over
+    /// is unambiguous.
     ///
-    /// It was `#[ignore]`d on a cost that was never re-measured - "walks seven
-    /// 6-hour streams" - and both halves of that sentence had gone stale: the
-    /// matrix is three rows since the ETHUSDT and SOLUSDT presets were retired,
-    /// and the whole test measures comfortably inside the per-test watchdog in
-    /// every sweep. The gate profile ran it regardless - it sets
-    /// `include_ignored` and this test is in no skip list - so the attribute
-    /// bought only its exclusion from the fast changed-files lane, on a ground
-    /// measurement does not support. There is no environment or policy ground
-    /// either: the fixture is committed, and the walk binds no socket and needs
-    /// no corpus. Nothing survived to state, so the attribute went rather than
-    /// being given a corrected cost sentence that would need re-measuring
-    /// forever to stay true.
+    /// It replaced the protocol-9 oracle, which hashed `Decimal`-Display
+    /// lines against a write-once record of protocol 9. Tape protocol 35
+    /// moved every generated byte - prices and sizes are now written at the
+    /// river's fixed scale - so that record could no longer hold and was
+    /// retired with it. This gate does not measure what protocol 9 froze and
+    /// makes no claim about any tape before the protocol its fixture was
+    /// blessed at. Under the correctness contract an exact-equality gate is a
+    /// refactoring check: a change that legitimately moves a generated byte
+    /// re-blesses the fixture knowingly in the same change, by deleting it and
+    /// running this test.
+    ///
+    /// A present fixture is asserted whole - hash convention, window, surge
+    /// parameters and entries - because a fixture whose convention silently
+    /// changed is a different oracle wearing this one's filename. The tape
+    /// protocol version it was blessed at is recorded as a fact and never
+    /// compared against the live constant: a bump that moves no byte must not
+    /// falsify it. A missing fixture is written from the observed values and
+    /// the test then fails, saying so: a fresh bless is never a pass, and has
+    /// to be reviewed and committed before it is one.
     #[test]
-    fn protocol9_tape_oracle() {
+    fn generated_tape_wire_frame_oracle() {
         const WINDOW_NS: u64 = 6 * 3_600 * 1_000_000_000;
         let fixture_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../analysis/protocol9-tape-hashes.json"
+            "/../../analysis/tape-oracle-hashes.json"
         );
-        // The ETHUSDT and SOLUSDT rows were removed with their presets
-        // (owner ruling, 2026-08-09). Their generator paths were identical
-        // to BTCUSDT's, but the canonical lines embed the symbol, so their
-        // oracle hashes were distinct identity-only rows: the fixture loses
-        // those four entries while retaining every distinct-dynamics stream
-        // (BTCUSDT at both seeds plus the surge case).
+        // BTCUSDT at two seeds plus the surge case: the distinct-dynamics
+        // streams of the fingerprint-fitted walk.
         let matrix: &[(&str, u64, bool)] = &[
             ("BTCUSDT", 42, false),
             ("BTCUSDT", 7, false),
@@ -1823,53 +1797,45 @@ mod tests {
                 source
             };
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut events: u64 = 0;
+            let mut records: u64 = 0;
             // One buffer reused across every record: the hash covers the
-            // line's bytes, not how they were assembled.
-            let mut line = String::new();
-            while let Some(event) = source.next_tick() {
-                if event.ts_event() >= WINDOW_NS {
+            // frame's bytes, not how they were assembled.
+            let mut frame = String::new();
+            loop {
+                let Some(record) = source.next_record() else {
+                    panic!(
+                        "{symbol}-{seed}: the walk ended inside the window: {:?}",
+                        source.fault()
+                    );
+                };
+                if record.ts() >= WINDOW_NS {
                     break;
                 }
-                events += 1;
-                // Canonical serialization: every field, named separator
-                // layout, Display for decimals - a stable contract, unlike
-                // Debug text, whose derived layout could drift with a field
-                // rename and silently re-key the oracle.
-                line.clear();
-                match &event {
-                    TickEvent::Trade(t) => write!(
-                        line,
-                        "T|{}|{}|{}|{}|{}",
-                        t.symbol,
-                        t.price,
-                        t.size,
-                        aggressor_word(t.aggressor),
-                        t.ts_event
-                    ),
-                    TickEvent::Quote(q) => write!(
-                        line,
-                        "Q|{}|{}|{}|{}|{}|{}",
-                        q.symbol, q.bid_px, q.ask_px, q.bid_sz, q.ask_sz, q.ts_event
-                    ),
-                }
-                .expect("writing to a String cannot fail");
-                for byte in line.bytes() {
+                records += 1;
+                frame.clear();
+                source.scale().write_frame(&record, &mut frame);
+                for byte in frame.bytes() {
                     hash ^= u64::from(byte);
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
                 }
             }
-            assert!(events > 0, "{symbol}-{seed}: an empty stream is no oracle");
+            assert!(records > 0, "{symbol}-{seed}: an empty stream is no oracle");
             let name = if surged {
                 format!("{symbol}-{seed}-surged")
             } else {
                 format!("{symbol}-{seed}")
             };
-            hashes.insert(name, serde_json::json!(format!("{hash:016x}")));
+            hashes.insert(
+                name,
+                serde_json::json!({
+                    "fnv1a64": format!("{hash:016x}"),
+                    "records": records,
+                }),
+            );
         }
         let observed = serde_json::json!({
-            "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
-            "hash": "fnv1a64 over canonical TickEvent lines",
+            "hash": "fnv1a64 over the concatenated RecordScale::write_frame \
+                     VenueMessage JSON frames, one per record drawn by next_record",
             "window_ns": WINDOW_NS,
             "surge": "start 1h, 30m, rate 2.0, children 1.5",
             "entries": hashes,
@@ -1879,14 +1845,9 @@ mod tests {
                 &std::fs::read_to_string(fixture_path).expect("fixture reads"),
             )
             .expect("fixture parses");
-            // The whole frozen contract is asserted, not merely the entry
-            // hashes: a fixture whose version, window, hash convention or
-            // surge parameters silently changed is a different oracle
-            // wearing this one's filename.
-            assert_eq!(
-                frozen["tape_protocol_version"],
-                serde_json::json!(9),
-                "the oracle fixture must remain the protocol-9 record"
+            assert!(
+                frozen["blessed_at_tape_protocol_version"].is_u64(),
+                "the fixture must record the tape protocol it was blessed at"
             );
             assert_eq!(
                 frozen["hash"], observed["hash"],
@@ -1902,20 +1863,24 @@ mod tests {
             );
             assert_eq!(
                 frozen["entries"], observed["entries"],
-                "a crypto tape moved against the protocol-9 oracle"
+                "a generated tape's wire bytes moved against the oracle; if the \
+                 move is intended, delete the fixture, re-run to re-bless it, \
+                 and review the new hashes"
             );
         } else {
-            assert_eq!(
-                mogwai_data::TAPE_PROTOCOL_VERSION,
-                9,
-                "the oracle fixture is missing and the protocol is not 9: \
-                 writing now would re-bless later-protocol output, refused"
-            );
+            let mut blessed = observed;
+            blessed["blessed_at_tape_protocol_version"] =
+                serde_json::json!(mogwai_data::TAPE_PROTOCOL_VERSION);
             std::fs::write(
                 fixture_path,
-                serde_json::to_string_pretty(&observed).expect("serialize"),
+                serde_json::to_string_pretty(&blessed).expect("serialize") + "\n",
             )
             .expect("fixture writes");
+            panic!(
+                "the tape oracle fixture was missing and has been freshly blessed at \
+                 {fixture_path} from this run's observed hashes; a fresh bless is not a \
+                 pass - review it and commit it, then re-run"
+            );
         }
     }
 
@@ -1946,23 +1911,26 @@ mod tests {
         let acc = summarize(&mut streaming, &profile, DEFAULT_GEN_SEED, 0, WINDOW_NS);
         let got = serde_json::to_value(&acc).expect("summary value");
 
-        let mut collected = build();
+        let (scale, parents) = collect_parents(&mut build(), WINDOW_NS);
+        let in_window_trades: Vec<mogwai_data::TradeRec> = parents
+            .iter()
+            .flatten()
+            .filter_map(|record| match record {
+                mogwai_data::Record::Trade(t) if t.ts < WINDOW_NS => Some(*t),
+                _ => None,
+            })
+            .collect();
         let mut per_minute: std::collections::BTreeMap<u64, (f64, f64)> =
             std::collections::BTreeMap::new();
-        while let Some(event) = collected.next_tick() {
-            if event.ts_event() >= WINDOW_NS {
-                break;
-            }
-            if let TickEvent::Trade(t) = event {
-                let price = f64::try_from(t.price).expect("price");
-                per_minute
-                    .entry(t.ts_event / 60_000_000_000)
-                    .and_modify(|(lo, hi)| {
-                        *lo = lo.min(price);
-                        *hi = hi.max(price);
-                    })
-                    .or_insert((price, price));
-            }
+        for t in &in_window_trades {
+            let price = scale.price_f64(t.px);
+            per_minute
+                .entry(t.ts / 60_000_000_000)
+                .and_modify(|(lo, hi)| {
+                    *lo = lo.min(price);
+                    *hi = hi.max(price);
+                })
+                .or_insert((price, price));
         }
         let tick = f64::try_from(profile.scalars.modal_tick).expect("tick");
         let mut hist: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
@@ -1984,42 +1952,37 @@ mod tests {
             serde_json::json!(*ranges.get(1).unwrap_or(&0))
         );
 
-        // Protocol-11 top-minute records (spec 4.7), recomputed with a third
-        // pass carrying exact Decimal bounds, trade counts and parent counts
-        // (parents by first-child minute, parents delimited by quotes).
-        let mut third = build();
+        // Protocol-11 top-minute records (spec 4.7), recomputed over the same
+        // collected parents with exact Decimal bounds, trade counts and
+        // parent counts. Parents are the source's own, counted by their
+        // first child's minute when that child is in the window and a book
+        // was in force for it; a quote is not a parent boundary, since the
+        // discrete-book path this MNQ walk runs can publish two quotes for
+        // one parent or none.
         let mut detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
             std::collections::BTreeMap::new();
         let mut parents_by_minute: std::collections::BTreeMap<u64, u64> =
             std::collections::BTreeMap::new();
-        let mut in_parent = false;
-        while let Some(event) = third.next_tick() {
-            if event.ts_event() >= WINDOW_NS {
-                break;
+        for parent in booked_parents(&parents) {
+            let first = parent.trades[0].ts;
+            if first < WINDOW_NS {
+                *parents_by_minute.entry(first / 60_000_000_000).or_insert(0) += 1;
             }
-            match event {
-                TickEvent::Quote(_) => in_parent = false,
-                TickEvent::Trade(t) => {
-                    if !in_parent {
-                        in_parent = true;
-                        *parents_by_minute
-                            .entry(t.ts_event / 60_000_000_000)
-                            .or_insert(0) += 1;
+        }
+        for t in &in_window_trades {
+            let price = scale.price(t.px);
+            detail
+                .entry(t.ts / 60_000_000_000)
+                .and_modify(|(lo, hi, n)| {
+                    if price < *lo {
+                        *lo = price;
                     }
-                    detail
-                        .entry(t.ts_event / 60_000_000_000)
-                        .and_modify(|(lo, hi, n)| {
-                            if t.price < *lo {
-                                *lo = t.price;
-                            }
-                            if t.price > *hi {
-                                *hi = t.price;
-                            }
-                            *n += 1;
-                        })
-                        .or_insert((t.price, t.price, 1));
-                }
-            }
+                    if price > *hi {
+                        *hi = price;
+                    }
+                    *n += 1;
+                })
+                .or_insert((price, price, 1));
         }
         let modal = profile.scalars.modal_tick;
         let mut expected: Vec<serde_json::Value> = detail
@@ -2168,21 +2131,22 @@ mod tests {
             i32::from(offset),
             profile.scalars.modal_tick,
         );
+        // The consumer reads each parent through `push_parent`, the entry
+        // `GeneratedAcc::walk` drives, stopping where `walk` stops; the trades
+        // are taken off the same views it consumed.
+        let scale = source.scale().clone();
         let mut trades: Vec<TradeTick> = Vec::new();
-        while let Some(event) = source.next_tick() {
-            if event.ts_event() >= end {
+        while let Some(view) = source.next_parent() {
+            if view.records[0].ts() >= end {
                 break;
             }
-            match event {
-                TickEvent::Quote(q) => {
-                    let trace = source.take_vol_trace();
-                    acc.push_quote(&q, trace).expect("quote");
-                }
-                TickEvent::Trade(t) => {
-                    acc.push_trade(&t).expect("trade");
-                    if t.ts_event >= M12A_START_NS {
-                        trades.push(t);
-                    }
+            acc.push_parent(&scale, &view).expect("parent");
+            for record in view.records {
+                if let mogwai_data::Record::Trade(t) = record
+                    && t.ts >= M12A_START_NS
+                    && t.ts < end
+                {
+                    trades.push(scale.trade(t));
                 }
             }
         }
@@ -2216,13 +2180,11 @@ mod tests {
         source.enable_vol_trace();
         let end = M12A_START_NS + 1_800_000_000_000;
         let mut traces: Vec<mogwai_data::VolTrace> = Vec::new();
-        while let Some(event) = source.next_tick() {
-            if event.ts_event() >= end {
+        while let Some(parent) = source.next_parent() {
+            if parent.parent_ts >= end {
                 break;
             }
-            if matches!(event, TickEvent::Quote(_))
-                && let Some(trace) = source.take_vol_trace()
-            {
+            if let Some(trace) = parent.trace {
                 traces.push(trace);
             }
         }
@@ -2343,14 +2305,79 @@ mod tests {
         assert!(text.contains("underflows"), "names the underflow: {text}");
     }
 
+    /// The parents of a walk whose own instant precedes `end`, each as its
+    /// records in order, read off the source's `next_parent`. A parent's
+    /// records never precede its instant, so a parent at or past `end` has
+    /// nothing in the window.
+    fn collect_parents(
+        source: &mut impl ParentSource,
+        end: u64,
+    ) -> (mogwai_data::RecordScale, Vec<Vec<mogwai_data::Record>>) {
+        let scale = source.scale().clone();
+        let mut parents = Vec::new();
+        while let Some(parent) = source.next_parent() {
+            if parent.parent_ts >= end {
+                break;
+            }
+            parents.push(parent.records.to_vec());
+        }
+        (scale, parents)
+    }
+
+    /// One parent with the book in force at its first trade.
+    struct BookedParent {
+        book: mogwai_data::QuoteRec,
+        trades: Vec<mogwai_data::TradeRec>,
+    }
+
+    /// The summary's parent attribution, recomputed by a plain scan: a parent
+    /// takes the last quote published before its first trade, in record
+    /// order and whichever parent published it; a parent with no trade, or
+    /// whose first trade precedes every quote of the walk, has no book and
+    /// is no parent. Every trade of a booked parent belongs to it, including
+    /// one printed after a window's end.
+    fn booked_parents(parents: &[Vec<mogwai_data::Record>]) -> Vec<BookedParent> {
+        let mut book: Option<mogwai_data::QuoteRec> = None;
+        let mut out = Vec::new();
+        for parent in parents {
+            let mut booked: Option<BookedParent> = None;
+            let mut traded = false;
+            for record in parent {
+                match record {
+                    mogwai_data::Record::Quote(q) => book = Some(*q),
+                    mogwai_data::Record::Trade(t) => {
+                        if let Some(b) = &mut booked {
+                            b.trades.push(*t);
+                        } else if !traded && let Some(q) = book {
+                            booked = Some(BookedParent {
+                                book: q,
+                                trades: vec![*t],
+                            });
+                        }
+                        traded = true;
+                    }
+                }
+            }
+            out.extend(booked);
+        }
+        out
+    }
+
+    /// A quote's mid, through the one mantissa-to-float conversion every
+    /// float reader of a river's prices uses.
+    fn book_mid(scale: &mogwai_data::RecordScale, q: &mogwai_data::QuoteRec) -> f64 {
+        (scale.price_f64(q.bid_px) + scale.price_f64(q.ask_px)) / 2.0
+    }
+
     /// The independent recompute of the protocol-11 session cells from a
-    /// collected event stream, as JSON comparable to the summary's
+    /// collected parent stream, as JSON comparable to the summary's
     /// `session_cells`. `segment_local` selects the contract as-of rule
     /// (rule 1: state independent per segment); passing false computes the
     /// defective global-as-of variant, which the halt-crossing test uses to
     /// prove its fixture actually distinguishes the two.
     fn independent_session_cells(
-        events: &[TickEvent],
+        scale: &mogwai_data::RecordScale,
+        parents: &[Vec<mogwai_data::Record>],
         offset: i16,
         start: u64,
         end: u64,
@@ -2378,39 +2405,17 @@ mod tests {
             h60: [Hz; 24],
             h300: [Hz; 24],
         }
-        struct Chunk {
-            ts: u64,
-            mid: f64,
-            first_trade_ts: Option<u64>,
-        }
         let hour_of = |ts: u64| ((ts / 1_000_000_000) % 86_400 / 3_600) as usize;
-        let mut chunks: Vec<Chunk> = Vec::new();
-        for e in events {
-            match e {
-                TickEvent::Quote(q) => chunks.push(Chunk {
-                    ts: q.ts_event,
-                    mid: (f64::try_from(q.bid_px).unwrap() + f64::try_from(q.ask_px).unwrap())
-                        / 2.0,
-                    first_trade_ts: None,
-                }),
-                TickEvent::Trade(t) => {
-                    if let Some(c) = chunks.last_mut()
-                        && c.first_trade_ts.is_none()
-                    {
-                        c.first_trade_ts = Some(t.ts_event);
-                    }
-                }
-            }
-        }
         let mut cells: std::collections::BTreeMap<u64, Cells> = Default::default();
         // Parent counts and the adjacent valid-mid chain, keyed by segment
         // origin so a segment change breaks it.
         let mut chain: Option<(u64, f64)> = None;
-        for c in chunks.iter().filter(|c| c.first_trade_ts.is_some()) {
-            let first_ts = c.first_trade_ts.unwrap();
+        for parent in booked_parents(parents) {
+            let first_ts = parent.trades[0].ts;
             if first_ts < start || first_ts >= end {
                 continue;
             }
+            let mid = book_mid(scale, &parent.book);
             let seg = session_segment_at(first_ts, offset).expect("open parent");
             let entry = cells.entry(seg.session_start_ns).or_insert_with(|| Cells {
                 end_ns: seg.session_end_ns,
@@ -2418,11 +2423,11 @@ mod tests {
             });
             let hour = hour_of(first_ts);
             entry.parents[hour] += 1;
-            if c.mid.is_finite() && c.mid > 0.0 {
+            if mid.is_finite() && mid > 0.0 {
                 if let Some((origin, prev_mid)) = chain
                     && origin == seg.segment_origin_ns
                 {
-                    let abs = (c.mid / prev_mid).ln().abs();
+                    let abs = (mid / prev_mid).ln().abs();
                     let cell = &mut entry.mid_abs[hour];
                     cell.count += 1;
                     cell.sum_abs += abs;
@@ -2430,14 +2435,22 @@ mod tests {
                         cell.max_abs = abs;
                     }
                 }
-                chain = Some((seg.segment_origin_ns, c.mid));
+                chain = Some((seg.segment_origin_ns, mid));
             }
         }
         // Horizon chains per segment: boundaries strictly inside the
         // segment, first boundary having an as-of establishes,
         // hour-crossing windows excluded, the final segment settled to
-        // min(segment end, window end) inclusively.
-        let quotes: Vec<(u64, f64)> = chunks.iter().map(|c| (c.ts, c.mid)).collect();
+        // min(segment end, window end) inclusively. Every quote before `end`
+        // counts, in record order, whichever parent published it.
+        let quotes: Vec<(u64, f64)> = parents
+            .iter()
+            .flatten()
+            .filter_map(|record| match record {
+                mogwai_data::Record::Quote(q) if q.ts < end => Some((q.ts, book_mid(scale, q))),
+                _ => None,
+            })
+            .collect();
         let mut segments: Vec<SessionBounds> = Vec::new();
         for (ts, _) in &quotes {
             if let Some(seg) = session_segment_at(*ts, offset)
@@ -2543,48 +2556,50 @@ mod tests {
         // structurally resumes AT the reopen instant (the arrival clock
         // jumps to next_open), so the leak window - a post-halt boundary
         // preceding the first post-halt quote - is built by hand on a
-        // MemorySource: a pre-halt parent at 20:12, then nothing until
+        // MemoryParents river: a pre-halt parent at 20:12, then nothing until
         // 20:41, leaving the 20:31-20:40 60 s boundaries and the 20:35 and
         // 20:40 300 s boundaries quoteless. A global as-of would establish
         // and price them from the 20:12 mid; the contract skips them. The
         // global-variant recompute must differ, proving the fixture bites.
+        // Each parent is stated outright as its quote and its one trade, on
+        // an explicit scale whose price places are the MNQ tick's own.
         const START_NS: u64 = 1_783_455_000_000_000_000; // 20:10Z Jul 7
         const END_NS: u64 = 1_783_457_400_000_000_000; // 20:50Z
         let minute = 60_000_000_000u64;
         let profile = resolve_profile("MNQ").expect("MNQ profile");
         let tick = profile.scalars.modal_tick;
-        let px = |ticks: i64| {
-            Decimal::try_from(23_000.0).unwrap() + tick * Decimal::try_from(ticks as f64).unwrap()
+        let scale = mogwai_data::RecordScale::new("MNQ".into(), tick.scale(), 0)
+            .expect("the MNQ tick fits a record scale");
+        let tick_m = scale
+            .price_mantissa(tick)
+            .expect("the tick is on its own grid");
+        let base_m = scale
+            .price_mantissa(Decimal::from(23_000))
+            .expect("the base level is on the grid");
+        let px = |ticks: i64| base_m + tick_m * ticks;
+        let parent = |ts: u64, level: i64| {
+            vec![
+                mogwai_data::Record::Quote(mogwai_data::QuoteRec {
+                    ts,
+                    bid_px: px(level - 1),
+                    ask_px: px(level + 1),
+                    bid_qty: 1,
+                    ask_qty: 1,
+                }),
+                mogwai_data::Record::Trade(mogwai_data::TradeRec {
+                    ts,
+                    px: px(level),
+                    qty: 1,
+                    side: AggressorSide::Buyer,
+                }),
+            ]
         };
-        let one = Decimal::ONE;
-        let quote = |ts: u64, level: i64| {
-            TickEvent::Quote(mogwai_protocol::QuoteTick {
-                symbol: "MNQ".into(),
-                bid_px: px(level - 1),
-                ask_px: px(level + 1),
-                bid_sz: one,
-                ask_sz: one,
-                ts_event: ts,
-            })
-        };
-        let trade = |ts: u64, level: i64| {
-            TickEvent::Trade(TradeTick {
-                symbol: "MNQ".into(),
-                price: px(level),
-                size: one,
-                aggressor: AggressorSide::Buyer,
-                ts_event: ts,
-            })
-        };
-        let events = vec![
-            quote(START_NS + 2 * minute, 0), // 20:12, pre-halt
-            trade(START_NS + 2 * minute, 0),
-            quote(START_NS + 31 * minute, 4), // 20:41, post-halt
-            trade(START_NS + 31 * minute, 4),
-            quote(START_NS + 33 * minute, 8), // 20:43
-            trade(START_NS + 33 * minute, 8),
+        let parents = vec![
+            parent(START_NS + 2 * minute, 0),  // 20:12, pre-halt
+            parent(START_NS + 31 * minute, 4), // 20:41, post-halt
+            parent(START_NS + 33 * minute, 8), // 20:43
         ];
-        let mut source = mogwai_data::MemorySource::new(events.clone());
+        let mut source = mogwai_data::MemoryParents::new(scale.clone(), parents.clone());
         let acc = summarize(&mut source, &profile, DEFAULT_GEN_SEED, START_NS, END_NS);
         let got = serde_json::to_value(&acc).expect("summary value");
         let offset = profile
@@ -2592,8 +2607,8 @@ mod tests {
             .as_ref()
             .expect("MNQ calendar")
             .utc_offset_minutes;
-        let local = independent_session_cells(&events, offset, START_NS, END_NS, true);
-        let global = independent_session_cells(&events, offset, START_NS, END_NS, false);
+        let local = independent_session_cells(&scale, &parents, offset, START_NS, END_NS, true);
+        let global = independent_session_cells(&scale, &parents, offset, START_NS, END_NS, false);
         assert_eq!(
             got["session_cells"], local,
             "the summary must be segment-local"
@@ -2630,15 +2645,12 @@ mod tests {
         let acc = summarize(&mut streaming, &profile, DEFAULT_GEN_SEED, 0, WINDOW_NS);
         let got = serde_json::to_value(&acc).expect("summary value");
 
-        // Independent walk: collect, then recompute.
-        let mut collected = build();
-        let mut events = Vec::new();
-        while let Some(e) = collected.next_tick() {
-            if e.ts_event() >= WINDOW_NS {
-                break;
-            }
-            events.push(e);
-        }
+        // Independent walk: collect whole parents off `next_parent`, then
+        // recompute. Parent statistics take every trade of a parent whose
+        // first trade is in the window, including one printing past its end;
+        // per-record statistics select trades and quotes by their own
+        // instant.
+        let (scale, collected) = collect_parents(&mut build(), WINDOW_NS);
         let tick = f64::try_from(profile.scalars.modal_tick).expect("tick");
         let cal = profile.calendar.as_ref();
         let open_all = |t1: u64, t2: u64| -> bool {
@@ -2655,32 +2667,11 @@ mod tests {
             }
         };
 
-        // Split into (quote, child-trades) chunks by index.
-        struct Chunk {
-            bid: Decimal,
-            ask: Decimal,
-            bid_sz: Decimal,
-            ask_sz: Decimal,
-            trades: Vec<TradeTick>,
-        }
-        let mut chunks: Vec<Chunk> = Vec::new();
-        for e in &events {
-            match e {
-                TickEvent::Quote(q) => chunks.push(Chunk {
-                    bid: q.bid_px,
-                    ask: q.ask_px,
-                    bid_sz: q.bid_sz,
-                    ask_sz: q.ask_sz,
-                    trades: Vec::new(),
-                }),
-                TickEvent::Trade(t) => {
-                    if let Some(c) = chunks.last_mut() {
-                        c.trades.push(t.clone());
-                    }
-                }
-            }
-        }
-        let parents: Vec<&Chunk> = chunks.iter().filter(|c| !c.trades.is_empty()).collect();
+        let parents: Vec<BookedParent> = booked_parents(&collected)
+            .into_iter()
+            .filter(|p| p.trades[0].ts < WINDOW_NS)
+            .collect();
+        assert!(!parents.is_empty(), "the window must carry parents");
 
         let mut parents_n = 0u64;
         let mut sided = 0u64;
@@ -2699,25 +2690,25 @@ mod tests {
             if c.trades.len() == 1 {
                 single += 1;
             }
-            let mut lv: Vec<Decimal> = Vec::new();
+            let mut lv: Vec<i64> = Vec::new();
             for t in &c.trades {
-                if !lv.contains(&t.price) {
-                    lv.push(t.price);
+                if !lv.contains(&t.px) {
+                    lv.push(t.px);
                 }
             }
             levels_sum += lv.len() as u64;
-            let mid = (f64::try_from(c.bid).unwrap() + f64::try_from(c.ask).unwrap()) / 2.0;
+            let mid = book_mid(&scale, &c.book);
             if let Some((pt, pm)) = prev
-                && open_all(pt, first.ts_event)
+                && open_all(pt, first.ts)
             {
-                gap_sum += first.ts_event - pt;
+                gap_sum += first.ts - pt;
                 gaps += 1;
                 let r = (mid / pm).ln();
                 ret_count += 1;
                 ret_sum += r;
                 ret_sumsq += r * r;
             }
-            prev = Some((first.ts_event, mid));
+            prev = Some((first.ts, mid));
         }
         assert_eq!(got["parents"], serde_json::json!(parents_n));
         assert_eq!(got["sided_rows"], serde_json::json!(sided));
@@ -2744,10 +2735,12 @@ mod tests {
 
         // Histograms, recomputed independently.
         let mut size_hist = std::collections::BTreeMap::new();
-        for e in &events {
-            if let TickEvent::Trade(t) = e {
+        for record in collected.iter().flatten() {
+            if let mogwai_data::Record::Trade(t) = record
+                && t.ts < WINDOW_NS
+            {
                 *size_hist
-                    .entry(t.size.normalize().to_string())
+                    .entry(scale.size(t.qty).normalize().to_string())
                     .or_insert(0u64) += 1;
             }
         }
@@ -2761,21 +2754,22 @@ mod tests {
         let mut buyer_hist = std::collections::BTreeMap::new();
         let mut seller_hist = std::collections::BTreeMap::new();
         for c in &parents {
-            let w: u64 = ((c.ask - c.bid) / profile.scalars.modal_tick)
+            let (bid, ask) = (scale.price(c.book.bid_px), scale.price(c.book.ask_px));
+            let w: u64 = ((ask - bid) / profile.scalars.modal_tick)
                 .round()
                 .try_into()
                 .unwrap();
             *width_hist.entry(w.to_string()).or_insert(0u64) += 1;
             *bid_hist
-                .entry(c.bid_sz.normalize().to_string())
+                .entry(scale.size(c.book.bid_qty).normalize().to_string())
                 .or_insert(0u64) += 1;
             *ask_hist
-                .entry(c.ask_sz.normalize().to_string())
+                .entry(scale.size(c.book.ask_qty).normalize().to_string())
                 .or_insert(0u64) += 1;
             let first = &c.trades[0];
-            let mid = (f64::try_from(c.bid).unwrap() + f64::try_from(c.ask).unwrap()) / 2.0;
-            let raw = (f64::try_from(first.price).unwrap() - mid) / tick;
-            let signed = match first.aggressor {
+            let mid = book_mid(&scale, &c.book);
+            let raw = (scale.price_f64(first.px) - mid) / tick;
+            let signed = match first.side {
                 AggressorSide::Buyer => Some((raw, &mut buyer_hist)),
                 AggressorSide::Seller => Some((-raw, &mut seller_hist)),
                 AggressorSide::NoAggressor => None,
@@ -2807,15 +2801,16 @@ mod tests {
         );
 
         // Fixed-horizon diagnostics: as-of mids at every boundary, linear
-        // scans over the collected quotes.
-        let quotes: Vec<(u64, f64)> = events
+        // scans over the collected quotes before the window's end, in record
+        // order, whichever parent published them.
+        let quotes: Vec<(u64, f64)> = collected
             .iter()
-            .filter_map(|e| match e {
-                TickEvent::Quote(q) => Some((
-                    q.ts_event,
-                    (f64::try_from(q.bid_px).unwrap() + f64::try_from(q.ask_px).unwrap()) / 2.0,
-                )),
-                TickEvent::Trade(_) => None,
+            .flatten()
+            .filter_map(|record| match record {
+                mogwai_data::Record::Quote(q) if q.ts < WINDOW_NS => {
+                    Some((q.ts, book_mid(&scale, q)))
+                }
+                _ => None,
             })
             .collect();
         for horizon_s in SUMMARY_VOL_HORIZONS_S {
@@ -2891,7 +2886,7 @@ mod tests {
             .as_ref()
             .expect("MNQ calendar")
             .utc_offset_minutes;
-        let expected = independent_session_cells(&events, offset, 0, WINDOW_NS, true);
+        let expected = independent_session_cells(&scale, &collected, offset, 0, WINDOW_NS, true);
         assert_eq!(got["session_cells"], expected);
         // The under-capacity top-minute case: a 20-minute walk populates
         // fewer minutes than the capacity, and every populated minute

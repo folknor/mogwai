@@ -8,8 +8,12 @@
 
 use rust_decimal::Decimal;
 
-use super::generated::GeneratedAcc;
+use super::generated::{GeneratedAcc, mantissa_nanos};
 use super::*;
+use mogwai_data::{
+    MemoryParents, ParentSource, ParentView, QuoteRec, Record, RecordScale, RiverSource, TickFault,
+    TradeRec,
+};
 use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 
 /// 2026-07-06T22:00Z, the July 7 session open (offset -300).
@@ -80,26 +84,82 @@ fn vt(
     }
 }
 
+/// The fixture river's scale: MNQ prices at two places, whole contracts.
+fn rec_scale() -> RecordScale {
+    RecordScale::new(mogwai_protocol::Symbol::from("MNQ"), 2, 0).expect("scale")
+}
+
+/// `px(level)` as a mantissa at [`rec_scale`].
+fn px_m(level: i64) -> i64 {
+    2_300_000 + 25 * level
+}
+
+fn quote_rec(ts: u64, level: i64) -> Record {
+    Record::Quote(QuoteRec {
+        ts,
+        bid_px: px_m(level - 1),
+        ask_px: px_m(level + 1),
+        bid_qty: 1,
+        ask_qty: 1,
+    })
+}
+
+fn trade_rec(ts: u64, level: i64) -> Record {
+    Record::Trade(TradeRec {
+        ts,
+        px: px_m(level),
+        qty: 1,
+        side: AggressorSide::Buyer,
+    })
+}
+
+/// Fold one parent of explicit records through the parent path, carrying
+/// `trace` as the view's own.
+fn push_view(
+    acc: &mut GeneratedAcc,
+    scale: &RecordScale,
+    records: &[Record],
+    trace: Option<mogwai_data::VolTrace>,
+) {
+    let view = ParentView {
+        parent_ts: records[0].ts(),
+        records,
+        trades: records
+            .iter()
+            .filter(|r| matches!(r, Record::Trade(_)))
+            .count() as u32,
+        trace,
+    };
+    acc.push_parent(scale, &view).expect("parent");
+}
+
+/// Crafted parents through `push_parent`, the path the generated walk takes.
 struct Fixture {
     acc: GeneratedAcc,
+    scale: RecordScale,
 }
 
 impl Fixture {
     fn new() -> Self {
         Self {
             acc: GeneratedAcc::new(9, OPEN_NS, CLOSE_NS, OFFSET, tick()),
+            scale: rec_scale(),
         }
     }
 
     fn parent(&mut self, ts: u64, level: i64, trace: mogwai_data::VolTrace, trade_levels: &[i64]) {
-        self.acc
-            .push_quote(&quote(ts, level), Some(trace))
-            .expect("quote");
-        for (i, &tl) in trade_levels.iter().enumerate() {
-            self.acc
-                .push_trade(&trade(ts + i as u64, tl))
-                .expect("trade");
-        }
+        let mut records = vec![quote_rec(ts, level)];
+        records.extend(
+            trade_levels
+                .iter()
+                .enumerate()
+                .map(|(i, &tl)| trade_rec(ts + i as u64, tl)),
+        );
+        self.records(&records, trace);
+    }
+
+    fn records(&mut self, records: &[Record], trace: mogwai_data::VolTrace) {
+        push_view(&mut self.acc, &self.scale, records, Some(trace));
     }
 }
 
@@ -447,20 +507,14 @@ fn initiation_survives_a_minute_straddling_burst() {
     let mut fx = Fixture::new();
     let minute = |m: u64| H23_NS + m * NS_PER_MIN;
     fx.parent(minute(0) + 10_000_000_000, 0, quiet(), &[0]);
-    fx.acc
-        .push_quote(
-            &quote(minute(0) + 58_000_000_000, 40),
-            Some(vt(
-                12.0, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, false, false,
-            )),
-        )
-        .expect("quote");
-    fx.acc
-        .push_trade(&trade(minute(0) + 58_000_000_000, 40))
-        .expect("trade");
-    fx.acc
-        .push_trade(&trade(minute(1) + 2_000_000_000, 40))
-        .expect("straddling trade");
+    fx.records(
+        &[
+            quote_rec(minute(0) + 58_000_000_000, 40),
+            trade_rec(minute(0) + 58_000_000_000, 40),
+            trade_rec(minute(1) + 2_000_000_000, 40),
+        ],
+        vt(12.0, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, false, false),
+    );
     for m in 5..45 {
         fx.parent(minute(m) + 30_000_000_000, 0, quiet(), &[0]);
     }
@@ -565,11 +619,146 @@ fn only_complete_sessions_are_emitted_on_the_generated_side() {
     // A session whose close lies past the measured window end never emits -
     // the Q1 all-session rule. The engine still accumulates it.
     let mut acc = GeneratedAcc::new(1, OPEN_NS, CLOSE_NS - NS_PER_MIN, OFFSET, tick());
-    acc.push_quote(&quote(H23_NS, 0), Some(quiet()))
-        .expect("quote");
-    acc.push_trade(&trade(H23_NS, 0)).expect("trade");
+    push_view(
+        &mut acc,
+        &rec_scale(),
+        &[quote_rec(H23_NS, 0), trade_rec(H23_NS, 0)],
+        Some(quiet()),
+    );
     let value = acc.finish().expect("finish");
     assert_eq!(value["per_session"].as_array().expect("array").len(), 0);
+}
+
+/// Measured parents across every emitted session, read from block 1: each
+/// histogram row is `count` minutes holding `n` parents apiece.
+fn session_parent_total(value: &serde_json::Value) -> u64 {
+    value["per_session"]
+        .as_array()
+        .expect("per_session")
+        .iter()
+        .flat_map(|s| s["block1_hist"].as_array().expect("block1_hist").iter())
+        .map(|row| row["n"].as_u64().expect("n") * row["count"].as_u64().expect("count"))
+        .sum()
+}
+
+#[test]
+fn the_event_path_and_the_parent_path_agree_when_every_parent_publishes_one_quote() {
+    // Where quotes do delimit parents - one quote leading each parent - the
+    // event-shaped entry and the parent entry must measure the same tape.
+    // Anything that diverges between them is a defect in one of the two.
+    let minute = |m: u64| H23_NS + m * NS_PER_MIN;
+    let mut parents: Vec<(u64, i64, Vec<i64>)> = (0..40)
+        .map(|m| (minute(m) + 30_000_000_000, 0, vec![0, 2]))
+        .collect();
+    // One wide minute, so the forensic selection has an extreme to pick.
+    parents.push((minute(31) + 40_000_000_000, 30, vec![30, -30]));
+    parents.sort_by_key(|p| p.0);
+    let mut by_event = GeneratedAcc::new(9, OPEN_NS, CLOSE_NS, OFFSET, tick());
+    let mut by_parent = Fixture::new();
+    for (ts, level, trades) in &parents {
+        by_event
+            .push_quote(&quote(*ts, *level), Some(quiet()))
+            .expect("quote");
+        for (i, &tl) in trades.iter().enumerate() {
+            by_event
+                .push_trade(&trade(ts + i as u64, tl))
+                .expect("trade");
+        }
+        by_parent.parent(*ts, *level, quiet(), trades);
+    }
+    let event = by_event.finish().expect("finish");
+    let parent = by_parent.acc.finish().expect("finish");
+    assert!(
+        !event["forensic"]["records"]
+            .as_array()
+            .expect("records")
+            .is_empty(),
+        "the stream must select something, or the equality below is vacuous"
+    );
+    assert_eq!(event, parent);
+}
+
+#[test]
+fn a_parent_is_what_the_source_says_not_what_its_quotes_suggest() {
+    // Under the discrete book a parent can publish no quote or two. Read
+    // through the parent path, a quoteless parent is measured against the
+    // book in force and a two-quote parent is one parent; quote inference
+    // would have merged the first into its predecessor and split the second.
+    let session_end = CLOSE_NS;
+    let run = |parents: &[Vec<Record>]| {
+        let mut acc = GeneratedAcc::new(9, OPEN_NS, session_end, OFFSET, tick());
+        let scale = rec_scale();
+        for records in parents {
+            push_view(&mut acc, &scale, records, Some(quiet()));
+        }
+        acc.finish().expect("finish")
+    };
+    let t0 = H23_NS + 10_000_000_000;
+    let value = run(&[
+        vec![quote_rec(t0, 0), trade_rec(t0, 0)],
+        vec![trade_rec(t0 + 1_000_000_000, 0)],
+        vec![trade_rec(t0 + 1_500_000_000, 0)],
+        vec![
+            quote_rec(t0 + 2_000_000_000, 4),
+            trade_rec(t0 + 2_000_000_000, 4),
+            quote_rec(t0 + 2_000_000_001, 8),
+            trade_rec(t0 + 2_000_000_001, 8),
+        ],
+    ]);
+    // Quote inference reads 3 here (the quoteless pair merged into the first
+    // parent, the last split in two); a book taken by the parent it opens
+    // rather than held in force reads 2. Only the source's division reads 4.
+    assert_eq!(session_parent_total(&value), 4, "{}", value["per_session"]);
+}
+
+#[test]
+fn a_fault_cut_walk_refuses_rather_than_reading_as_complete() {
+    struct Faulted(MemoryParents);
+    impl RiverSource for Faulted {
+        fn scale(&self) -> &RecordScale {
+            self.0.scale()
+        }
+        fn next_record(&mut self) -> Option<Record> {
+            self.0.next_record()
+        }
+        fn fault(&self) -> Option<TickFault> {
+            Some(TickFault::PriceUnrepresentable { clock_ns: 0 })
+        }
+    }
+    impl ParentSource for Faulted {
+        fn next_parent(&mut self) -> Option<ParentView<'_>> {
+            self.0.next_parent()
+        }
+    }
+    let records = vec![vec![quote_rec(H23_NS, 0), trade_rec(H23_NS, 0)]];
+    let mut clean = MemoryParents::new(rec_scale(), records.clone());
+    let mut acc = GeneratedAcc::new(1, OPEN_NS, CLOSE_NS, OFFSET, tick());
+    acc.walk(&mut clean)
+        .expect("an exhausted clean source is a complete walk");
+    let mut faulted = Faulted(MemoryParents::new(rec_scale(), records));
+    let mut acc = GeneratedAcc::new(1, OPEN_NS, CLOSE_NS, OFFSET, tick());
+    let refused = acc
+        .walk(&mut faulted)
+        .expect_err("a faulted walk must refuse");
+    assert!(refused.to_string().contains("faulted"), "{refused}");
+}
+
+#[test]
+fn record_mantissas_convert_to_nano_units_exactly_or_refuse() {
+    assert_eq!(
+        mantissa_nanos(2_300_025, 2).expect("dp 2"),
+        23_000_250_000_000
+    );
+    assert_eq!(mantissa_nanos(-7, 0).expect("dp 0"), -7_000_000_000);
+    assert_eq!(mantissa_nanos(123, 9).expect("dp 9"), 123);
+    assert_eq!(mantissa_nanos(5_000, 12).expect("on-grid dp 12"), 5);
+    assert!(mantissa_nanos(5_001, 12).is_err(), "off the 1e-9 grid");
+    assert!(mantissa_nanos(i64::MAX / 10, 0).is_err(), "overflow");
+    assert_eq!(
+        mantissa_nanos(1_000_000_000, 18).expect("dp 18"),
+        1,
+        "the finest record scale divides"
+    );
 }
 
 // -- The permutation records (observed side only) ---------------------------
