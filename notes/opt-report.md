@@ -424,9 +424,9 @@ reads 21.3x where ChaCha read 57.2x, one draw of that distribution;
 Consequences:
 
 - `realism` lost its `debug-slow` ignore, whose reason was now false, and
-  runs in every lane. It is red at seed 42 on `abs_return_acf_lag10`
-  (0.186), the long-known fit miss, now filed in `notes/todo.md`. So the plain
-  `brokkr check` is red on that one test until the fit moves.
+  runs in every lane. It was red at seed 42 on `abs_return_acf_lag10`
+  (0.186); that gate turned out to be ill-posed and is gone (see "The realism
+  gate misses its own band" below).
 - `session_modulation_reproduces_curves` keeps its cost ignore, with the
   dev wall corrected to about 17 s.
 - `opt-level = 3` was deleted from `[profile.release]`: it was the default,
@@ -852,8 +852,7 @@ Landed 2026-10-17, sparred with codex. Exact: no tape byte moves.
 
 Measured, dev, alone: 16.8 s to 10.2 s (the unsized walk is about 6 s of
 it). Under `brokkr check` load it now reaches its verdict instead of the
-watchdog, so the plain check is red only on the known
-`abs_return_acf_lag10` fit miss.
+watchdog.
 
 ## Priority 4h. Size decoration across parents (landed)
 
@@ -935,6 +934,44 @@ not be tested here. The owner states the targets are Zen 4 or later; an
 8-lane kernel belongs on a host that can run its pins. `bygg`, another host
 we work on, is Zen 5 (native 512-bit units): that is where to build and pin
 it.
+
+## Priority 4j. Scalar Philox in dev builds (landed)
+
+Landed 2026-10-17 as tape protocol 45, sparred with codex. No byte moves.
+
+Why. `session_modulation_reproduces_curves` took 53.3 s alone in dev on a
+quiet host against the 17 s its ignore reason claimed from tape 38, and
+`realism` had gone from 8.4 s to 18 s between tapes 38 and 40 (noted under
+4e, unexplained). Both are 4d's AVX2 kernel: `fill_lanes` dispatched to it
+in every build, and in an unoptimized build every intrinsic is a call.
+4e had already gated `vecmath`'s vector path off under debug assertions for
+the same reason; the Philox dispatch never got the gate.
+
+Measured, dev, 12M words per backend (`fill_walls`, now per backend):
+
+| Run | Scalar | Portable | AVX2 |
+|---|---|---|---|
+| 12 (a legacy packet) | 0.45 s | 0.89 s | 2.48 s |
+| 17 | 0.44 s | 0.76 s | 2.20 s |
+| 64 | 0.42 s | 0.64 s | 1.69 s |
+
+About 2 us per legacy parent in dev went to the kernel.
+
+What it is now. `FillBackend` (scalar, portable, AVX2) is a parameter of
+the shared fill; `TapeRng::fill` and `fill_at` take `FillBackend::selected()`,
+scalar under debug assertions and the batch kernels elsewhere, as before.
+The fill pins (`fill` against `next_word` at every start and length,
+the interleaved script, exhaustion) run their whole script on every backend
+the CPU can execute plus the public dispatch, so a dev test build still
+holds the batch paths to the contract; `the_fill_selects_the_documented_backend`
+pins the selection. Release is unchanged.
+
+Result: `session_modulation_reproduces_curves` 53.3 s to 20.8 s in dev,
+alone. Still ignored for cost, its reason corrected.
+
+Left: `LegacyLogs::of` computes the idle fourth lane's `tape_ln(1.0)` in
+dev, where `tape_ln4` runs scalar. Exact to drop; about a second on this
+test.
 
 ## Priority 5. Rail sizing as independent seeds (landed)
 
@@ -1147,14 +1184,12 @@ day and tape 35's was a light one.
 
 ### The realism gate misses its own band
 
-`realism` (seed 42) fails `abs_return_acf_lag10` at 0.183 against the
-fingerprint band's 0.1565 ceiling. Not a tape 36 regression: over seeds 0 to
-15 in release, the lag-10 seed mean is 0.164 on tape 35 and on tape 36 alike,
-about half the seeds above the ceiling on either, and every other realism
-statistic's seed mean agrees between the tapes to about the third decimal.
-The shipped BTCUSDT law sits above its own band at lag 10; seed 42 landed
-inside it at tape 35 by chance. Fit work, owed to `notes/todo.md` and to a
-comment at the test site; neither the gate nor the band has been touched.
+Resolved as a gate, 2026-10-17; the underlying fit question moved to
+`notes/todo.md` for tape research v2. The band's ceiling is the anchor
+pair's own value, and the gate compared per-row Kraken statistics with
+generated parent ends, a comparison with no foundation. `realism` no longer
+gates return statistics, and `per_fill_returns_sit_outside_three_kraken_bands`
+pins what the per-fill series does against the bands. No tape byte moved.
 
 ### Failing under the gate, not timing out
 

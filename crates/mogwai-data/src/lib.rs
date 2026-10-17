@@ -316,7 +316,13 @@ pub use trigger::{
 /// Philox kernel, so a fill computes up to sixteen blocks per call. Integer
 /// arithmetic, every word the one `next_word` gives at its position: no byte
 /// moves, and the bump is taken because the generation path changed.
-pub const TAPE_PROTOCOL_VERSION: u32 = 44;
+/// 45 selects the fill's backend by build: scalar Philox blocks where debug
+/// assertions are on, because in an unoptimized build every intrinsic is a
+/// call and the AVX2 kernel cost about five times the scalar blocks per word;
+/// the batch kernels elsewhere, as before. Every backend gives the same word
+/// at every position: no byte moves, and the bump is taken because the
+/// generation path changed.
+pub const TAPE_PROTOCOL_VERSION: u32 = 45;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

@@ -32,10 +32,12 @@
 //! bytes, little-endian, discarding the tail of the last. A later "optimization"
 //! that buffered half words would move every tape. [`TapeRng::fill`] is the
 //! batched form of `next_u64`, not a new consumption pattern: it writes the
-//! same words at the same positions, computing up to sixteen blocks per kernel
-//! call into a slice the caller owns - through an AVX2 intrinsics kernel when the
-//! running x86-64 CPU has AVX2, and through the portable
-//! [`philox4x32_10_lanes`] otherwise, the two bit-identical.
+//! same words at the same positions into a slice the caller owns. In a build
+//! without debug assertions it computes up to sixteen blocks per kernel call,
+//! through an AVX2 intrinsics kernel when the running x86-64 CPU has AVX2 and
+//! through the portable [`philox4x32_10_lanes`] otherwise; with debug
+//! assertions it computes one scalar block at a time, which an unoptimized
+//! build runs fastest. Every backend is bit-identical.
 //!
 //! The position space is a `u64` per domain. Advancing past `u64::MAX` panics in
 //! every build rather than wrapping onto the domain's first output: at the
@@ -145,23 +147,61 @@ pub fn philox4x32_10_lanes<const N: usize>(
     [x0, x1, x2, x3]
 }
 
-/// The fill's lane batch: `N` consecutive blocks. On an x86-64 CPU
-/// with AVX2 it runs [`philox4x32_10_avx2`], written with intrinsics, because
-/// the portable kernel above compiled under AVX2 measured slower than its
-/// baseline build - the autovectorizer did not turn the widening multiply into
-/// useful vector code. Elsewhere it runs the portable kernel. Both are the same
-/// integer arithmetic and return the same words bit for bit, so nothing about
-/// a tape can depend on which one ran, and the choice needs no build
-/// configuration, so a consumer building these crates gets it too.
-#[inline]
-fn fill_lanes<const N: usize>(block: u64, domain: u64, key: [u32; 2]) -> [[u32; N]; 4] {
+/// How a fill computes its blocks. Every backend is the same integer
+/// arithmetic and writes the same words bit for bit, so nothing about a tape
+/// can depend on which one ran; the choice is throughput only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FillBackend {
+    /// One [`philox4x32_10`] block per pair of words, through the cache.
+    Scalar,
+    /// Lane batches through the portable [`philox4x32_10_lanes`].
+    Portable,
+    /// Lane batches through [`philox4x32_10_avx2`]. Only ever selected on a
+    /// CPU that was checked for AVX2.
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: the running CPU was just checked for AVX2, the only feature
-        // the called function enables.
-        return unsafe { philox4x32_10_avx2::<N>(block, domain, key) };
+    Avx2,
+}
+
+impl FillBackend {
+    /// The backend [`TapeRng::fill`] uses. On x86-64 with AVX2, the
+    /// intrinsics kernel, because the portable kernel compiled under AVX2
+    /// measured slower than its baseline build - the autovectorizer did not
+    /// turn the widening multiply into useful vector code. Elsewhere, the
+    /// portable kernel. In a build with debug assertions, scalar blocks: an
+    /// unoptimized build makes every intrinsic a call, and there the batch
+    /// kernels cost more than the blocks they replace, as `vecmath`'s vector
+    /// path does. `debug_assertions` is an assertion policy, not an
+    /// optimization detector; it is the switch because it is what separates
+    /// the dev lane from release here, and a consumer who optimizes with
+    /// assertions on gets correct words either way.
+    fn selected() -> Self {
+        if cfg!(debug_assertions) {
+            return Self::Scalar;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Self::Avx2;
+        }
+        Self::Portable
     }
-    philox4x32_10_lanes::<N>(block, domain, key)
+}
+
+/// The fill's lane batch: `N` consecutive blocks through a batch backend.
+#[inline]
+fn fill_lanes<const N: usize>(
+    backend: FillBackend,
+    block: u64,
+    domain: u64,
+    key: [u32; 2],
+) -> [[u32; N]; 4] {
+    match backend {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: `Avx2` is only constructed after the running CPU was
+        // checked for AVX2, the only feature the called function enables.
+        FillBackend::Avx2 => unsafe { philox4x32_10_avx2::<N>(block, domain, key) },
+        FillBackend::Portable => philox4x32_10_lanes::<N>(block, domain, key),
+        FillBackend::Scalar => unreachable!("scalar fills never batch"),
+    }
 }
 
 /// The most blocks one AVX2 call computes: four chains of four.
@@ -285,6 +325,7 @@ fn cached_block(
 /// whose lane 1 a following odd read wants. Always correct for its address.
 #[inline]
 fn write_batch<const N: usize>(
+    backend: FillBackend,
     key: [u32; 2],
     domain: u64,
     cache: &mut Option<(u64, [u32; 4])>,
@@ -292,7 +333,7 @@ fn write_batch<const N: usize>(
     dst: &mut [u64],
 ) {
     debug_assert!(!dst.is_empty() && dst.len() <= 2 * N);
-    let [x0, x1, x2, x3] = fill_lanes::<N>(block, domain, key);
+    let [x0, x1, x2, x3] = fill_lanes::<N>(backend, block, domain, key);
     for (index, word) in dst.iter_mut().enumerate() {
         let i = index / 2;
         *word = if index % 2 == 0 {
@@ -313,8 +354,10 @@ fn write_batch<const N: usize>(
 /// holding a block that was really computed at its address, so it is never
 /// stale. Every word is the same function of its position whichever path
 /// produced it - the odd head, a lane batch, or the scalar tail - so a word
-/// never depends on the slice length or on where a batch boundary fell.
+/// never depends on the slice length or on where a batch boundary fell, nor
+/// on the backend.
 fn fill_range(
+    backend: FillBackend,
     key: [u32; 2],
     domain: u64,
     cache: &mut Option<(u64, [u32; 4])>,
@@ -323,6 +366,14 @@ fn fill_range(
 ) {
     let mut position = start;
     let mut rest = dst;
+    if backend == FillBackend::Scalar {
+        for word in rest {
+            let (lo, hi) = lane_words(cached_block(key, domain, cache, position >> 1));
+            *word = if position & 1 == 0 { lo } else { hi };
+            position += 1;
+        }
+        return;
+    }
     // An odd start reads lane 1 of its block, which the cache may already hold.
     if position & 1 == 1
         && let Some((first, tail)) = rest.split_first_mut()
@@ -333,7 +384,7 @@ fn fill_range(
     }
     let (batches, tail) = rest.as_chunks_mut::<{ 2 * MAX_CHAIN_BLOCKS }>();
     for batch in batches {
-        write_batch::<MAX_CHAIN_BLOCKS>(key, domain, cache, position >> 1, batch);
+        write_batch::<MAX_CHAIN_BLOCKS>(backend, key, domain, cache, position >> 1, batch);
         position += (2 * MAX_CHAIN_BLOCKS) as u64;
     }
     // A tail spanning more than one block still runs one batch, the fewest
@@ -343,10 +394,10 @@ fn fill_range(
     if tail.len() > 2 {
         let block = position >> 1;
         match tail.len().div_ceil(2 * FILL_LANES) {
-            1 => write_batch::<4>(key, domain, cache, block, tail),
-            2 => write_batch::<8>(key, domain, cache, block, tail),
-            3 => write_batch::<12>(key, domain, cache, block, tail),
-            _ => write_batch::<16>(key, domain, cache, block, tail),
+            1 => write_batch::<4>(backend, key, domain, cache, block, tail),
+            2 => write_batch::<8>(backend, key, domain, cache, block, tail),
+            3 => write_batch::<12>(backend, key, domain, cache, block, tail),
+            _ => write_batch::<16>(backend, key, domain, cache, block, tail),
         }
         return;
     }
@@ -430,6 +481,12 @@ impl TapeRng {
     /// same message - no earlier, because a batch extending past the space is
     /// never what refuses.
     pub fn fill(&mut self, dst: &mut [u64]) {
+        self.fill_with(FillBackend::selected(), dst);
+    }
+
+    /// [`fill`](Self::fill) through a named backend, so the tests hold every
+    /// backend to the whole contract whichever one the build selects.
+    fn fill_with(&mut self, backend: FillBackend, dst: &mut [u64]) {
         let start = self.position;
         let readable = u64::MAX - start;
         let (now, refused) = if dst.len() as u64 > readable {
@@ -438,7 +495,7 @@ impl TapeRng {
             let len = dst.len();
             dst.split_at_mut(len)
         };
-        fill_range(self.key, self.domain, &mut self.cached, start, now);
+        fill_range(backend, self.key, self.domain, &mut self.cached, start, now);
         self.position = start + now.len() as u64;
         assert!(refused.is_empty(), "{EXHAUSTED}");
     }
@@ -450,9 +507,14 @@ impl TapeRng {
     /// anything otherwise, since there is no stream state for a partial fill
     /// to leave behind.
     pub fn fill_at(&self, position: u64, dst: &mut [u64]) {
+        self.fill_at_with(FillBackend::selected(), position, dst);
+    }
+
+    /// [`fill_at`](Self::fill_at) through a named backend.
+    fn fill_at_with(&self, backend: FillBackend, position: u64, dst: &mut [u64]) {
         assert!(dst.len() as u64 <= u64::MAX - position, "{EXHAUSTED}");
         let mut cache = self.cached;
-        fill_range(self.key, self.domain, &mut cache, position, dst);
+        fill_range(backend, self.key, self.domain, &mut cache, position, dst);
     }
 }
 
@@ -629,6 +691,78 @@ mod tests {
         (0..len).map(|_| rng.next_word()).collect()
     }
 
+    /// Every way a fill can run: each backend this CPU can execute, named,
+    /// and `None` for the public dispatch the build selects. The fill pins
+    /// run their whole script once per entry, so a backend the build does
+    /// not select is still held to the contract.
+    fn fill_paths() -> Vec<Option<FillBackend>> {
+        let base = [None, Some(FillBackend::Scalar), Some(FillBackend::Portable)];
+        base.into_iter().chain(avx2_path()).collect()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_path() -> Option<Option<FillBackend>> {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Some(Some(FillBackend::Avx2));
+        }
+        eprintln!("no AVX2 on this CPU: the AVX2 fill path was not exercised");
+        None
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn avx2_path() -> Option<Option<FillBackend>> {
+        None
+    }
+
+    impl TapeRng {
+        /// The block at `block`, computed from the bare round function and
+        /// never through the cache.
+        fn block_uncached(&self, block: u64) -> [u32; 4] {
+            philox4x32_10(
+                [
+                    block as u32,
+                    (block >> 32) as u32,
+                    self.domain as u32,
+                    (self.domain >> 32) as u32,
+                ],
+                self.key,
+            )
+        }
+    }
+
+    fn fill_via(rng: &mut TapeRng, path: Option<FillBackend>, dst: &mut [u64]) {
+        match path {
+            Some(backend) => rng.fill_with(backend, dst),
+            None => rng.fill(dst),
+        }
+    }
+
+    fn fill_at_via(rng: &TapeRng, path: Option<FillBackend>, position: u64, dst: &mut [u64]) {
+        match path {
+            Some(backend) => rng.fill_at_with(backend, position, dst),
+            None => rng.fill_at(position, dst),
+        }
+    }
+
+    /// The selector names the backend its documentation names for this build
+    /// and CPU. This pins the policy only: that `fill` and `fill_at` route
+    /// through `selected()` is a one-line call each, and since every backend
+    /// gives the same words, no value pin can observe which one ran.
+    #[test]
+    fn the_fill_selects_the_documented_backend() {
+        let selected = FillBackend::selected();
+        if cfg!(debug_assertions) {
+            assert_eq!(selected, FillBackend::Scalar);
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            assert_eq!(selected, FillBackend::Avx2);
+            return;
+        }
+        assert_eq!(selected, FillBackend::Portable);
+    }
+
     /// Fill against `next_word` for both start parities, every length from 0
     /// through three batches plus odd lengths past that, at starts near zero
     /// and around the low counter-word carry; the position lands where the
@@ -645,26 +779,46 @@ mod tests {
         }
         let mut lengths: Vec<usize> = (0..=3 * batch + 1).collect();
         lengths.extend([5 * batch - 1, 7 * batch + 3, 101]);
-        for &start in &starts {
-            for &len in &lengths {
-                let expected = reference(9, 4, start, len);
-                let mut rng = TapeRng::new(9, 4);
-                rng.seek(start);
-                let mut got = vec![0u64; len];
-                rng.fill(&mut got);
-                assert_eq!(got, expected, "start {start} len {len}");
-                assert_eq!(rng.position(), start + len as u64);
-                let mut at = vec![0u64; len];
-                rng.fill_at(start, &mut at);
-                assert_eq!(at, expected, "fill_at start {start} len {len}");
-                assert_eq!(rng.position(), start + len as u64);
-                // The read after a fill continues the stream, so the cache the
-                // fill left must name its block truthfully.
-                assert_eq!(
-                    rng.next_word(),
-                    reference(9, 4, start + len as u64, 1)[0],
-                    "after start {start} len {len}"
-                );
+        for path in fill_paths() {
+            for &start in &starts {
+                for &len in &lengths {
+                    let expected = reference(9, 4, start, len);
+                    let mut rng = TapeRng::new(9, 4);
+                    rng.seek(start);
+                    let mut got = vec![0u64; len];
+                    // Warm the cache on a block the fill does not touch, so an
+                    // empty fill must leave exactly this entry behind.
+                    let warm = start / 2 + 1000;
+                    rng.cached = Some((warm, rng.block_uncached(warm)));
+                    fill_via(&mut rng, path, &mut got);
+                    assert_eq!(got, expected, "{path:?} start {start} len {len}");
+                    assert_eq!(rng.position(), start + len as u64);
+                    // The cache holds the block of the last word written, its
+                    // words computed at its own address; untouched when empty.
+                    let held = if len == 0 {
+                        warm
+                    } else {
+                        (start + len as u64 - 1) >> 1
+                    };
+                    assert_eq!(
+                        rng.cached,
+                        Some((held, rng.block_uncached(held))),
+                        "{path:?} cache after start {start} len {len}"
+                    );
+                    let before = rng.cached;
+                    let mut at = vec![0u64; len];
+                    fill_at_via(&rng, path, start, &mut at);
+                    assert_eq!(at, expected, "{path:?} fill_at start {start} len {len}");
+                    assert_eq!(rng.position(), start + len as u64);
+                    assert_eq!(rng.cached, before, "{path:?} fill_at moved the cache");
+                    // The read after a fill continues the stream, so the cache
+                    // the fill left must name its block truthfully.
+                    assert_eq!(
+                        rng.next_word(),
+                        reference(9, 4, start + len as u64, 1)[0],
+                        "{path:?} after start {start} len {len}"
+                    );
+                }
             }
         }
     }
@@ -676,6 +830,12 @@ mod tests {
     /// a wrong lane.
     #[test]
     fn interleaved_fills_reads_seeks_and_clones_never_serve_a_stale_lane() {
+        for path in fill_paths() {
+            interleaved_script(path);
+        }
+    }
+
+    fn interleaved_script(path: Option<FillBackend>) {
         let words = reference(11, 2, 0, 600);
         let mut rng = TapeRng::new(11, 2);
         let mut script = TapeRng::new(12345, 0);
@@ -690,9 +850,13 @@ mod tests {
                         continue;
                     }
                     buf.resize(len, 0);
-                    rng.fill(&mut buf);
+                    fill_via(&mut rng, path, &mut buf);
                     let at = position as usize;
-                    assert_eq!(buf[..], words[at..at + len], "fill at {at} len {len}");
+                    assert_eq!(
+                        buf[..],
+                        words[at..at + len],
+                        "{path:?} fill at {at} len {len}"
+                    );
                     position += len as u64;
                 }
                 2 => {
@@ -720,9 +884,9 @@ mod tests {
                         continue;
                     }
                     buf.resize(len, 0);
-                    copy.fill(&mut buf);
+                    fill_via(&mut copy, path, &mut buf);
                     let at = position as usize;
-                    assert_eq!(buf[..], words[at..at + len], "clone fill at {at}");
+                    assert_eq!(buf[..], words[at..at + len], "{path:?} clone fill at {at}");
                     // The original is untouched by its clone's fill.
                     assert_eq!(rng.position(), position);
                 }
@@ -738,6 +902,12 @@ mod tests {
     /// the same ranges.
     #[test]
     fn fill_exhausts_exactly_where_next_word_does() {
+        for path in fill_paths() {
+            exhaustion_script(path);
+        }
+    }
+
+    fn exhaustion_script(path: Option<FillBackend>) {
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let top = u64::MAX - 3;
@@ -745,12 +915,12 @@ mod tests {
         let mut rng = TapeRng::new(5, 1);
         rng.seek(top);
         let mut three = [0u64; 3];
-        rng.fill(&mut three);
-        assert_eq!(three[..], expected[..]);
+        fill_via(&mut rng, path, &mut three);
+        assert_eq!(three[..], expected[..], "{path:?}");
         assert_eq!(rng.position(), u64::MAX);
         let mut empty: [u64; 0] = [];
-        rng.fill(&mut empty);
-        rng.fill_at(u64::MAX, &mut empty);
+        fill_via(&mut rng, path, &mut empty);
+        fill_at_via(&rng, path, u64::MAX, &mut empty);
 
         let mut by_words = TapeRng::new(5, 1);
         by_words.seek(top);
@@ -766,7 +936,7 @@ mod tests {
         by_fill.seek(top);
         const SENTINEL: u64 = 0x5EE5_5EE5_5EE5_5EE5;
         let mut long = [SENTINEL; 40];
-        let fill_panic = catch_unwind(AssertUnwindSafe(|| by_fill.fill(&mut long)));
+        let fill_panic = catch_unwind(AssertUnwindSafe(|| fill_via(&mut by_fill, path, &mut long)));
         let message = fill_panic.expect_err("a fill past the space must refuse");
         assert!(
             message
@@ -799,15 +969,17 @@ mod tests {
             let mut exact_fill = TapeRng::new(5, 1);
             exact_fill.seek(start);
             let mut exact = vec![0_u64; readable as usize];
-            exact_fill.fill(&mut exact);
-            assert_eq!(exact[..], prefix[..], "exact readable {readable}");
+            fill_via(&mut exact_fill, path, &mut exact);
+            assert_eq!(exact[..], prefix[..], "{path:?} exact readable {readable}");
             assert_eq!(exact_fill.position(), u64::MAX);
             let mut filled = TapeRng::new(5, 1);
             filled.seek(start);
             let mut out = [SENTINEL; 80];
-            assert!(catch_unwind(AssertUnwindSafe(|| filled.fill(&mut out))).is_err());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| fill_via(&mut filled, path, &mut out))).is_err()
+            );
             let delivered = prefix.len();
-            assert_eq!(out[..delivered], prefix[..], "readable {readable}");
+            assert_eq!(out[..delivered], prefix[..], "{path:?} readable {readable}");
             assert!(
                 out[delivered..].iter().all(|w| *w == SENTINEL),
                 "readable {readable}"
@@ -818,7 +990,12 @@ mod tests {
         // A refused `fill_at` writes nothing at all.
         let fresh = TapeRng::new(5, 1);
         let mut four = [SENTINEL; 4];
-        assert!(catch_unwind(AssertUnwindSafe(|| fresh.fill_at(top, &mut four))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| fill_at_via(
+                &fresh, path, top, &mut four
+            )))
+            .is_err()
+        );
         assert!(
             four.iter().all(|w| *w == SENTINEL),
             "a refused fill_at wrote"
@@ -879,22 +1056,38 @@ mod tests {
         }
     }
 
-    /// `fill` in runs of 12 (a legacy packet), 17 and 64 (size fills) over
-    /// 120M words. Run with `--release`; it prints walls.
+    /// Every backend in runs of 12 (a legacy packet), 17 and 64 (size fills),
+    /// 120M words in a release build and 12M in a dev build, with checksums
+    /// that must agree across backends. It prints walls; the dev and release
+    /// rows are what `FillBackend::selected` is chosen on.
     #[test]
-    #[ignore = "bench: a wall measurement, meaningful only in a release build"]
+    #[ignore = "bench: prints wall measurements per fill backend"]
     fn fill_walls() {
-        const TOTAL: usize = 120_000_000;
+        let total: usize = if cfg!(debug_assertions) {
+            12_000_000
+        } else {
+            120_000_000
+        };
         for run in [12_usize, 17, 64] {
-            let mut rng = TapeRng::new(3, 9);
-            let mut buf = vec![0_u64; run];
-            let mut sum = 0_u64;
-            let start = std::time::Instant::now();
-            for _ in 0..TOTAL / run {
-                rng.fill(&mut buf);
-                sum = sum.wrapping_add(buf[run - 1]);
+            let mut sums = Vec::new();
+            for path in fill_paths().into_iter().flatten() {
+                let mut rng = TapeRng::new(3, 9);
+                let mut buf = vec![0_u64; run];
+                let mut sum = 0_u64;
+                let start = std::time::Instant::now();
+                for _ in 0..total / run {
+                    rng.fill_with(path, &mut buf);
+                    // The whole slice, so no word's work can be discarded.
+                    std::hint::black_box(&buf);
+                    sum = sum.wrapping_add(buf[run - 1]);
+                }
+                println!(
+                    "{path:?} runs of {run}: {:?}, checksum {sum}",
+                    start.elapsed()
+                );
+                sums.push(sum);
             }
-            println!("runs of {run}: {:?}, checksum {sum}", start.elapsed());
+            assert!(sums.windows(2).all(|w| w[0] == w[1]), "backends disagree");
         }
     }
 }
