@@ -59,7 +59,9 @@ use super::calendar::{CompiledCalendar, SessionCalendar};
 use super::cascade::{
     CascadeRefusal, CascadeState, CascadeTables, MAX_EVENT_LOG_MOVE, SecondModifiers,
 };
-use super::children::{LevelSteps, SizeStream, StepStream, SweepOutcome, resolve_sweep};
+use super::children::{
+    LevelSteps, SIZE_BATCH, SizeDraw, SizeStream, StepLaw, StepStream, SweepOutcome, resolve_sweep,
+};
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -68,7 +70,10 @@ use super::consts::{
     LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
     REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_UNIT_SCALE,
 };
-use super::draws::{BounceDraws, LegacyDraws, coin, mixture_count, student_t4, unit_exponential};
+use super::draws::{
+    BounceDraws, LegacyDraws, LegacyLogs, chi_product, coin, mixture_count, mixture_count_from_log,
+    student_t4_from_log,
+};
 use super::dynamics::{ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape};
 use super::fingerprint::{
     Fingerprint, GeneratedSourceError, GeneratorScalars, ScalarError, SessionProfile,
@@ -77,6 +82,7 @@ use super::numeric::{PriceGrid, SIZE_UNITS_CEILING, SizeQuantizer, lot_exponent}
 use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
+use super::vecmath::tape_ln;
 
 /// The most records one parent can emit, on any path: a placed parent is one
 /// quote and at most `CHILD_CAP` children, and a discrete-book parent at most
@@ -226,6 +232,9 @@ pub struct GeneratedSource {
     /// first child - and keeping it here only saves repositioning it between
     /// consecutive decorated parents.
     size_stream: SizeStream,
+    /// Final quantities read ahead by child index, so decoration batches
+    /// across parents; empty on every clone (see [`QuantityCache`]).
+    quantities: QuantityCache,
     /// Every placed walk's level-step gaps, addressed by child index like the
     /// sizes, so no walk's per-parent draw depends on its sweep: the bounce
     /// walks since tape protocol 37, the cascade since 39.
@@ -340,21 +349,104 @@ pub struct VolTrace {
 
 /// The probabilities fixed for a source's life, built once: the three
 /// level-step probabilities a placed sweep selects between, each computed by
-/// the expression that used to run per child.
+/// the expression that used to run per child, with its gap denominator.
 #[derive(Clone, Copy)]
 struct ChildCoins {
-    level_step_cascade: f64,
-    level_step_high: f64,
-    level_step_low: f64,
+    level_step_cascade: StepLaw,
+    level_step_high: StepLaw,
+    level_step_low: StepLaw,
 }
 
 impl ChildCoins {
     fn new(level_step_prob: f64) -> Self {
         Self {
-            level_step_cascade: level_step_prob,
-            level_step_high: (level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0),
-            level_step_low: level_step_prob * LOW_REGIME_LEVEL_STEP_MULT,
+            level_step_cascade: StepLaw::new(level_step_prob),
+            level_step_high: StepLaw::new((level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)),
+            level_step_low: StepLaw::new(level_step_prob * LOW_REGIME_LEVEL_STEP_MULT),
         }
+    }
+}
+
+/// Children per read-ahead block: one 512-word fill and eight 32-child
+/// transform batches, about thirty legacy parents' worth.
+const QUANTITY_BLOCK: usize = 256;
+
+/// Final placed-trade quantities for a run of consecutive child indices,
+/// computed ahead by the decoration's own fill, batch transform and
+/// quantizer. A quantity is a function of the child index, the seed's size
+/// stream and the quantizer, all fixed for the source's life (`with_surge`,
+/// the one `Arc::make_mut`, changes neither), so a block is valid for
+/// whichever reader reaches its children, in any order and across holes left
+/// by skipped or unsized parents. Membership is by actual index, never by
+/// assuming the next request continues the last.
+///
+/// A clone starts empty and carries no block, so a checkpoint snapshot pays
+/// nothing for it; checkpoint extension skips parents and never decorates,
+/// so its lead never allocates one either. A block is published only once
+/// it is complete, so a panic inside a refill cannot leave a valid-looking
+/// partial one.
+#[derive(Default)]
+struct QuantityCache(Option<Box<QuantityBlock>>);
+
+struct QuantityBlock {
+    first: u64,
+    len: usize,
+    quantities: [u64; QUANTITY_BLOCK],
+}
+
+impl Clone for QuantityCache {
+    fn clone(&self) -> Self {
+        Self(None)
+    }
+}
+
+impl QuantityCache {
+    /// Child `child`'s quantity, refilling the block from `child` on a
+    /// miss. `None` when not even this child is readable from the size
+    /// stream, which leaves the caller's own path to refuse it.
+    fn get(&mut self, child: u64, stream: &SizeStream, sizes: SizeQuantizer) -> Option<u64> {
+        if let Some(block) = &self.0
+            && let Some(offset) = child.checked_sub(block.first)
+            && offset < block.len as u64
+        {
+            return Some(block.quantities[offset as usize]);
+        }
+        // The size stream never reads position `u64::MAX`, and a child reads
+        // two positions, so the readable children from `child` are what fits
+        // before it.
+        let available = (u64::MAX - child.checked_mul(2)?) / 2;
+        let len = QUANTITY_BLOCK.min(usize::try_from(available).unwrap_or(usize::MAX));
+        if len == 0 {
+            return None;
+        }
+        let mut block = self.0.take().unwrap_or_else(|| {
+            Box::new(QuantityBlock {
+                first: 0,
+                len: 0,
+                quantities: [0; QUANTITY_BLOCK],
+            })
+        });
+        block.len = 0;
+        let mut stream = stream.clone();
+        stream.seek(child);
+        let mut words = [0_u64; 2 * SIZE_BATCH];
+        let mut draws = [SizeDraw {
+            base: 0.0,
+            lot_snap: false,
+        }; SIZE_BATCH];
+        for out in block.quantities[..len].chunks_mut(SIZE_BATCH) {
+            let take = out.len();
+            stream.fill(&mut words[..2 * take]);
+            stream.draws_from(&words[..2 * take], &mut draws[..take]);
+            for (quantity, draw) in out.iter_mut().zip(&draws) {
+                *quantity = sizes.quantize(draw.base, draw.lot_snap);
+            }
+        }
+        block.first = child;
+        block.len = len;
+        let quantity = block.quantities[0];
+        self.0 = Some(block);
+        Some(quantity)
     }
 }
 
@@ -877,6 +969,7 @@ impl GeneratedSource {
             plan_first_child: 0,
             plan_decorated: true,
             size_stream,
+            quantities: QuantityCache::default(),
             step_stream: StepStream::new(seed),
             #[cfg(test)]
             size_probe: 0,
@@ -959,15 +1052,16 @@ impl GeneratedSource {
         }
     }
 
-    /// The parent's gap from its two words: the gap itself, a unit
-    /// exponential (the `Weibull(1, ARRIVAL_WEIBULL_SHAPE)` gap at the shape
-    /// of one `draws` asserts), and the arrival-state flip.
-    fn next_duration_ns(&mut self, gap_raw: u64, flip_raw: u64) -> u64 {
+    /// The parent's gap from its gap word's logarithm and its flip word: the
+    /// gap itself, a unit exponential `-ln u` (the `Weibull(1,
+    /// ARRIVAL_WEIBULL_SHAPE)` gap at the shape of one `draws` asserts), and
+    /// the arrival-state flip.
+    fn next_duration_ns(&mut self, log_gap: f64, flip_raw: u64) -> u64 {
         let walk = legacy(&mut self.walk);
         if let Some(quiet) = walk.arrival_override {
             walk.arrival.quiet = quiet;
         }
-        let raw_eps = unit_exponential(gap_raw);
+        let raw_eps = -log_gap;
         let arrival = &legacy(&mut self.walk).arrival;
         let state_mean = if arrival.quiet {
             arrival.quiet_mean_s
@@ -1085,17 +1179,18 @@ impl GeneratedSource {
         MAX_SESSION_GAP_NS
     }
 
-    fn next_latent_mid(&mut self, innovation_words: [u64; 3]) -> f64 {
+    fn next_latent_mid(&mut self, numerator: u64, log_chi: f64) -> f64 {
         #[cfg(test)]
         {
             self.latent_updates += 1;
         }
-        // The fixed-word t(4) (see `draws::student_t4`): its chi-squared is
-        // `-2 ln` of a product of two open uniforms, which is never zero, so
-        // the denominator is finite and positive with no floor needed.
+        // The fixed-word t(4) (see `draws::student_t4_from_log`): its
+        // chi-squared is `-2 ln` of a product of two open uniforms, below one
+        // and so of a strictly negative `tape_ln`, so the denominator is
+        // finite and positive with no floor needed.
         // Drawn raw then standardized in two named steps so the
         // observation-only trace can carry both.
-        let innovation_raw = student_t4(innovation_words);
+        let innovation_raw = student_t4_from_log(numerator, log_chi);
         let innovation = innovation_raw / STUDENT_T_UNIT_SCALE;
         // The base process is regime-independent by construction. `step` applies
         // the GARCH-state rail and the feedback rail, neither of which takes a
@@ -1209,12 +1304,40 @@ impl GeneratedSource {
         if self.plan_decorated {
             return;
         }
+        // The quantities come from the read-ahead block, refilled from the
+        // first child still owed one; the per-plan path below runs only for
+        // a plan the block cannot serve, at the end of the size stream's
+        // position space, and refuses there as it always has.
+        let sizes = self.spec.sizes;
+        let mut child = self.plan_first_child;
+        let mut served = true;
+        for record in &mut self.plan {
+            if let Record::Trade(trade) = record {
+                match self.quantities.get(child, &self.size_stream, sizes) {
+                    Some(quantity) => trade.qty = quantity,
+                    None => {
+                        served = false;
+                        break;
+                    }
+                }
+                child += 1;
+            }
+        }
+        if served {
+            self.plan_decorated = true;
+            return;
+        }
         self.size_stream.seek(self.plan_first_child);
         // The children's words come in batched fills of up to `CHUNK`
         // children, the same words one `draw` per child would read, so a
-        // long sweep never needs a buffer as large as the child cap.
-        const CHUNK: usize = 32;
+        // long sweep never needs a buffer as large as the child cap; each
+        // fill's draws are transformed as one batch.
+        const CHUNK: usize = SIZE_BATCH;
         let mut words = [0_u64; 2 * CHUNK];
+        let mut draws = [SizeDraw {
+            base: 0.0,
+            lot_snap: false,
+        }; CHUNK];
         let mut owed = self
             .plan
             .iter()
@@ -1228,27 +1351,33 @@ impl GeneratedSource {
             let take = owed.min(CHUNK);
             let chunk = &mut words[..2 * take];
             self.size_stream.fill(chunk);
-            for [size_word, snap_word] in chunk.as_chunks::<2>().0 {
+            self.size_stream.draws_from(chunk, &mut draws[..take]);
+            for draw in &draws[..take] {
                 let trade = trades.next().expect("one trade per counted child");
-                let draw = self.size_stream.draw_from(*size_word, *snap_word);
                 trade.qty = self.spec.sizes.quantize(draw.base, draw.lot_snap);
             }
             owed -= take;
         }
         self.plan_decorated = true;
-        #[cfg(test)]
-        self.assert_decoration_is_per_child();
     }
 
-    /// Every test that decorates a plan also checks it: the quantities the
-    /// batched fill wrote must be the ones one `SizeStream::draw` per trade,
-    /// in plan order from the parent's first child, gives. So the chunk
-    /// accounting, the trade filter and the order are pinned by every sized
-    /// walk in the suite, long sweeps included, not by one fixture.
+    /// The decorated plan's quantities against one `SizeStream::draw` per
+    /// trade, in plan order from the parent's first child: the chunk
+    /// accounting, the trade filter and the order, checked by
+    /// `decoration_is_one_draw_per_trade` over walks built to cross every
+    /// chunk boundary. It ran inside `decorate` on every sized test walk
+    /// until that repeated about seventeen million scalar size draws in
+    /// `realism` alone. Returns the trades checked and how many snapped, so
+    /// the test can show its fixtures reach both branches.
     #[cfg(test)]
-    fn assert_decoration_is_per_child(&self) {
+    pub(super) fn assert_decoration_is_per_child(&self) -> (usize, usize) {
+        assert!(
+            self.plan_decorated,
+            "the plan under check was never decorated"
+        );
         let mut reference = self.size_stream.clone();
         reference.seek(self.plan_first_child);
+        let (mut trades, mut snapped) = (0, 0);
         for record in &self.plan {
             if let Record::Trade(trade) = record {
                 let draw = reference.draw();
@@ -1257,6 +1386,40 @@ impl GeneratedSource {
                     self.spec.sizes.quantize(draw.base, draw.lot_snap),
                     "a batched size differs from the per-child draw"
                 );
+                trades += 1;
+                snapped += usize::from(draw.lot_snap);
+            }
+        }
+        (trades, snapped)
+    }
+
+    /// The first child index of the resolved plan, for the decoration test.
+    #[cfg(test)]
+    pub(super) fn plan_first_child(&self) -> u64 {
+        self.plan_first_child
+    }
+
+    /// The quantity mantissas of children `first..first + out.len()`, by
+    /// the decoration's own fill, batch transform and quantizer, without a
+    /// walk: what `decorate` writes into those children's trades, which
+    /// `decoration_is_one_draw_per_trade` pins. Lets `realism` take its size
+    /// moments over child-index blocks on worker threads while the walk
+    /// itself runs unsized.
+    #[cfg(test)]
+    pub(super) fn child_quantities(&self, first: u64, out: &mut [u64]) {
+        let mut stream = self.size_stream.clone();
+        stream.seek(first);
+        let mut words = [0_u64; 2 * SIZE_BATCH];
+        let mut draws = [SizeDraw {
+            base: 0.0,
+            lot_snap: false,
+        }; SIZE_BATCH];
+        for chunk in out.chunks_mut(SIZE_BATCH) {
+            let take = chunk.len();
+            stream.fill(&mut words[..2 * take]);
+            stream.draws_from(&words[..2 * take], &mut draws[..take]);
+            for (qty, draw) in chunk.iter_mut().zip(&draws) {
+                *qty = self.spec.sizes.quantize(draw.base, draw.lot_snap);
             }
         }
     }
@@ -1333,7 +1496,7 @@ impl GeneratedSource {
         }
         let p = self.level_step_prob();
         let mut word = self.step_stream.from(self.plan_first_child);
-        LevelSteps::new(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
+        LevelSteps::with_law(p, burst.remaining, &mut word).drain(&mut word, &mut self.sweep_steps);
         match resolve_sweep(
             burst.price_ticks,
             burst.side,
@@ -1440,7 +1603,7 @@ impl GeneratedSource {
         // take `self` whole.
         let p = self.level_step_prob();
         let mut word = self.step_stream.from(self.plan_first_child);
-        let mut steps = LevelSteps::new(p, burst.remaining, &mut word);
+        let mut steps = LevelSteps::with_law(p, burst.remaining, &mut word);
         let mut emitted = 0;
         let mut outcome = Ok(());
         while burst.remaining > 0 {
@@ -1469,7 +1632,7 @@ impl GeneratedSource {
     /// ten, because a trade summary is one print per level. On the bounce
     /// walks the regime is fixed for the whole sweep: it moves once per
     /// parent, in `next_side`, before the sweep begins.
-    fn level_step_prob(&self) -> f64 {
+    fn level_step_prob(&self) -> StepLaw {
         let coins = &self.spec.coins;
         match &self.walk {
             Walk::Cascade(_) => coins.level_step_cascade,
@@ -1921,14 +2084,14 @@ impl GeneratedSource {
         let mut words = [0_u64; 7];
         self.rng.fill(&mut words);
         let [i0, i1, i2, regime, side_flip, drift_direction, drift] = words;
-        let innovation = [i0, i1, i2];
         let bounce = BounceDraws {
             regime,
             side_flip,
             drift_direction,
             drift,
         };
-        let mid = self.next_latent_mid(innovation);
+        // The packet's one random-input logarithm, scalar: nothing to batch.
+        let mid = self.next_latent_mid(i0, tape_ln(chi_product([i1, i2])));
         let (aggressor, book) = self.next_side_and_book(mid, bounce);
         let price_ticks = placed_trade_ticks(&book, aggressor, spec.trade_bounce_ticks);
         self.plan_parent_ts = self.clock_ns;
@@ -2281,10 +2444,10 @@ impl GeneratedSource {
         self.rng.fill(&mut words);
         let mut words = words.into_iter();
         let draws = LegacyDraws::draw(|| words.next().expect("twelve words for twelve slots"));
-        let dt_ns =
-            ((self.next_duration_ns(draws.gap, draws.state_flip) as f64 / rate_mult).round()
-                as u64)
-                .max(1);
+        let logs = LegacyLogs::of(&draws);
+        let dt_ns = ((self.next_duration_ns(logs.gap, draws.state_flip) as f64 / rate_mult).round()
+            as u64)
+            .max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
         // the start of the gap (the clock has not advanced yet), then the clock
         // steps, then next_latent_mid reads the volatility multiplier at the
@@ -2318,7 +2481,7 @@ impl GeneratedSource {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
         self.reopen_frontier_ns = self.clock_ns;
-        let mid = self.next_latent_mid(draws.innovation);
+        let mid = self.next_latent_mid(draws.innovation[0], logs.chi);
         let (aggressor, fresh_book) = self.next_side_and_book(mid, draws.bounce);
         // Sweep size is conditional on the arrival state, and the two branches
         // are constructed to reproduce the declared unconditional shape:
@@ -2410,7 +2573,7 @@ impl GeneratedSource {
                     1.0,
                 );
                 let count =
-                    mixture_count(&mut event_shape, draws.count_branch, draws.count_geometric);
+                    mixture_count_from_log(&mut event_shape, draws.count_branch, logs.geometric);
                 self.shape.truncated += event_shape.truncated;
                 count
             };
@@ -2507,5 +2670,64 @@ impl GeneratedSource {
             }
         }
         price_ticks
+    }
+}
+
+#[cfg(test)]
+mod quantity_cache_tests {
+    use super::*;
+
+    /// Each child's quantity by one `SizeStream::draw` at its own index: the
+    /// oracle, sharing nothing with the block's fill and batch.
+    fn oracle(stream: &SizeStream, sizes: SizeQuantizer, child: u64) -> u64 {
+        let mut stream = stream.clone();
+        stream.seek(child);
+        let draw = stream.draw();
+        sizes.quantize(draw.base, draw.lot_snap)
+    }
+
+    /// Hits, a run across a block's end, a jump back before the block, a
+    /// hole forward past it, a clone that starts empty, and the last
+    /// readable children of the size stream's position space.
+    #[test]
+    fn a_cached_quantity_is_its_childs_own_draw() {
+        let stream = SizeStream::new(42, 0.0027, 1.15, 0.2);
+        let sizes = SizeQuantizer::new(8, false, 1, -3);
+        let mut cache = QuantityCache::default();
+        let visit = |cache: &mut QuantityCache, child: u64| {
+            assert_eq!(
+                cache.get(child, &stream, sizes),
+                Some(oracle(&stream, sizes, child)),
+                "child {child}"
+            );
+        };
+        for child in 0..600 {
+            visit(&mut cache, child);
+        }
+        assert_eq!(
+            cache.0.as_ref().map(|b| b.first),
+            Some(512),
+            "two refills ran"
+        );
+        for child in [300, 10, 9_000, 9_255, 9_256, 1 << 40] {
+            visit(&mut cache, child);
+        }
+        let mut clone = cache.clone();
+        assert!(clone.0.is_none(), "a clone carries no block");
+        visit(&mut clone, 7);
+        let last = (1_u64 << 63) - 2;
+        for child in [last - 300, last - 1, last] {
+            visit(&mut cache, child);
+        }
+        assert_eq!(
+            cache.0.as_ref().map(|b| (b.first, b.len)),
+            Some((last - 1, 2)),
+            "a block stops at the last readable child, which it then serves"
+        );
+        assert_eq!(
+            cache.get(last + 1, &stream, sizes),
+            None,
+            "past the last readable child"
+        );
     }
 }

@@ -38,6 +38,9 @@
 use super::children::{half_open_unit, normal_quantile, open_unit};
 use super::consts::{ARRIVAL_WEIBULL_SHAPE, CHILD_CAP, STUDENT_T_DF};
 use super::dynamics::SweepShape;
+#[cfg(doc)]
+use super::vecmath::tape_ln;
+use super::vecmath::tape_ln4;
 
 // The closed forms below are specific to these two constants: an exponential
 // gap is a unit Weibull only at shape one, and chi-squared is `-2 ln` of a
@@ -138,15 +141,52 @@ pub(super) fn coin(raw: u64, p: f64) -> bool {
     half_open_unit(raw) < p
 }
 
+/// The product of two open uniforms whose logarithm is the t(4)
+/// denominator's: `ln(u1 u2)` of the rounded product, never `ln(u1) +
+/// ln(u2)`, which need not agree in the last bit.
+pub(super) fn chi_product(words: [u64; 2]) -> f64 {
+    open_unit(words[0]) * open_unit(words[1])
+}
+
 /// A raw, unstandardized t(4) variate: a normal over the root of an
 /// independent chi-squared(4) over four, the chi-squared being
-/// `-2 ln(u1 u2)`. The expression is fixed - `ln(u1 u2)` and
-/// `ln(u1) + ln(u2)` need not agree in the last bit - so a later batched
-/// transform must evaluate exactly this.
-pub(super) fn student_t4(words: [u64; 3]) -> f64 {
-    let normal = normal_quantile(open_unit(words[0]));
-    let chi_over_df = -0.5 * (open_unit(words[1]) * open_unit(words[2])).ln();
+/// `-2 ln(u1 u2)`, from the numerator's word and `ln(u1 u2)` as
+/// [`tape_ln`] gives it of [`chi_product`] (tape protocol 42).
+pub(super) fn student_t4_from_log(numerator: u64, log_product: f64) -> f64 {
+    let normal = normal_quantile(open_unit(numerator));
+    let chi_over_df = -0.5 * log_product;
     normal / chi_over_df.sqrt()
+}
+
+/// The legacy packet's three random-input logarithms, each of an open
+/// uniform or a product of two: the gap's, the t(4) denominator's and the
+/// count geometric's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LegacyLogs {
+    pub(super) gap: f64,
+    pub(super) chi: f64,
+    pub(super) geometric: f64,
+}
+
+impl LegacyLogs {
+    /// All three in one four-lane [`tape_ln4`] call, the fourth lane idle
+    /// at one. Each lane is a pure function of its own words, computed
+    /// whether or not its branch is later taken; what reads it - the state
+    /// mean, the innovation's scale, the shape's `ln_continue` - still
+    /// applies it at its stage.
+    pub(super) fn of(draws: &LegacyDraws) -> Self {
+        let [gap, chi, geometric, _] = tape_ln4([
+            open_unit(draws.gap),
+            chi_product([draws.innovation[1], draws.innovation[2]]),
+            open_unit(draws.count_geometric),
+            1.0,
+        ]);
+        Self {
+            gap,
+            chi,
+            geometric,
+        }
+    }
 }
 
 /// A raw, unstandardized t variate with an integer `nu` degrees of freedom
@@ -344,12 +384,23 @@ fn deviance_term(x: f64, lambda: f64) -> f64 {
 /// the geometric on `1, 2, ...` with mean `m`, capped at `CHILD_CAP` with
 /// the truncation counted. `SweepShape::next_count` draws the same mixture
 /// from the main stream for the paths that still do.
+/// The cascade draws it with the platform `ln`; the legacy walk passes its
+/// [`tape_ln`] through [`mixture_count_from_log`] (tape protocol 42).
 pub(super) fn mixture_count(shape: &mut SweepShape, branch: u64, geometric: u64) -> u32 {
+    mixture_count_from_log(shape, branch, open_unit(geometric).ln())
+}
+
+/// [`mixture_count`] from the geometric word's logarithm.
+pub(super) fn mixture_count_from_log(
+    shape: &mut SweepShape,
+    branch: u64,
+    log_geometric: f64,
+) -> u32 {
     shape.drawn += 1;
     if half_open_unit(branch) < shape.q {
         return 1;
     }
-    let raw = 1.0 + open_unit(geometric).ln() / shape.ln_continue();
+    let raw = 1.0 + log_geometric / shape.ln_continue();
     let count = raw.floor().max(1.0) as u64;
     if count > u64::from(CHILD_CAP) {
         shape.truncated += 1;
@@ -362,6 +413,28 @@ pub(super) fn mixture_count(shape: &mut SweepShape, branch: u64, geometric: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each of the packet's logs is its own slot's, by the scalar `tape_ln`
+    /// of that slot's input: a vector-against-scalar check alone cannot see
+    /// two lanes swapped.
+    #[test]
+    fn legacy_logs_take_each_slot_to_its_own_lane() {
+        use super::super::vecmath::tape_ln;
+        let mut rng = crate::TapeRng::new(17, 0x006C_6F67);
+        for _ in 0..2_000 {
+            let draws = LegacyDraws::draw(|| rng.next_word());
+            let logs = LegacyLogs::of(&draws);
+            assert_eq!(logs.gap.to_bits(), tape_ln(open_unit(draws.gap)).to_bits());
+            assert_eq!(
+                logs.chi.to_bits(),
+                tape_ln(open_unit(draws.innovation[1]) * open_unit(draws.innovation[2])).to_bits()
+            );
+            assert_eq!(
+                logs.geometric.to_bits(),
+                tape_ln(open_unit(draws.count_geometric)).to_bits()
+            );
+        }
+    }
 
     /// The capped Poisson law at `lambda`, computed independently of the
     /// sampler: each probability from `-lambda + k ln(lambda) - ln(k!)`, the

@@ -291,7 +291,32 @@ pub use trigger::{
 /// position, and every golden, hash and transcript re-ran unchanged - and the
 /// bump is taken because the generation path changed and the rule is
 /// unconditional.
-pub const TAPE_PROTOCOL_VERSION: u32 = 40;
+/// 41 gives the size law its own `exp` and batches its transforms: a placed
+/// child's size is `tape_exp(mu + sigma z)`, a Cody-Waite reduction and a
+/// degree-13 polynomial evaluated identically in scalar code and in AVX2
+/// lanes, in place of the platform `exp`, from which it differs by an ulp or
+/// two; a size whose value sat on a quantization or snap threshold can land
+/// one step over. The size normals and the cascade's component-step normals
+/// are computed in batches whose AVX2 central branch is bit-identical to the
+/// scalar quantile, so only the `exp` moves bytes. Every placed tape's sizes
+/// can move; prices, times and the cascade's draws do not.
+/// 42 gives the bounce walks their own logarithm for the packet's three
+/// random inputs - the gap's open uniform, the t(4) denominator's product of
+/// two and the child-count geometric's - through `tape_ln`, fdlibm's `e_log`
+/// tree applied uniformly, the legacy walk's three in one four-lane call.
+/// It is within an ulp of the platform `ln`, so the gap, the innovation and
+/// a count move at that level, and every legacy and integrated tape can move
+/// with them; the cascade keeps the platform `ln` and does not move.
+/// 43 decorates sizes across parents: a placed trade's quantity comes from
+/// a block of 256 consecutive children's quantities computed ahead by the
+/// same fill, batch transform and quantizer, refilled from the first child
+/// still owed one. No byte moves - a quantity is a function of its child
+/// index alone - and the bump is taken because the generation path changed.
+/// 44 interleaves up to four independent four-block chains in the AVX2
+/// Philox kernel, so a fill computes up to sixteen blocks per call. Integer
+/// arithmetic, every word the one `next_word` gives at its position: no byte
+/// moves, and the bump is taken because the generation path changed.
+pub const TAPE_PROTOCOL_VERSION: u32 = 44;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

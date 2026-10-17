@@ -32,8 +32,8 @@
 //! bytes, little-endian, discarding the tail of the last. A later "optimization"
 //! that buffered half words would move every tape. [`TapeRng::fill`] is the
 //! batched form of `next_u64`, not a new consumption pattern: it writes the
-//! same words at the same positions, computing blocks [`FILL_LANES`] at a time
-//! into a slice the caller owns - through an AVX2 intrinsics kernel when the
+//! same words at the same positions, computing up to sixteen blocks per kernel
+//! call into a slice the caller owns - through an AVX2 intrinsics kernel when the
 //! running x86-64 CPU has AVX2, and through the portable
 //! [`philox4x32_10_lanes`] otherwise, the two bit-identical.
 //!
@@ -79,11 +79,11 @@ pub fn philox4x32_10(counter: [u32; 4], key: [u32; 2]) -> [u32; 4] {
     [x0, x1, x2, x3]
 }
 
-/// The lane width [`TapeRng::fill`] computes blocks at: that many consecutive
-/// Philox blocks per kernel call, `2 * FILL_LANES` words. Four, because the
-/// AVX2 kernel holds one block in each 64-bit lane of a 256-bit register. It
-/// changes throughput only, never a word, because every lane is the same
-/// function of its own counter as [`philox4x32_10`].
+/// The blocks one chain of the AVX2 kernel holds, one in each 64-bit lane of
+/// a 256-bit register: [`TapeRng::fill`] computes up to four such chains per
+/// kernel call, interleaved. It changes throughput only, never a word,
+/// because every lane is the same function of its own counter as
+/// [`philox4x32_10`].
 pub const FILL_LANES: usize = 4;
 
 /// `N` consecutive Philox4x32-10 blocks at once, blocks `block` through
@@ -145,7 +145,7 @@ pub fn philox4x32_10_lanes<const N: usize>(
     [x0, x1, x2, x3]
 }
 
-/// The fill's lane batch: `FILL_LANES` consecutive blocks. On an x86-64 CPU
+/// The fill's lane batch: `N` consecutive blocks. On an x86-64 CPU
 /// with AVX2 it runs [`philox4x32_10_avx2`], written with intrinsics, because
 /// the portable kernel above compiled under AVX2 measured slower than its
 /// baseline build - the autovectorizer did not turn the widening multiply into
@@ -154,41 +154,59 @@ pub fn philox4x32_10_lanes<const N: usize>(
 /// a tape can depend on which one ran, and the choice needs no build
 /// configuration, so a consumer building these crates gets it too.
 #[inline]
-fn fill_lanes(block: u64, domain: u64, key: [u32; 2]) -> [[u32; FILL_LANES]; 4] {
+fn fill_lanes<const N: usize>(block: u64, domain: u64, key: [u32; 2]) -> [[u32; N]; 4] {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the running CPU was just checked for AVX2, the only feature
         // the called function enables.
-        return unsafe { philox4x32_10_avx2(block, domain, key) };
+        return unsafe { philox4x32_10_avx2::<N>(block, domain, key) };
     }
-    philox4x32_10_lanes::<FILL_LANES>(block, domain, key)
+    philox4x32_10_lanes::<N>(block, domain, key)
 }
 
-/// Four consecutive Philox4x32-10 blocks in AVX2 registers. Each of the four
-/// 64-bit lanes holds one block, and each of the four state words sits in the
-/// low half of its own register, so `_mm256_mul_epu32` - which multiplies the
-/// low unsigned 32 bits of every 64-bit lane into a full 64-bit product - is
-/// the round's widening multiply for all four blocks at once, two per round.
-/// The high halves of every register stay zero through the rounds (the xors
+/// The most blocks one AVX2 call computes: four chains of four.
+const MAX_CHAIN_BLOCKS: usize = 16;
+
+/// `N` consecutive Philox4x32-10 blocks in AVX2 registers, `N` a multiple of
+/// four up to [`MAX_CHAIN_BLOCKS`]: `N / 4` independent chains of four blocks,
+/// their rounds interleaved. Within a chain, each of the four 64-bit lanes
+/// holds one block, and each of the four state words sits in the low half of
+/// its own register, so `_mm256_mul_epu32` - which multiplies the low
+/// unsigned 32 bits of every 64-bit lane into a full 64-bit product - is the
+/// round's widening multiply for all four blocks at once, two per round. The
+/// high halves of every register stay zero through the rounds (the xors
 /// combine zero-high values and the low halves are masked), so the state never
 /// leaves the registers between the counter and the output.
+///
+/// One chain is bound by the multiply's latency, ten dependent rounds deep:
+/// it measured about eight cycles per word. The chains share no state, so a
+/// second, third and fourth chain fill the multiplier's idle issue slots;
+/// every lane is still the same function of its own counter.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-fn philox4x32_10_avx2(block: u64, domain: u64, key: [u32; 2]) -> [[u32; FILL_LANES]; 4] {
+fn philox4x32_10_avx2<const N: usize>(block: u64, domain: u64, key: [u32; 2]) -> [[u32; N]; 4] {
     use std::arch::x86_64::{
         __m256i, _mm256_and_si256, _mm256_mul_epu32, _mm256_set_epi64x, _mm256_set1_epi64x,
-        _mm256_srli_epi64, _mm256_xor_si256,
+        _mm256_setzero_si256, _mm256_srli_epi64, _mm256_xor_si256,
     };
-    const _: () = assert!(FILL_LANES == 4, "the AVX2 kernel is four blocks wide");
+    const { assert!(N.is_multiple_of(4) && N > 0 && N <= MAX_CHAIN_BLOCKS) };
+    let chains = N / 4;
     let low = _mm256_set1_epi64x(0xFFFF_FFFF);
-    let counter = |i: u64| block.wrapping_add(i);
-    let lanes = |f: &dyn Fn(u64) -> u64| {
-        _mm256_set_epi64x(f(3) as i64, f(2) as i64, f(1) as i64, f(0) as i64)
-    };
-    let mut x0 = lanes(&|i| counter(i) & 0xFFFF_FFFF);
-    let mut x1 = lanes(&|i| counter(i) >> 32);
-    let mut x2 = _mm256_set1_epi64x((domain & 0xFFFF_FFFF) as i64);
-    let mut x3 = _mm256_set1_epi64x((domain >> 32) as i64);
+    let zero = _mm256_setzero_si256();
+    let mut x0 = [zero; MAX_CHAIN_BLOCKS / 4];
+    let mut x1 = [zero; MAX_CHAIN_BLOCKS / 4];
+    let mut x2 = [zero; MAX_CHAIN_BLOCKS / 4];
+    let mut x3 = [zero; MAX_CHAIN_BLOCKS / 4];
+    for c in 0..chains {
+        let counter = |i: u64| block.wrapping_add(4 * c as u64 + i);
+        let lanes = |f: &dyn Fn(u64) -> u64| {
+            _mm256_set_epi64x(f(3) as i64, f(2) as i64, f(1) as i64, f(0) as i64)
+        };
+        x0[c] = lanes(&|i| counter(i) & 0xFFFF_FFFF);
+        x1[c] = lanes(&|i| counter(i) >> 32);
+        x2[c] = _mm256_set1_epi64x((domain & 0xFFFF_FFFF) as i64);
+        x3[c] = _mm256_set1_epi64x((domain >> 32) as i64);
+    }
     let m0 = _mm256_set1_epi64x(i64::from(M0));
     let m1 = _mm256_set1_epi64x(i64::from(M1));
     let (mut k0, mut k1) = (key[0], key[1]);
@@ -197,24 +215,31 @@ fn philox4x32_10_avx2(block: u64, domain: u64, key: [u32; 2]) -> [[u32; FILL_LAN
             k0 = k0.wrapping_add(W0);
             k1 = k1.wrapping_add(W1);
         }
-        let p0 = _mm256_mul_epu32(m0, x0);
-        let p1 = _mm256_mul_epu32(m1, x2);
         let k0v = _mm256_set1_epi64x(i64::from(k0));
         let k1v = _mm256_set1_epi64x(i64::from(k1));
-        let next0 = _mm256_xor_si256(_mm256_xor_si256(_mm256_srli_epi64::<32>(p1), x1), k0v);
-        let next2 = _mm256_xor_si256(_mm256_xor_si256(_mm256_srli_epi64::<32>(p0), x3), k1v);
-        x1 = _mm256_and_si256(p1, low);
-        x3 = _mm256_and_si256(p0, low);
-        x0 = next0;
-        x2 = next2;
+        for c in 0..chains {
+            let p0 = _mm256_mul_epu32(m0, x0[c]);
+            let p1 = _mm256_mul_epu32(m1, x2[c]);
+            let next0 = _mm256_xor_si256(_mm256_xor_si256(_mm256_srli_epi64::<32>(p1), x1[c]), k0v);
+            let next2 = _mm256_xor_si256(_mm256_xor_si256(_mm256_srli_epi64::<32>(p0), x3[c]), k1v);
+            x1[c] = _mm256_and_si256(p1, low);
+            x3[c] = _mm256_and_si256(p0, low);
+            x0[c] = next0;
+            x2[c] = next2;
+        }
     }
-    let unpack = |v: __m256i| -> [u32; FILL_LANES] {
-        // SAFETY: `__m256i` and `[u64; 4]` are both 32 bytes of plain integer
-        // data with no invalid bit patterns.
-        let wide: [u64; 4] = unsafe { std::mem::transmute(v) };
-        wide.map(|w| w as u32)
-    };
-    [unpack(x0), unpack(x1), unpack(x2), unpack(x3)]
+    let mut out = [[0_u32; N]; 4];
+    for (word, registers) in out.iter_mut().zip([x0, x1, x2, x3]) {
+        for c in 0..chains {
+            // SAFETY: `__m256i` and `[u64; 4]` are both 32 bytes of plain
+            // integer data with no invalid bit patterns.
+            let wide: [u64; 4] = unsafe { std::mem::transmute::<__m256i, [u64; 4]>(registers[c]) };
+            for (i, w) in wide.iter().enumerate() {
+                word[4 * c + i] = *w as u32;
+            }
+        }
+    }
+    out
 }
 
 /// One block's lane 0 and lane 1 as the two `u64` positions they hold.
@@ -255,6 +280,34 @@ fn cached_block(
     words
 }
 
+/// The first `dst.len()` words (at most `2 * N`) of the `N` blocks from
+/// `block`, leaving the cache on the block that holds the last word written,
+/// whose lane 1 a following odd read wants. Always correct for its address.
+#[inline]
+fn write_batch<const N: usize>(
+    key: [u32; 2],
+    domain: u64,
+    cache: &mut Option<(u64, [u32; 4])>,
+    block: u64,
+    dst: &mut [u64],
+) {
+    debug_assert!(!dst.is_empty() && dst.len() <= 2 * N);
+    let [x0, x1, x2, x3] = fill_lanes::<N>(block, domain, key);
+    for (index, word) in dst.iter_mut().enumerate() {
+        let i = index / 2;
+        *word = if index % 2 == 0 {
+            u64::from(x0[i]) | (u64::from(x1[i]) << 32)
+        } else {
+            u64::from(x2[i]) | (u64::from(x3[i]) << 32)
+        };
+    }
+    let last = (dst.len() - 1) / 2;
+    *cache = Some((
+        block + last as u64,
+        [x0[last], x1[last], x2[last], x3[last]],
+    ));
+}
+
 /// Write the words at positions `start..start + dst.len()` into `dst`. The
 /// caller has checked the whole range is readable. `cache` is read and left
 /// holding a block that was really computed at its address, so it is never
@@ -278,45 +331,23 @@ fn fill_range(
         position += 1;
         rest = tail;
     }
-    let (batches, tail) = rest.as_chunks_mut::<{ 2 * FILL_LANES }>();
+    let (batches, tail) = rest.as_chunks_mut::<{ 2 * MAX_CHAIN_BLOCKS }>();
     for batch in batches {
-        let block = position >> 1;
-        let [x0, x1, x2, x3] = fill_lanes(block, domain, key);
-        for i in 0..FILL_LANES {
-            batch[2 * i] = u64::from(x0[i]) | (u64::from(x1[i]) << 32);
-            batch[2 * i + 1] = u64::from(x2[i]) | (u64::from(x3[i]) << 32);
-        }
-        // The batch's last block, which a following odd read would want only
-        // if the tail is empty and the stream then seeks back one; cheap to
-        // keep and always correct for its address.
-        let last = FILL_LANES - 1;
-        *cache = Some((
-            block + last as u64,
-            [x0[last], x1[last], x2[last], x3[last]],
-        ));
-        position += (2 * FILL_LANES) as u64;
+        write_batch::<MAX_CHAIN_BLOCKS>(key, domain, cache, position >> 1, batch);
+        position += (2 * MAX_CHAIN_BLOCKS) as u64;
     }
-    // A tail spanning more than one block still runs one lane batch and keeps
-    // only the words it needs: computing the unused lanes is cheaper than two
-    // or three scalar blocks, and they are never consumed, so no position
-    // moves past the slice. The cache is left on the block holding the last
-    // word written, whose lane 1 a following odd read wants.
+    // A tail spanning more than one block still runs one batch, the fewest
+    // chains that cover it, and keeps only the words it needs: computing the
+    // unused lanes is cheaper than scalar blocks, and they are never consumed,
+    // so no position moves past the slice.
     if tail.len() > 2 {
         let block = position >> 1;
-        let [x0, x1, x2, x3] = fill_lanes(block, domain, key);
-        for (index, word) in tail.iter_mut().enumerate() {
-            let i = index / 2;
-            *word = if index % 2 == 0 {
-                u64::from(x0[i]) | (u64::from(x1[i]) << 32)
-            } else {
-                u64::from(x2[i]) | (u64::from(x3[i]) << 32)
-            };
+        match tail.len().div_ceil(2 * FILL_LANES) {
+            1 => write_batch::<4>(key, domain, cache, block, tail),
+            2 => write_batch::<8>(key, domain, cache, block, tail),
+            3 => write_batch::<12>(key, domain, cache, block, tail),
+            _ => write_batch::<16>(key, domain, cache, block, tail),
         }
-        let last = (tail.len() - 1) / 2;
-        *cache = Some((
-            block + last as u64,
-            [x0[last], x1[last], x2[last], x3[last]],
-        ));
         return;
     }
     // A tail of one block at most: through the cache, so a trailing lane 0
@@ -389,8 +420,8 @@ impl TapeRng {
 
     /// Fill `dst` with the next `dst.len()` words and advance past them:
     /// exactly what as many [`next_word`](Self::next_word) calls would return,
-    /// leaving the same position, with whole runs of blocks computed
-    /// [`FILL_LANES`] at a time. The caller owns the scratch; the stream keeps
+    /// leaving the same position, with whole runs of blocks computed up to
+    /// sixteen per kernel call. The caller owns the scratch; the stream keeps
     /// no buffer, so its size and clone cost are unchanged.
     ///
     /// Exhaustion matches `next_word` call for call: position `u64::MAX` is
@@ -605,7 +636,8 @@ mod tests {
     /// the same words without moving the stream.
     #[test]
     fn fill_matches_next_word_for_every_start_and_length() {
-        let batch = 2 * FILL_LANES;
+        // Every tail width (one to four chains) and every full-batch boundary.
+        let batch = 2 * MAX_CHAIN_BLOCKS;
         let carry_position = 2 * ((1u64 << 32) - 1);
         let mut starts: Vec<u64> = (0..=4).collect();
         for back in 0..=(2 * batch as u64 + 1) {
@@ -751,19 +783,28 @@ mod tests {
 
         // Other readable prefixes, of both parities: each delivers exactly
         // what `next_word` delivers before refusing.
-        for readable in [0_u64, 1, 2, 5, 8, 9] {
+        // Prefixes reaching every tail width and a full 32-word batch.
+        for readable in [0_u64, 1, 2, 5, 8, 9, 17, 24, 25, 31, 32, 33, 47] {
             let start = u64::MAX - readable;
             let mut words = TapeRng::new(5, 1);
             words.seek(start);
             let mut prefix = Vec::new();
             drop(catch_unwind(AssertUnwindSafe(|| {
-                for _ in 0..20 {
+                for _ in 0..80 {
                     prefix.push(words.next_word());
                 }
             })));
+            // A fill of exactly the readable words succeeds and ends at the
+            // top, its widest tail's unused lanes past the space untouched.
+            let mut exact_fill = TapeRng::new(5, 1);
+            exact_fill.seek(start);
+            let mut exact = vec![0_u64; readable as usize];
+            exact_fill.fill(&mut exact);
+            assert_eq!(exact[..], prefix[..], "exact readable {readable}");
+            assert_eq!(exact_fill.position(), u64::MAX);
             let mut filled = TapeRng::new(5, 1);
             filled.seek(start);
-            let mut out = [SENTINEL; 20];
+            let mut out = [SENTINEL; 80];
             assert!(catch_unwind(AssertUnwindSafe(|| filled.fill(&mut out))).is_err());
             let delivered = prefix.len();
             assert_eq!(out[..delivered], prefix[..], "readable {readable}");
@@ -792,21 +833,33 @@ mod tests {
         rng.next_word();
     }
 
-    /// The AVX2 kernel against the scalar block, every lane, across the low
-    /// counter word's carry and the top of the block range. Skipped, and says
-    /// so, on a CPU without AVX2, where the portable kernel's pin covers the
-    /// fill instead.
+    /// The AVX2 kernel against the scalar block, every lane of every chain
+    /// width, across the low counter word's carry and the top of the block
+    /// range. Skipped, and says so, on a CPU without AVX2, where the portable
+    /// kernel's pin covers the fill instead.
     #[test]
     fn the_avx2_kernel_matches_the_scalar_block_on_every_lane() {
         #[cfg(target_arch = "x86_64")]
         if std::arch::is_x86_feature_detected!("avx2") {
+            check_chains::<4>();
+            check_chains::<8>();
+            check_chains::<12>();
+            check_chains::<16>();
+            return;
+        }
+        eprintln!("no AVX2 on this CPU: the AVX2 kernel was not exercised");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn check_chains<const N: usize>() {
+        {
             for key in [[0, 0], [u32::MAX, u32::MAX], [0xA409_3822, 0x299F_31D0]] {
                 for domain in [0, 7, 0xFEED_FACE_0000_0007, u64::MAX] {
-                    let starts = (0..64).chain((1 << 32) - 6..(1 << 32) + 2);
-                    for block in starts.chain([u64::MAX / 2 - 3]) {
-                        // SAFETY: AVX2 was checked for on this CPU above.
-                        let lanes = unsafe { philox4x32_10_avx2(block, domain, key) };
-                        for i in 0..FILL_LANES {
+                    let starts = (0..64).chain((1 << 32) - 18..(1 << 32) + 2);
+                    for block in starts.chain([u64::MAX / 2 + 1 - N as u64]) {
+                        // SAFETY: the caller checked for AVX2 on this CPU.
+                        let lanes = unsafe { philox4x32_10_avx2::<N>(block, domain, key) };
+                        for i in 0..N {
                             let b = block + i as u64;
                             let counter = [
                                 b as u32,
@@ -817,14 +870,31 @@ mod tests {
                             assert_eq!(
                                 [lanes[0][i], lanes[1][i], lanes[2][i], lanes[3][i]],
                                 philox4x32_10(counter, key),
-                                "block {block} lane {i}"
+                                "{N} blocks from {block}, lane {i}"
                             );
                         }
                     }
                 }
             }
-            return;
         }
-        eprintln!("no AVX2 on this CPU: the AVX2 kernel was not exercised");
+    }
+
+    /// `fill` in runs of 12 (a legacy packet), 17 and 64 (size fills) over
+    /// 120M words. Run with `--release`; it prints walls.
+    #[test]
+    #[ignore = "bench: a wall measurement, meaningful only in a release build"]
+    fn fill_walls() {
+        const TOTAL: usize = 120_000_000;
+        for run in [12_usize, 17, 64] {
+            let mut rng = TapeRng::new(3, 9);
+            let mut buf = vec![0_u64; run];
+            let mut sum = 0_u64;
+            let start = std::time::Instant::now();
+            for _ in 0..TOTAL / run {
+                rng.fill(&mut buf);
+                sum = sum.wrapping_add(buf[run - 1]);
+            }
+            println!("runs of {run}: {:?}, checksum {sum}", start.elapsed());
+        }
     }
 }

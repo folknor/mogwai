@@ -21,7 +21,13 @@
 //! ([`LevelSteps::drain`]) and the sweep resolved from them without laying a
 //! child out ([`resolve_sweep`]).
 
+#[cfg(test)]
+use super::vecmath::tape_exp;
+use super::vecmath::{EXP_DOMAIN, normal_quantiles, tape_exps};
 use crate::TapeRng;
+
+/// The most children one [`SizeStream::draws_from`] batch decorates.
+pub(super) const SIZE_BATCH: usize = 32;
 
 /// The size stream's [`TapeRng`] domain.
 const SIZE_STREAM_TAG: u64 = 0x7369_7A65_7331_3336;
@@ -60,8 +66,6 @@ pub(super) fn half_open_unit(raw: u64) -> f64 {
 /// quantization, which the statistical gates, not an identity, judge.
 pub(super) struct LevelSteps {
     p: f64,
-    /// `ln(1 - p)`, through `ln_1p` so a small `p` does not round `1 - p`
-    /// to one and destroy the denominator.
     log_q: f64,
     trials: u32,
     /// The first trial no draw has decided yet.
@@ -70,15 +74,42 @@ pub(super) struct LevelSteps {
     next: Option<u32>,
 }
 
+/// A level-step probability with its gap denominator, built once per
+/// source rather than once per sweep: a source selects between three fixed
+/// probabilities, so the logarithm is a constant of each.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StepLaw {
+    p: f64,
+    /// `ln(1 - p)`, through `ln_1p` so a small `p` does not round `1 - p`
+    /// to one and destroy the denominator.
+    log_q: f64,
+}
+
+impl StepLaw {
+    pub(super) fn new(p: f64) -> Self {
+        Self {
+            p,
+            log_q: (-p).ln_1p(),
+        }
+    }
+}
+
 impl LevelSteps {
     /// The steps of a sweep of `count` children at probability `p`, with the
     /// first gap already drawn. `word` yields one raw `u64` per call and is
     /// called only for a gap: every placed walk passes its counter-based
     /// step words.
+    #[cfg(test)]
     pub(super) fn new(p: f64, count: u32, word: &mut impl FnMut() -> u64) -> Self {
+        Self::with_law(StepLaw::new(p), count, word)
+    }
+
+    /// [`LevelSteps::new`] under a prebuilt law.
+    pub(super) fn with_law(law: StepLaw, count: u32, word: &mut impl FnMut() -> u64) -> Self {
+        let StepLaw { p, log_q } = law;
         let mut steps = Self {
             p,
-            log_q: (-p).ln_1p(),
+            log_q,
             trials: count.saturating_sub(1),
             cursor: 0,
             next: None,
@@ -275,10 +306,21 @@ pub(super) struct SizeStream {
 }
 
 impl SizeStream {
+    /// Refuses a law whose reachable exponent leaves [`EXP_DOMAIN`]: the
+    /// open-unit grid bounds `z`, so the two extreme words decide it once
+    /// here, and an out-of-domain sample later is an internal defect.
     pub(super) fn new(seed: u64, median: f64, sigma: f64, snap_frac: f64) -> Self {
+        let mu = median.ln();
+        for word in [0, u64::MAX] {
+            let x = mu + sigma * normal_quantile(open_unit(word));
+            assert!(
+                EXP_DOMAIN.contains(&x),
+                "a size law of median {median} and sigma {sigma} reaches exp({x})"
+            );
+        }
         Self {
             rng: TapeRng::new(seed, SIZE_STREAM_TAG),
-            mu: median.ln(),
+            mu,
             sigma,
             snap_frac,
         }
@@ -310,12 +352,40 @@ impl SizeStream {
         self.draw_from(size_word, snap_word)
     }
 
-    /// A child's size draw from its two words, size then snap.
+    /// A child's size draw from its two words, size then snap, one child at
+    /// a time: the reference [`SizeStream::draws_from`] is pinned against.
+    #[cfg(test)]
     pub(super) fn draw_from(&self, size_word: u64, snap_word: u64) -> SizeDraw {
         let z = normal_quantile(open_unit(size_word));
-        let base = (self.mu + self.sigma * z).exp().max(f64::MIN_POSITIVE);
+        let base = tape_exp(self.mu + self.sigma * z).max(f64::MIN_POSITIVE);
         let lot_snap = half_open_unit(snap_word) < self.snap_frac;
         SizeDraw { base, lot_snap }
+    }
+
+    /// The draws of `words.len() / 2` children from their interleaved size
+    /// and snap words, into `out`: what [`SizeStream::draw_from`] gives
+    /// each, bit for bit, with the quantile and the `exp` batched. At most
+    /// [`SIZE_BATCH`] children.
+    pub(super) fn draws_from(&self, words: &[u64], out: &mut [SizeDraw]) {
+        let (pairs, rest) = words.as_chunks::<2>();
+        assert!(rest.is_empty() && pairs.len() == out.len() && out.len() <= SIZE_BATCH);
+        let n = out.len();
+        let mut size_words = [0_u64; SIZE_BATCH];
+        for (slot, [size_word, _]) in size_words.iter_mut().zip(pairs) {
+            *slot = *size_word;
+        }
+        let mut xs = [0.0_f64; SIZE_BATCH];
+        normal_quantiles(&size_words[..n], &mut xs[..n]);
+        for x in &mut xs[..n] {
+            *x = self.mu + self.sigma * *x;
+        }
+        tape_exps(&mut xs[..n]);
+        for ((draw, x), [_, snap_word]) in out.iter_mut().zip(&xs).zip(pairs) {
+            *draw = SizeDraw {
+                base: x.max(f64::MIN_POSITIVE),
+                lot_snap: half_open_unit(*snap_word) < self.snap_frac,
+            };
+        }
     }
 }
 

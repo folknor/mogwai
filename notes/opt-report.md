@@ -68,7 +68,7 @@ done through one mutable source.
 
 ## Priority 1. One walk for the control run, measuring only what control consumes (landed)
 
-Landed 2026-10-16 (uncommitted at the time of writing), report A's endpoint,
+Landed 2026-10-16, report A's endpoint,
 sparred with codex to consensus. Exact for the tape.
 
 What it is now. `control_walk` is one unsized walk into `ControlAcc`
@@ -136,7 +136,7 @@ Found on the way, open:
 
 ## Priority 2. Readers that use the compact records and assume time order (landed)
 
-Landed 2026-10-16 (uncommitted at the time of writing), sparred with codex to
+Landed 2026-10-16, sparred with codex to
 consensus and audited by a fresh codex session afterwards. Exact: no tape
 byte, no statistic and no serialized output moves, so no bump is owed.
 
@@ -227,7 +227,7 @@ Not done from the reports, deliberately:
 
 ## Priority 3. A placed parent as a compact sweep description (landed)
 
-Landed 2026-10-16 (uncommitted at the time of writing), sparred with a fresh
+Landed 2026-10-16, sparred with a fresh
 codex session to consensus and audited by another afterwards. Exact: no tape
 byte moves, so no bump is owed.
 
@@ -297,7 +297,7 @@ the time is.
 
 ## Priority 4. A serial feedback core with fixed draws per parent, and pure emission (fixed core landed; batching not)
 
-Landed 2026-10-16 (uncommitted at the time of writing) as tape protocol 37,
+Landed 2026-10-16 as tape protocol 37,
 for the two bounce walks only; sparred with fresh codex sessions to
 consensus, the step stream re-sparred after a measured regression, and the
 whole audited afterwards.
@@ -368,7 +368,7 @@ enable, below. Still open:
 
 ## Priority 4b. One counter-based generator for every tape stream (landed)
 
-Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 38
+Landed 2026-10-17 as tape protocol 38
 and `ARRIVAL_KERNEL_VERSION` 4. Sparred with codex to consensus, audited by a
 fresh session afterwards.
 
@@ -441,7 +441,7 @@ Found on the way, open:
 
 ## Priority 4c. The cascade's fixed-draw core (landed)
 
-Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 39.
+Landed 2026-10-17 as tape protocol 39.
 Designed in a codex spar, two rounds to consensus, and audited by a fresh
 session afterwards; the audit found no production defect and four test and
 comment gaps, all closed.
@@ -596,7 +596,7 @@ cloning, checkpoints, faults and observation data (report A).
 
 ## Priority 4d. SIMD: batched Philox in AVX2 (landed), vector transforms (rejected as built)
 
-Landed 2026-10-17 (uncommitted at the time of writing) as tape protocol 40,
+Landed 2026-10-17 as tape protocol 40,
 a bump taken because the generation path changed, not because a byte did:
 every golden, hash and transcript stands. A fresh codex audit found no
 unsafe-code defect and no word mismatch. It did find the missing bump, an
@@ -662,18 +662,283 @@ Rejected, recorded so it is not retried as built:
 
 Open:
 
-- A central-branch-only vector quantile with per-lane scalar tails. Codex's
-  design: classify the lanes, compute the central ratio in vectors, the
-  tails in the scalar code, and keep the central results identical between
-  the vector body and any remainder. That would be tape 40, and is not
-  started.
+- The central-branch-only vector quantile: landed as priority 4e below.
 - Cross-parent batching of innovations. It needs scratch owned by the
   consumer and a position that reports what was consumed, not what was
   computed.
 
+### SIMD background for the next session
+
+Hardware, by owner statement (2026-10-17): the target machines are AMD
+Zen 4 or later. So AVX2 and AVX-512 are both present. On Zen, AVX-512 has
+no frequency penalty: Zen 4 maps 512-bit operations onto 256-bit units, and
+Zen 5 has native 512-bit hardware. An AVX-512 path is a reasonable next
+width after the AVX2 kernel, chosen at run time the same way. Scatter and
+gather are slow on Zen; avoid them.
+
+From "The state of SIMD in Rust in 2026" (Sergey Davidoff, 2026-09-25;
+the owner verified its claims):
+
+- Algebraic float operations (`algebraic_add` and kin) are stable since
+  Rust 1.98. They let the compiler reassociate, which float
+  autovectorization needs, but code usually has to be rewritten to use
+  them.
+- Autovectorization is unreliable: it needs small fixed-width loops
+  (`as_chunks`), and the result must be checked by measurement or
+  assembly. This report confirms that: the portable Philox kernel under
+  AVX2 was slower than its baseline build.
+- `std::simd` is nightly only, with occasional breaking changes. Its
+  `sin` and similar functions are scalar underneath, so its non-trivial
+  float functions are not worth using.
+- `fearless_simd`: version 1.0, with multiversioning through `#[simd]`
+  annotations and AVX-512 enabled only where it does not hurt. It has no
+  transcendental functions, so ln and exp would still be ours to write.
+- `wide`: has transcendentals, but their precision is unspecified, and it
+  has no multiversioning.
+- `pulp`: has runtime dispatch, and is the only crate with safe access to
+  intrinsics outside its predefined levels, though how is undocumented. The
+  whole hot loop must run inside one `vectorize` context, or the per-call
+  overhead dominates.
+- `macerator`: like `pulp`, generic over element type, with little
+  documentation.
+- `multiversion`: has a small per-call cost, so it belongs on functions
+  with loops, with `#[inline(always)]` below it.
+- Since Rust 1.87, intrinsics are safe to call inside a
+  `#[target_feature]` function. Loads, stores and the call from outside
+  remain unsafe; this tree's AVX2 kernel already works that way.
+- 32x32 to 64-bit lane multiplies exist on SSE2, AVX2, AVX-512 and NEON.
+- Float arithmetic on denormals is slow: about 30 times on Intel and 2
+  times on AMD. Keep the existing safeguards against subnormals, such as
+  the Poisson search's tail retirement.
+
+The next item, as designed with codex, is a central-branch-only vector
+quantile:
+
+- classify each lane by branch;
+- compute the central AS 241 ratio, about 85 percent of inputs, in vector
+  lanes;
+- compute the tail lanes with the existing scalar code, lane by lane,
+  never by falling back for the whole batch;
+- keep the central results bit-identical between the vector body and any
+  remainder, either through a fixed sequence of operations with no fused
+  or width-dependent reassociation, or by running remainders through
+  padded vector calls, so a value never depends on batch length, reader or
+  checkpoint placement.
+
+## Priority 4e. A bit-identical vector quantile and the size law's own exp (landed)
+
+Landed 2026-10-17 as tape protocol 41, sparred with codex to consensus in
+two rounds.
+
+What it is now. `generated/vecmath.rs`:
+
+- `normal_quantiles`: four AVX2 lanes compute AS 241's central branch in
+  the scalar expression tree exactly, `(q * num) / den`, separately
+  rounded, no FMA; the uniform is built in scalar code, because AVX2 has no
+  exact unsigned 64-bit to double conversion; tail lanes and remainders call
+  the scalar `normal_quantile`. The result is bit-identical to the scalar
+  quantile, so it cannot depend on batch length or position.
+- `tape_exp` and `tape_exps`: a Cody-Waite reduction (fdlibm's 32-bit
+  `LN2_HI`), rounding to nearest even through the `1.5 * 2^52` shifter in
+  both paths, a degree-13 Taylor Horner, and `2^n` built from exponent bits,
+  over a refused-outside domain of -700 to 700. The scalar and the vector
+  code share one expression tree, so they also give the same bits. It is
+  not `libm`, so the bump moves sizes; `SizeStream::new` refuses a size law
+  whose two extreme words reach outside the domain.
+- The vector path runs only in builds without debug assertions. Dev builds
+  run scalar, and the tests call the AVX2 kernels directly. In dev, every
+  intrinsic is a call.
+- Consumers: size decoration (`SizeStream::draws_from`, one batch per
+  32-child fill) and the cascade's component step (one fill of K + 1 + 2L
+  words, applied in the step's order: texture, fast, level, sigma extra).
+
+Pins, each bite-checked by a text-edit mutation:
+`batched_quantiles_are_the_scalar_bits_at_every_offset_and_length` (words
+bracketing both cutoffs and the midpoint, the grid's ends, every offset and
+remainder; `q * (num / den)` fails it by one ulp);
+`batched_exps_are_the_scalar_bits_at_every_offset_and_length` (every
+reduction transition and half-transition, plus or minus three ulp; a
+reassociated reduction fails it); `tape_exp_stays_within_two_ulp_of_the_platform_exp`
+(a differential gate only: Rust leaves `f64::exp`'s precision unspecified);
+`tape_exp_meets_its_reference_values`; domain refusals for NaN and past 700.
+`clean_regime_is_byte_identical` sees the exp: a 1e-6 relative error moves
+its sizes.
+
+No committed golden moved. The exp is within an ulp or two of `libm`, and
+a size crosses a quantization or snap threshold on that error with
+negligible probability. The cascade hashes, the oracle and the fill golden
+re-ran unchanged. The stage-A manifest re-blessed its version and digest.
+
+Measured, release, 16M sizes in 32-child chunks (`size_transform_walls`,
+ignored, run with `--release`): tape 40's chain (scalar quantile, `libm`
+exp) 271 ms; scalar quantile with `tape_exp` 334 ms; batched 168 ms. That is
+about 6 ns per child, roughly 50 ns per legacy sized parent. The
+`realism` wall did not show it at the time, because test builds then re-ran
+every size through a scalar per-child check inside `decorate` (moved out by
+priority 4g).
+
+Found on the way: `realism` took 18 s alone in dev at tape 40 (this host,
+2026-10-17), not the 8.4 s priority 4b recorded. Under `brokkr check` load it
+timed out and took the rest of the `mogwai-data` binary down with it.
+Priority 4g fixed that.
+
+## Priority 4f. The bounce packets' random-input logarithms (landed)
+
+Landed 2026-10-17 as tape protocol 42, sparred with codex to consensus. The
+cross-parent prepared-packet cache was designed and dropped in the spar.
+The win it was for (vector logs) fits inside one parent, so no position,
+clone or checkpoint state is needed.
+
+What it is now.
+
+- `tape_ln` (`vecmath.rs`): fdlibm's `e_log` tree applied uniformly,
+  without its special branches, refusing anything but a positive normal.
+  The scalar and AVX2 code share one expression tree.
+  `tape_ln(1.0)` is exactly zero.
+- `LegacyLogs::of`: the legacy packet's three random-input logs (the gap's
+  open uniform, the t(4) denominator's rounded product, the count
+  geometric's) in one `tape_ln4` call, the fourth lane idle at one. They are
+  applied where they always were: `next_duration_ns` takes the gap's log,
+  `next_latent_mid` the numerator word and the chi log, and
+  `mixture_count_from_log` the geometric's. The integrated packet's one
+  log is a scalar `tape_ln`.
+- The cascade keeps the platform `ln` through `mixture_count` and
+  `unit_exponential`, so one law has two log implementations on different
+  walks, by design. The cascade hashes are the scope check and did not move.
+- `SweepShape::new`'s `ln(1 - 1 / m)` stays on the platform `ln`. Taking it
+  into the fourth lane would mean resolving the state-dependent shape
+  before the call.
+
+Pins, each bite-checked by a text-edit mutation:
+`four_lane_logs_are_the_scalar_bits_in_every_lane` (powers of two and
+`sqrt(2)` cutoff neighbours in every reachable binade, values just below
+one, `2^-53` and `2^-106`, every lane rotation); `tape_ln_stays_within_one_ulp_and_keeps_its_sign`
+(differential against the platform `ln`, negative below one, monotone over
+the sorted probes); `tape_ln_meets_its_reference_values`;
+`legacy_logs_take_each_slot_to_its_own_lane` (a lane swap in `of` fails
+it); `clean_regime_is_byte_identical` sees the log (a 1e-6 error moves its
+timestamps).
+
+No committed golden moved, for the same reason as 4e: the log is within an
+ulp of `libm` and the walk rounds to nanoseconds and ticks. `realism`'s
+lag-10 statistic is the same to the last bit. The stage-A manifest
+re-blessed.
+
+Measured, release, 16M packets (`packet_log_walls`, ignored): three
+platform `ln` 225 ms, three scalar `tape_ln` 296 ms, `tape_ln4` 176 ms.
+About 3 ns per legacy parent, under 2 percent. Small: a `target_feature`
+function cannot inline into its caller, and three lanes of four is the
+whole batch. Cross-parent batching is what would widen it, now without a
+log question attached.
+
+## Priority 4g. `realism` off the watchdog (landed)
+
+Landed 2026-10-17, sparred with codex. Exact: no tape byte moves.
+
+- The per-child decoration check left `decorate`, where it ran on every
+  sized test walk and repeated about seventeen million scalar size draws
+  in `realism` alone. It is now `decoration_is_one_draw_per_trade`: walks
+  with a children mean of 40 so plans cross one and two 32-child chunks,
+  both size grids, sized, record-wise and unsized readers in turn, a clone
+  decorated apart, deep child indices, both snap branches, each asserted
+  reached. Bite-checked on a wrong seek and on a stale second chunk.
+- `realism`'s `measure` walks unsized. Every child of a placed parent is
+  one trade (asserted per parent), so the size moments are taken over the
+  walk's child-index range on worker threads, by `child_quantities` (the
+  production fill, batch transform and quantizer), in blocks of 65,536
+  children folded in order. `measure_records` blocks its trade-by-trade
+  sums the same way, so `compact_measurement_matches_the_record_reader`
+  still holds bit for bit. Reversing the fold fails it on `size_cv`.
+
+Measured, dev, alone: 16.8 s to 10.2 s (the unsized walk is about 6 s of
+it). Under `brokkr check` load it now reaches its verdict instead of the
+watchdog, so the plain check is red only on the known
+`abs_return_acf_lag10` fit miss.
+
+## Priority 4h. Size decoration across parents (landed)
+
+Landed 2026-10-17 as tape protocol 43, sparred with codex to consensus. No
+byte moves; the bump is taken for the path change, as at 40.
+
+Why. Release, 2M legacy parents: the unsized walk took 350 ms and the sized
+walk 834 ms. With the size work stubbed out of `decorate` the sized walk
+took 410 ms, so sizes cost about 25 ns per child, against about 10 ns for
+the bare batched transform. The rest was per-parent overhead at about 8.5
+children per call.
+
+What it is now. `QuantityCache` (`source.rs`): final quantity mantissas
+for 256 consecutive child indices, computed by the decoration's own fill,
+`draws_from` and quantizer (one 512-word fill, eight 32-child batches).
+`decorate` takes each trade's quantity from it, and refills from the first
+child still owed one on a miss, so a plan longer than a block refills as it
+goes. Membership is by actual index, so holes left by skipped or unsized
+parents are fine. A quantity depends on nothing but the child index, the
+seed's size stream and the quantizer: `with_surge`, the one `make_mut`,
+changes neither. A clone carries no block (`Option<Box<_>>`, cleared on
+clone), so checkpoint snapshots pay nothing; checkpoint extension never
+decorates. A refill is published only once it is complete. It clamps
+against the last readable child (`2^63 - 2`), and when not even the next
+child is readable the old per-plan path runs and refuses as before.
+
+Pins, each bite-checked: `a_cached_quantity_is_its_childs_own_draw` (an
+oracle of one `draw` per index: hits, two refills, a jump back, a hole
+forward, a clone starting empty, the last readable children, `None` past
+them; a block recording the wrong first child fails it);
+`decoration_is_one_draw_per_trade` now also asserts that a plan crossed a
+whole block.
+
+Measured, release, 2M legacy parents (`sized_walk_walls`, ignored): sized
+walk 834 ms to 745 ms, quantity checksum identical. That is about 20 ns per
+child against 25. What is left is mostly the per-trade lookup and
+quantizer, plus the transform itself.
+
+## Priority 4i. Where a legacy parent's time goes, and Philox chains (landed)
+
+Measured 2026-10-17 with a temporary TSC probe around each stage of
+`begin_legacy_event` (release, 2M parents, about 25 cycles of probe overhead
+per mark). The probe was removed afterwards.
+
+| Stage | Cycles per parent |
+|---|---|
+| sweep emission (step gaps, resolve) | about 161 |
+| main-stream words and logs | about 140 |
+| latent mid (GARCH, quantile, exp) | about 114 |
+| count | about 48 |
+| repeat and quote | about 39 |
+| gap and clock | about 37 |
+| side and book | about 37 |
+
+`hotpath` was not usable for this: it queues one event per instrumented
+call and drains at about 1.3M per second, which would swamp stages of a
+few tens of nanoseconds.
+
+Landed as tape protocol 44, audited by a fresh codex session (no defect;
+its coverage gaps closed). The AVX2 Philox kernel was one four-block chain
+bound by the multiply's latency, ten dependent rounds deep, at about 8
+cycles per word. It now runs up to four independent chains interleaved
+(`philox4x32_10_avx2::<N>`, N of 4, 8, 12 or 16). `fill_range` runs full
+16-block batches and covers a tail with the fewest chains that reach it.
+Every word is unchanged: integer arithmetic, and the pins compare every
+lane of every width against the scalar block, `fill` against `next_word`
+for every tail width and batch boundary across the low-word carry, and
+exhaustion at every tail width, including a 16-block tail ending exactly at
+the top.
+
+Measured, release (`fill_walls`, ignored), 120M words, one chain against
+interleaved: runs of 12 took 371 ms against 273, runs of 17 331 ms against
+244, runs of 64 284 ms against 220. The whole walk moved little: unsized
+350 to about 340 ms per 2M parents, sized 745 to about 730. The fill is not
+the share it looked like, and the step gaps still read scalar blocks.
+
+AVX-512 was not built: this host reports `avx512f` false, so a kernel could
+not be tested here. The owner states the targets are Zen 4 or later; an
+8-lane kernel belongs on a host that can run its pins. `bygg`, another host
+we work on, is Zen 5 (native 512-bit units): that is where to build and pin
+it.
+
 ## Priority 5. Rail sizing as independent seeds (landed)
 
-Landed 2026-10-16 (uncommitted at the time of writing), sparred with a fresh
+Landed 2026-10-16, sparred with a fresh
 codex session to consensus.
 
 What it is now.
@@ -737,26 +1002,26 @@ statistics, without routing flags around partial variants.
 Medium value. Both reports would fold these into the rewrite that owns their
 site rather than land them alone.
 
-1. Cascade child spawning (report B). `spawn_children` builds a Poisson
-   distribution three times per parent for fixed rates, three `exp` per parent
-   for constants. Precompute in `CascadeTables`; building a distribution draws
-   nothing, so no tape change.
-2. Per-parent `Arc` clone (report B). `Arc::clone(&self.spec)` in each
+Closed 2026-10-17. Report B's per-parent Poisson construction in
+`spawn_children` was gone already: priority 4c's `poisson_inverse` builds
+nothing. Its small re-derivations are all done: `is_round_lot`'s lot and
+`owed_children` went with priority 2, and `LevelSteps` now takes a
+`StepLaw` whose `ln_1p(-p)` is built once per source in `ChildCoins`, which
+is exact.
+
+1. Per-parent `Arc` clone (report B). `Arc::clone(&self.spec)` in each
    `begin_*` is an atomic increment and decrement per parent, there only for
    the borrow checker. Split the borrows.
-3. Size stream (report B). Each child uses two u64; splitting one between the
-   size uniform and the snap coin halves it. A counter-based generator would
-   also remove the buffer regeneration on every seek. Either is a tape bump.
-4. Cascade immigrant placement (report B). Each immigrant does a `powf`;
-   drawing a second's immigrants at once (sorted uniforms, or normalized
-   exponential spacings) avoids it. Tape bump.
-5. Small re-derivations (report B). `LevelSteps::new` recomputes `ln_1p(-p)`
-   every parent for one of three constants; `is_round_lot` recomputes its lot
-   every call; `owed_children` is O(remaining).
-6. Lab calendar lookups (report B). `open_throughout` scans the calendar's
+2. Size stream (report B). Each child uses two u64; splitting one between the
+   size uniform and the snap coin halves it. Tape bump. (The counter-based
+   generator half of this landed as priority 4b.)
+3. Cascade immigrant placement (report B). Each immigrant did a `powf`;
+   drawing a second's immigrants at once avoids it. Tape bump. Not re-read
+   since priority 4c rewrote the immigrant draw; check the site first.
+4. Lab calendar lookups (report B). `open_throughout` scans the calendar's
    windows per call; the generator's `CompiledCalendar` minute table
    (crate-private today) could serve the lab.
-7. A specialized Student-t sampler (report A), after work elimination and
+5. A specialized Student-t sampler (report A), after work elimination and
    block execution. Payoff depends on sampler and hardware, and the cascade's
    degrees of freedom are configurable, so a hardcoded legacy sampler must not
    quietly become the cascade's. Priority 4's fixed-draw t(4) is report B's
@@ -861,12 +1126,8 @@ test's wall, slowest first. Without them an over-watchdog test reports only
 At tape 37, measured that way: `realism` 24.0 s, and it passes at seed 42;
 `session_modulation_reproduces_curves` 65.1 s.
 
-| Test | File | Tape 35 | Tape 36 | After priority 2 |
-|---|---|---|---|---|
-| `realism` | `crates/mogwai-data/src/generated/tests.rs` | 37.8 s | 35.0 s, and fails (below) | 23.3 s (23.8 s after priority 3), 1.8 s in release, still fails |
-
-`realism` is the only one left. It is over the watchdog on parent
-resolution alone; priority 4 is what would bring it under.
+None is left on this workload. `realism` lost its ignore at priority 4b
+and runs in every lane, at about 10 s alone in dev since priority 4g.
 
 Re-enabled at tape 36: `session_edge_spike_localizes` (12.5 s),
 `one_walk_serves_every_probe_on_a_symbol` (12.5 s) and
@@ -912,21 +1173,5 @@ in an unoptimized dev build. Not yet confirmed.
 
 ### Stale measurements
 
-- The near-watchdog list predates tape 36 and has not been re-measured. Under
-  `brokkr check --timings` load it read: the wire-frame oracle
-  (`crates/mogwai-cli/src/gen.rs`, then `protocol9_tape_oracle`) 14.6 s; nine
-  `crates/mogwai-venue/src/fills.rs` tests between 13.5 s and 14.5 s
-  (`a_resident_window_serves_a_miss_walk_free_and_walk_identical`,
-  `a_walk_stops_once_every_scan_has_triggered`,
-  `a_truncated_drain_reports_where_it_stopped`,
-  `a_pass_costs_one_walk_per_symbol_not_per_order`,
-  `stop_touch_scans_and_limit_through_scans_share_one_walk`,
-  `every_configured_symbol_gets_its_own_chain`,
-  `the_deciding_prints_are_the_prints_trades_serves`,
-  `last_trade_at_or_before_never_looks_ahead`,
-  `triggers_only_on_prints_strictly_through_the_trigger`); and
-  `boatyard::tests::two_boats_do_not_evict_each_other_s_market_reading` 14.0 s.
-  The fills and boatyard group clustered at one wall, suggesting a shared setup
-  walk, which tape 36 shortened.
 - The shared-spec and compiled-calendar change (before tape 36) was never
   benchmarked on the calendar presets' seeks, history and checkpoints.

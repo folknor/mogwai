@@ -47,6 +47,7 @@ mod quote;
 mod regime;
 mod session;
 mod source;
+mod vecmath;
 
 #[cfg(test)]
 mod tests;

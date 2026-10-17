@@ -87,6 +87,7 @@ use super::children::{half_open_unit, normal_quantile, open_unit};
 use super::consts::INTRA_EVENT_STEP_NS;
 use super::draws::{POISSON_CEILING, coin, poisson_inverse, student_t_integer, unit_exponential};
 use super::fingerprint::ScalarError;
+use super::vecmath::normal_quantiles;
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const NS_PER_MINUTE: u64 = 60 * NS_PER_SECOND;
@@ -619,6 +620,10 @@ pub(super) struct CascadeState {
     /// allocation counters, so they clone with the walk and a checkpoint
     /// resumes every one of them where the lead was.
     streams: CascadeStreams,
+    /// A component step's words and their normals, reused across steps.
+    /// Scratch only: overwritten whole by every step, never read across one.
+    step_words: Vec<u64>,
+    step_normals: Vec<f64>,
     /// Component steps, evaluated windows and jumps, counted where each
     /// happens and apart from any word read, so the allocation pin can hold
     /// the words consumed against the units that consumed them.
@@ -697,6 +702,8 @@ impl CascadeState {
             last_side: AggressorSide::Buyer,
             impact_register: 0.0,
             streams: CascadeStreams::new(seed),
+            step_words: Vec::new(),
+            step_normals: Vec::new(),
             #[cfg(test)]
             units: [0; 3],
         }
@@ -750,18 +757,36 @@ impl CascadeState {
             self.units[0] += 1;
         }
         let coefficients = |tau: f64| ar1_coefficients(elapsed_s, tau);
-        let rng = &mut self.streams.component;
+        let normals = self.draw_step_normals();
+        let mut z = normals.iter().copied();
         for (y, tau) in self.texture.iter_mut().zip(&tables.texture_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), rng);
+            *y = ar1_step(*y, coefficients(*tau), &mut z);
         }
         let fast = coefficients(tables.config.fast_texture_tau_s);
-        self.fast = ar1_step(self.fast, fast, rng);
+        self.fast = ar1_step(self.fast, fast, &mut z);
         for (y, tau) in self.level.iter_mut().zip(&tables.level_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), rng);
+            *y = ar1_step(*y, coefficients(*tau), &mut z);
         }
         for (y, tau) in self.sigma_extra.iter_mut().zip(&tables.level_tau_s) {
-            *y = ar1_step(*y, coefficients(*tau), rng);
+            *y = ar1_step(*y, coefficients(*tau), &mut z);
         }
+        debug_assert!(z.next().is_none(), "one normal per component");
+        self.step_normals = normals;
+    }
+
+    /// A component step's normals, one per component in step order -
+    /// texture, fast, level, sigma extra - from one fill of the component
+    /// stream, transformed as one batch: the words and the values the
+    /// per-component `normal_quantile` reads gave. The buffer is taken out
+    /// so the step can borrow the components; the caller hands it back.
+    fn draw_step_normals(&mut self) -> Vec<f64> {
+        let n = self.texture.len() + 1 + self.level.len() + self.sigma_extra.len();
+        let mut normals = std::mem::take(&mut self.step_normals);
+        self.step_words.resize(n, 0);
+        normals.resize(n, 0.0);
+        self.streams.component.fill(&mut self.step_words);
+        normal_quantiles(&self.step_words, &mut normals);
+        normals
     }
 
     /// `step_components(.., 1.0)` over the coefficients the tables solved
@@ -773,17 +798,20 @@ impl CascadeState {
             self.units[0] += 1;
         }
         let one = &tables.one_second;
-        let rng = &mut self.streams.component;
+        let normals = self.draw_step_normals();
+        let mut z = normals.iter().copied();
         for (y, c) in self.texture.iter_mut().zip(&one.texture) {
-            *y = ar1_step(*y, *c, rng);
+            *y = ar1_step(*y, *c, &mut z);
         }
-        self.fast = ar1_step(self.fast, one.fast, rng);
+        self.fast = ar1_step(self.fast, one.fast, &mut z);
         for (y, c) in self.level.iter_mut().zip(&one.level) {
-            *y = ar1_step(*y, *c, rng);
+            *y = ar1_step(*y, *c, &mut z);
         }
         for (y, c) in self.sigma_extra.iter_mut().zip(&one.level) {
-            *y = ar1_step(*y, *c, rng);
+            *y = ar1_step(*y, *c, &mut z);
         }
+        debug_assert!(z.next().is_none(), "one normal per component");
+        self.step_normals = normals;
     }
 
     fn texture_sum(&self, tables: &CascadeTables) -> f64 {
@@ -1130,8 +1158,12 @@ fn ar1_coefficients(elapsed_s: f64, tau: f64) -> (f64, f64) {
     (rho, (1.0 - rho * rho).sqrt())
 }
 
-fn ar1_step(y: f64, (rho, innovation_scale): (f64, f64), rng: &mut TapeRng) -> f64 {
-    rho * y + innovation_scale * normal_word(rng)
+fn ar1_step(
+    y: f64,
+    (rho, innovation_scale): (f64, f64),
+    normals: &mut impl Iterator<Item = f64>,
+) -> f64 {
+    rho * y + innovation_scale * normals.next().expect("one normal per component")
 }
 
 fn sign_of(side: AggressorSide) -> f64 {

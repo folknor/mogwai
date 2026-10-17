@@ -1174,7 +1174,7 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 40 (arrival kernel 4), which the
+        // Re-blessed at tape protocol 44 (arrival kernel 4), which the
         // manifest hashes over: the constants are inputs to the plan identity,
         // so a bump moves this by construction and the artifact and this
         // literal move together. No cell moved in that re-bless - the whole
@@ -1187,7 +1187,7 @@ mod tests {
         // could not agree with a literal transcribed from the old artifact.
         assert_eq!(
             manifest.plan_sha256,
-            "eda48825723abdde1eb6b0b03b13222a930b6630a915c25ea84c41f5ab338fe0"
+            "7019916ceb9dcb4864e7af4671b075b9c8eede09982115dd3e205a7180dd99f7"
         );
         assert_eq!(
             manifest.plan_sha256,

@@ -1882,6 +1882,81 @@ fn an_unsized_parent_read_leaves_every_later_read_as_it_was() {
     assert_eq!(mixed.fault(), twin.fault());
 }
 
+/// Batched decoration gives every trade the quantity one size draw per child
+/// gives, through the real `decorate`, on walks built to cross its chunk
+/// boundaries: a children mean of 40 puts plans on both sides of one and
+/// two 32-child chunks, and the walk runs deep into the child index space.
+/// Both size grids, a sized, a record-wise and an unsized reader in turn, and
+/// a clone taken before a parent is read and decorated on its own. The
+/// fixtures must show they reached what they claim to cover.
+#[test]
+fn decoration_is_one_draw_per_trade() {
+    use crate::record::{ParentSource, RiverSource};
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.children_mean = 40.0;
+    scalars.children_single_frac = 0.05;
+    let mut contracts = scalars.clone();
+    contracts.latent_size_median = Decimal::new(25, 1);
+    contracts.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
+    for (scalars, grid) in [(scalars, SizeGrid::spot()), (contracts, mnq_size_grid())] {
+        let mut src = GeneratedSource::try_new_with_size_grid(scalars, 42, 0, &fp, None, grid)
+            .expect("the fixture is valid");
+        let (mut trades, mut snapped) = (0, 0);
+        let (mut one_boundary, mut two_boundaries, mut deepest) = (0, 0, 0);
+        let mut past_a_block = 0;
+        let mut check = |src: &GeneratedSource| {
+            let (n, s) = src.assert_decoration_is_per_child();
+            trades += n;
+            snapped += s;
+            one_boundary += usize::from(n > 32 && n <= 64);
+            two_boundaries += usize::from(n > 64);
+            past_a_block += usize::from(n > 256);
+            deepest = deepest.max(src.plan_first_child());
+        };
+        for i in 0..6_000 {
+            match i % 4 {
+                0 => {
+                    src.next_parent().expect("a sized parent");
+                    check(&src);
+                }
+                1 => {
+                    src.next_record().expect("a first record");
+                    while !src.at_parent_boundary() {
+                        src.next_record().expect("the rest of the parent");
+                    }
+                    check(&src);
+                }
+                2 => {
+                    src.next_parent_unsized().expect("an unsized parent");
+                }
+                _ => {
+                    let mut twin = src.clone();
+                    let want = twin
+                        .next_parent()
+                        .expect("the clone's parent")
+                        .records
+                        .to_vec();
+                    check(&twin);
+                    let got = src.next_parent().expect("a sized parent").records.to_vec();
+                    check(&src);
+                    assert_eq!(got, want, "parent {i}: a clone decorated apart");
+                }
+            }
+        }
+        assert!(
+            one_boundary > 50 && two_boundaries > 50,
+            "{one_boundary} and {two_boundaries} plans crossed one and two chunk boundaries"
+        );
+        assert!(past_a_block > 0, "no plan crossed a whole read-ahead block");
+        assert!(deepest > 100_000, "the walk reached child {deepest} only");
+        assert!(
+            snapped > 0 && snapped < trades,
+            "{snapped} of {trades} trades snapped"
+        );
+    }
+}
+
 #[test]
 fn a_calendar_weekend_emits_no_tick_and_reopens_exactly_on_the_boundary() {
     let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
@@ -2999,63 +3074,72 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     let tick_mantissa = scale.price_mantissa(scalars.modal_tick).filter(|m| *m > 0);
     let mut parent_timestamps = Vec::with_capacity(draw);
     let mut prices = Vec::with_capacity(draw);
-    let mut size_n = 0_u64;
-    let mut size_sum = 0.0_f64;
-    let mut size_sumsq = 0.0_f64;
-    let mut round_lots = 0_u64;
+    let mut trades = 0_usize;
+    let mut first_child = None;
     let mut occupied_hours = HourBits::default();
     let mut first_ts = None;
     let mut last_ts = 0_u64;
     let mut counts: Vec<u32> = Vec::new();
     let mut off_grid_prices = 0;
     let mut neutral_aggressors = 0;
+    // The walk reads unsized: every child of a placed parent is one trade,
+    // so the walk's trades are its children in index order from the first
+    // parent's, and their sizes are summed apart, by block, on workers.
     while prices.len() < draw {
-        let parent = crate::ParentSource::next_parent(src).expect("infinite generated tape");
+        let parent =
+            crate::ParentSource::next_parent_unsized(src).expect("infinite generated tape");
         let mut opened = false;
         let mut last_px = None;
-        for record in parent.records {
-            let Record::Trade(trade) = record else {
+        let mut parent_trades = 0;
+        for record in parent.records() {
+            let UnsizedRecord::Trade { ts, px, side } = record else {
                 continue;
             };
             let off_grid = match tick_mantissa {
-                Some(tick) => trade.px % tick != 0,
-                None => (scale.price(trade.px) / scalars.modal_tick).fract() != Decimal::ZERO,
+                Some(tick) => px % tick != 0,
+                None => (scale.price(px) / scalars.modal_tick).fract() != Decimal::ZERO,
             };
             off_grid_prices += usize::from(off_grid);
-            neutral_aggressors += usize::from(trade.side == AggressorSide::NoAggressor);
-            let first = *first_ts.get_or_insert(trade.ts);
-            last_ts = trade.ts;
-            occupied_hours.insert(trade.ts / NS_PER_HOUR);
-            let second = (trade.ts / 1_000_000_000 - first / 1_000_000_000) as usize;
+            neutral_aggressors += usize::from(side == AggressorSide::NoAggressor);
+            let first = *first_ts.get_or_insert(ts);
+            last_ts = ts;
+            occupied_hours.insert(ts / NS_PER_HOUR);
+            let second = (ts / 1_000_000_000 - first / 1_000_000_000) as usize;
             if second >= counts.len() {
                 counts.resize(second + 1, 0);
             }
             counts[second] += 1;
             if !opened {
                 opened = true;
-                parent_timestamps.push(trade.ts);
+                parent_timestamps.push(ts);
             }
-            last_px = Some(trade.px);
-            let size = decimal_to_f64(scale.size(trade.qty));
-            size_n += 1;
-            size_sum += size;
-            size_sumsq += size * size;
-            round_lots += u64::from(is_round_lot_f64(size, lot));
+            last_px = Some(px);
+            parent_trades += 1;
         }
+        let parent_first = src.plan_first_child();
+        let walk_first = *first_child.get_or_insert(parent_first);
+        assert_eq!(
+            parent_first,
+            walk_first + trades as u64,
+            "a placed walk's trades are its children in index order"
+        );
+        trades += parent_trades;
         let last_px = last_px.expect("a placed parent prints at least one trade");
         prices.push(decimal_to_f64(scale.price(last_px)));
     }
+    let sizes = parallel_sizes(
+        src,
+        &scale,
+        lot,
+        first_child.expect("a non-empty draw"),
+        trades,
+    );
     summarize_measured(
         src,
         draw,
         &parent_timestamps,
         &prices,
-        &Sizes {
-            n: size_n,
-            sum: size_sum,
-            sumsq: size_sumsq,
-            round_lots,
-        },
+        &sizes,
         empty_hour_stats_over(first_ts.expect("a non-empty draw"), last_ts, |hour| {
             occupied_hours.contains(hour)
         }),
@@ -3096,11 +3180,100 @@ impl HourBits {
     }
 }
 
+#[derive(Clone, Copy, Default)]
 struct Sizes {
     n: u64,
     sum: f64,
     sumsq: f64,
     round_lots: u64,
+}
+
+/// Children per size block. The size moments are summed within a block of
+/// the walk's children and the block sums folded in order, so a reader that
+/// adds trade by trade and one that sums blocks on workers give the same
+/// bits; the pin's 60k parents cross several blocks.
+const SIZE_BLOCK: usize = 1 << 16;
+
+impl Sizes {
+    fn add(&mut self, size: f64, round_lot: bool) {
+        self.n += 1;
+        self.sum += size;
+        self.sumsq += size * size;
+        self.round_lots += u64::from(round_lot);
+    }
+
+    fn fold(&mut self, block: &Sizes) {
+        self.n += block.n;
+        self.sum += block.sum;
+        self.sumsq += block.sumsq;
+        self.round_lots += block.round_lots;
+    }
+}
+
+/// [`Sizes`] taken one trade at a time, in walk order, blocked by
+/// [`SIZE_BLOCK`].
+#[derive(Default)]
+struct BlockedSizes {
+    total: Sizes,
+    block: Sizes,
+}
+
+impl BlockedSizes {
+    fn add(&mut self, size: f64, round_lot: bool) {
+        self.block.add(size, round_lot);
+        if self.block.n as usize == SIZE_BLOCK {
+            self.total.fold(&self.block);
+            self.block = Sizes::default();
+        }
+    }
+
+    fn finish(mut self) -> Sizes {
+        self.total.fold(&self.block);
+        self.total
+    }
+}
+
+/// The size moments of children `first..first + n`, block by block on
+/// worker threads, folded in block order: the same bits [`BlockedSizes`]
+/// gives the same sizes one at a time.
+fn parallel_sizes(
+    src: &GeneratedSource,
+    scale: &crate::record::RecordScale,
+    lot: f64,
+    first: u64,
+    n: usize,
+) -> Sizes {
+    let blocks = n.div_ceil(SIZE_BLOCK);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(blocks.max(1));
+    let mut partials = vec![Sizes::default(); blocks];
+    std::thread::scope(|scope| {
+        for (worker, chunk) in partials
+            .chunks_mut(blocks.div_ceil(workers).max(1))
+            .enumerate()
+        {
+            let base = worker * blocks.div_ceil(workers).max(1);
+            scope.spawn(move || {
+                let mut quantities = vec![0_u64; SIZE_BLOCK];
+                for (offset, partial) in chunk.iter_mut().enumerate() {
+                    let start = (base + offset) * SIZE_BLOCK;
+                    let len = SIZE_BLOCK.min(n - start);
+                    let quantities = &mut quantities[..len];
+                    src.child_quantities(first + start as u64, quantities);
+                    for qty in quantities.iter() {
+                        let size = decimal_to_f64(scale.size(*qty));
+                        partial.add(size, is_round_lot_f64(size, lot));
+                    }
+                }
+            });
+        }
+    });
+    let mut total = Sizes::default();
+    for partial in &partials {
+        total.fold(partial);
+    }
+    total
 }
 
 /// The reduction both readers share, from the series they collected.
@@ -3169,10 +3342,7 @@ fn measure_records(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: 
     let median_size = decimal_to_f64(scalars.latent_size_median);
     let mut parent_timestamps = Vec::with_capacity(draw);
     let mut prices = Vec::with_capacity(draw);
-    let mut size_n = 0_u64;
-    let mut size_sum = 0.0_f64;
-    let mut size_sumsq = 0.0_f64;
-    let mut round_lots = 0_u64;
+    let mut sizes = BlockedSizes::default();
     let mut occupied_hours: HashSet<u64> = HashSet::new();
     let mut first_ts = None;
     let mut last_ts = 0_u64;
@@ -3202,23 +3372,17 @@ fn measure_records(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: 
         if src.owed_children() == 0 {
             prices.push(decimal_to_f64(trade.price));
         }
-        let size = decimal_to_f64(trade.size);
-        size_n += 1;
-        size_sum += size;
-        size_sumsq += size * size;
-        round_lots += u64::from(is_round_lot(trade.size, median_size));
+        sizes.add(
+            decimal_to_f64(trade.size),
+            is_round_lot(trade.size, median_size),
+        );
     }
     summarize_measured(
         src,
         draw,
         &parent_timestamps,
         &prices,
-        &Sizes {
-            n: size_n,
-            sum: size_sum,
-            sumsq: size_sumsq,
-            round_lots,
-        },
+        &sizes.finish(),
         empty_hour_stats_over(first_ts.expect("a non-empty draw"), last_ts, |hour| {
             occupied_hours.contains(&hour)
         }),
@@ -3226,6 +3390,38 @@ fn measure_records(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: 
         off_grid_prices,
         neutral_aggressors,
     )
+}
+
+/// The sized and unsized legacy walk over 2M parents, for the decoration's
+/// share of a sized read. Run with `--release`; it prints walls and a
+/// quantity checksum.
+#[test]
+#[ignore = "bench: a wall measurement, meaningful only in a release build"]
+fn sized_walk_walls() {
+    use crate::record::ParentSource;
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    for sized in [false, true] {
+        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+        let start = std::time::Instant::now();
+        let mut checksum = 0_u64;
+        for _ in 0..2_000_000 {
+            if sized {
+                let parent = src.next_parent().expect("an endless walk");
+                for record in parent.records {
+                    if let Record::Trade(trade) = record {
+                        checksum = checksum.wrapping_add(trade.qty);
+                    }
+                }
+            } else {
+                src.next_parent_unsized().expect("an endless walk");
+            }
+        }
+        println!(
+            "sized {sized}: {:?}, quantity checksum {checksum}",
+            start.elapsed()
+        );
+    }
 }
 
 /// `measure` against `measure_records` on the same realization: every field
