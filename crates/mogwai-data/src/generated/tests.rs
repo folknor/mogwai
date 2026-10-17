@@ -2359,13 +2359,15 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
 // It runs in every lane: about 8 s in an unoptimized dev build since tape 38's
 // `TapeRng`, where ChaCha12 had put its draws alone past the watchdog.
 //
-// It fails `abs_return_acf_lag10` at seed 42, and that is a finding about the
-// fit, not about the generator. The shipped BTCUSDT law sits above its own
-// lag-10 band: over 64 seeds the lag-10 mean is about 0.165 to 0.170 against
-// a 0.1565 ceiling, on ChaCha12 and `TapeRng` draws alike, with a heavy upper
-// tail of realizations. Seed 42 landed inside the band at tape 35 and 37 by
-// chance and above it at 36 and 38. The seed, the band and the assertion stay
-// as they are; the fix is owed to the fit.
+// It gates no return statistic. The fingerprint's return bands are taken on
+// every Kraken row, and the parent-end series this walk collects is a
+// different observable, so asserting one against the other proved nothing:
+// the abs-return lag-10 band, whose ceiling is the anchor pair's own value,
+// failed or passed seed 42 by chance from one tape to the next. What the
+// per-fill series does against those bands is pinned, as a diagnosis, by
+// `per_fill_returns_sit_outside_three_kraken_bands`. The duration assertions
+// stay: they compare parent-start gaps against the gaps between the inferred
+// parents of the Binance cadence corpus, one unit on both sides.
 #[test]
 #[cfg(not(feature = "hotpath"))]
 fn realism() {
@@ -2387,31 +2389,6 @@ fn realism() {
         "duration_acf_lag5",
         measured.duration_acf_lag5,
         &fp.cadence.targets.duration_acf_lag5.range,
-    );
-    assert_in_range(
-        "return_acf_lag1",
-        measured.return_acf_lag1,
-        &fp.golden_targets.return_acf_lag1.range,
-    );
-    assert_in_range(
-        "abs_return_acf_lag1",
-        measured.abs_return_acf_lag1,
-        &fp.golden_targets.abs_return_acf.lag1.range,
-    );
-    assert_in_range(
-        "abs_return_acf_lag10",
-        measured.abs_return_acf_lag10,
-        &fp.golden_targets.abs_return_acf.lag10.range,
-    );
-    assert_in_range(
-        "abs_return_acf_lag50",
-        measured.abs_return_acf_lag50,
-        &fp.golden_targets.abs_return_acf.lag50.range,
-    );
-    assert_in_range(
-        "zero_change_frac",
-        measured.zero_change_frac,
-        &fp.golden_targets.zero_change_frac.range,
     );
     assert_in_range(
         "round_lot_frac",
@@ -2449,6 +2426,164 @@ fn realism() {
         measured.truncation_frac
     );
     assert_dwell_is_bounded(&measured.dwell(), &scalars, &fp);
+}
+
+/// Every trade price of `draw` placed parents in emission order, children
+/// included, beside each parent's last price: the series a consumer receives
+/// and the parent-end series the return bands were once gated on.
+fn fill_and_parent_end_prices(src: &mut GeneratedSource, draw: usize) -> (Vec<f64>, Vec<f64>) {
+    assert_placed(src);
+    let scale = RiverSource::scale(src).clone();
+    let mut fills = Vec::with_capacity(draw * 9);
+    let mut ends = Vec::with_capacity(draw);
+    while ends.len() < draw {
+        let parent =
+            crate::ParentSource::next_parent_unsized(src).expect("infinite generated tape");
+        let mut last = None;
+        for record in parent.records() {
+            if let UnsizedRecord::Trade { px, .. } = record {
+                let price = decimal_to_f64(scale.price(px));
+                fills.push(price);
+                last = Some(price);
+            }
+        }
+        ends.push(last.expect("a placed parent prints at least one trade"));
+    }
+    (fills, ends)
+}
+
+/// The return statistics the fingerprint's Kraken bands describe, on one
+/// price series.
+struct ReturnStats {
+    returns: usize,
+    return_variance: f64,
+    return_acf_lag1: f64,
+    abs_return_acf_lag1: f64,
+    abs_return_acf_lag10: f64,
+    abs_return_acf_lag50: f64,
+    zero_change_frac: f64,
+}
+
+fn return_stats(prices: &[f64]) -> ReturnStats {
+    let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
+    let abs: Vec<f64> = returns.iter().map(|r| r.abs()).collect();
+    let zero = prices.windows(2).filter(|w| w[0] == w[1]).count();
+    ReturnStats {
+        returns: returns.len(),
+        return_variance: variance(&returns),
+        return_acf_lag1: acf(&returns, 1),
+        abs_return_acf_lag1: acf(&abs, 1),
+        abs_return_acf_lag10: acf(&abs, 10),
+        abs_return_acf_lag50: acf(&abs, 50),
+        zero_change_frac: zero as f64 / returns.len() as f64,
+    }
+}
+
+// A witness to a recorded mismatch, not a realism gate.
+//
+// The fingerprint's return bands (`golden_targets`) are taken on every row of
+// the Kraken corpus. `realism` used to gate them on each generated parent's
+// last price, and that comparison has no foundation: the rationale that
+// introduced it held that whole-second Kraken timestamps make per-row
+// statistics parent-layer ones, but coarsening timestamps removes no per-row
+// return. Read on the series a consumer actually receives, every fill, the
+// shipped legacy law falls outside three of those bands, in these directions:
+// lag-1 return autocorrelation above the band's ceiling (the bands are
+// negative, from bid-ask bounce; a generated sweep walks one side
+// monotonically), lag-1 absolute-return autocorrelation below its floor, and
+// the zero-change fraction above its ceiling. Lag 10 sits inside its band and
+// lag 50 straddles its floor across seeds, so neither is witnessed.
+//
+// This pins that diagnosis on one seed and length; it protects nothing about
+// realism, and a worse law can pass it. When it fails, the model, the
+// measurement or the reference has moved: reassess the mismatch, do not read
+// the failure as a fit having landed. Whether these Kraken bands are the
+// right reference for a sweep geometry fitted on Binance raw trades is itself
+// open, and is owed to the fit, not to this test.
+#[test]
+fn per_fill_returns_sit_outside_three_kraken_bands() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut src = GeneratedSource::new(scalars, 42, 0, &fp, None);
+    let parents = 200_000;
+    let (fills, _) = fill_and_parent_end_prices(&mut src, parents);
+    // The reader must see every child, not one price per parent.
+    assert!(
+        fills.len() > 4 * parents,
+        "{} fills from {parents} parents: the reader is not reading children",
+        fills.len()
+    );
+    let stats = return_stats(&fills);
+    assert!(stats.return_variance > 0.0, "the fill series never moved");
+    for (name, value) in [
+        ("return_acf_lag1", stats.return_acf_lag1),
+        ("abs_return_acf_lag1", stats.abs_return_acf_lag1),
+        ("zero_change_frac", stats.zero_change_frac),
+    ] {
+        assert!(value.is_finite(), "{name} is not finite: {value}");
+    }
+    let bands = &fp.golden_targets;
+    // All three are judged before any is reported, so a moved one cannot mask
+    // the other two.
+    let still_outside = [
+        (
+            "return_acf_lag1 above the band ceiling",
+            stats.return_acf_lag1,
+            bands.return_acf_lag1.range.max,
+            stats.return_acf_lag1 > bands.return_acf_lag1.range.max,
+        ),
+        (
+            "abs_return_acf_lag1 below the band floor",
+            stats.abs_return_acf_lag1,
+            bands.abs_return_acf.lag1.range.min,
+            stats.abs_return_acf_lag1 < bands.abs_return_acf.lag1.range.min,
+        ),
+        (
+            "zero_change_frac above the band ceiling",
+            stats.zero_change_frac,
+            bands.zero_change_frac.range.max,
+            stats.zero_change_frac > bands.zero_change_frac.range.max,
+        ),
+    ];
+    let moved: Vec<String> = still_outside
+        .iter()
+        .filter(|(.., outside)| !outside)
+        .map(|(claim, value, bound, _)| format!("{claim}: no longer, {value} against {bound}"))
+        .collect();
+    assert!(
+        moved.is_empty(),
+        "the recorded per-fill mismatch moved over {} returns; reassess it: {}",
+        stats.returns,
+        moved.join("; ")
+    );
+}
+
+/// Probe, not a gate: the fingerprint's return statistics on the parent-end
+/// series and on the per-fill series a consumer receives, side by side over
+/// several seeds. Neither series is asserted against the bands here; see
+/// `per_fill_returns_sit_outside_three_kraken_bands`.
+#[test]
+#[ignore = "probe: prints parent-end against per-fill return statistics"]
+fn realism_observation_unit_probe() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    println!("seed unit    returns  ret1     abs1     abs10    abs50    zero");
+    for seed in [42_u64, 1, 2, 3, 4, 5, 6, 7] {
+        let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
+        let (fills, ends) = fill_and_parent_end_prices(&mut src, 500_000);
+        for (unit, prices) in [("parent", &ends), ("fill", &fills)] {
+            let s = return_stats(prices);
+            println!(
+                "{seed:<4} {unit:<7} {:<8} {:<8.4} {:<8.4} {:<8.4} {:<8.4} {:<8.4}",
+                s.returns,
+                s.return_acf_lag1,
+                s.abs_return_acf_lag1,
+                s.abs_return_acf_lag10,
+                s.abs_return_acf_lag50,
+                s.zero_change_frac
+            );
+        }
+    }
 }
 
 #[test]
@@ -2944,7 +3079,7 @@ fn assert_dwell_is_bounded(measured: &Dwell, scalars: &GeneratorScalars, fp: &Fi
 // A 15M-parent-event walk: see the heavy-walk cfg note at the top of this file.
 #[test]
 #[cfg(not(feature = "hotpath"))]
-#[ignore = "walks 15M parent events, about 30 simulated days, in about 17 s in a dev build; kept out of the fast lane, run by the full gate"]
+#[ignore = "walks 15M parent events, about 30 simulated days, in about 21 s in a dev build; kept out of the fast lane, run by the full gate"]
 fn session_modulation_reproduces_curves() {
     assert_eq!(utc_hour_dow(0), (0, 4));
     assert_eq!(utc_hour_dow(1_700_000_000_000_000_000), (22, 2));
@@ -5758,12 +5893,12 @@ fn the_realized_repeat_rate_and_zero_change_frac_are_recorded() {
     let fp = Fingerprint::from_repo_json();
     for scalars in [GeneratorScalars::xbtusd_anchor(&fp), mnq_shaped_grid(&fp)] {
         let measured = decompose_spread(&scalars, 100_000);
+        // `zero_change_frac` here is the parent-end series, which the
+        // fingerprint's per-row Kraken band does not describe, so it is not
+        // held to that band; see `per_fill_returns_sit_outside_three_kraken_bands`.
         assert!(
-            fp.golden_targets
-                .zero_change_frac
-                .range
-                .contains(measured.zero_change_frac),
-            "{} zero_change_frac={} left the committed band",
+            measured.zero_change_frac > 0.0 && measured.zero_change_frac < 1.0,
+            "{} zero_change_frac={}",
             scalars.symbol,
             measured.zero_change_frac
         );

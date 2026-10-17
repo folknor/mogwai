@@ -79,14 +79,24 @@ pub(super) const ARRIVAL_WEIBULL_MEAN: f64 = 1.0;
 pub(super) const ARRIVAL_QUIET_CHILDREN_MULT: f64 = 0.20;
 pub(super) const ARRIVAL_ACTIVE_CHILDREN_MULT: f64 = 1.430_769_230_769_230_8;
 /// Probability that a single-child event in the low bounce regime re-prints the
-/// previous event's last price instead of the freshly priced one. Fitted to the
-/// `zero_change_frac` band: at the raw-fill layer most prints are children that
-/// repeat their parent's level by construction, but the event series the gate
-/// measures (section 6.3) would otherwise almost never repeat, because every
-/// parent re-prices off a fresh latent mid. A venue whose top of book does not
-/// move between two small takes prints the same price twice, which is what this
-/// reproduces. It costs one Bernoulli draw per event and never applies in the
-/// high regime, where the price is meant to be moving.
+/// previous event's last price instead of the freshly priced one. Fitted to
+/// put the parent-end series inside the fingerprint's `zero_change_frac` band:
+/// at the raw-fill layer most prints are children that repeat their parent's
+/// level by construction, but the parent-end series would otherwise almost
+/// never repeat, because every parent re-prices off a fresh latent mid. A venue
+/// whose top of book does not move between two small takes prints the same
+/// price twice, which is what this reproduces. It costs one Bernoulli draw per
+/// event and never applies in the high regime, where the price is meant to be
+/// moving.
+///
+/// That fit target is unsound, and this value and the bounce constants below
+/// were tuned against it. The band is taken on every Kraken row, not on
+/// parents; the argument that whole-second Kraken timestamps make per-row
+/// statistics parent-layer ones was never measured and is false, since
+/// coarsening timestamps removes no per-row return. On the per-fill series a
+/// consumer receives, the shipped law sits outside three of the return bands;
+/// `per_fill_returns_sit_outside_three_kraken_bands` pins which. No test holds
+/// the parent-end series to these bands any more.
 pub(super) const EVENT_PRICE_REPEAT_PROB: f64 = 0.8;
 // Level-walk intensity conditional on the bounce regime. `level_step_prob` is
 // solved from the measured `levels_mean` (section 2.4) as an unconditional
@@ -138,13 +148,15 @@ pub(super) const STUDENT_T_DF: f64 = 4.0;
 /// change to `STUDENT_T_DF` fails a test here instead of silently
 /// de-standardizing the innovation.
 pub(super) const STUDENT_T_UNIT_SCALE: f64 = std::f64::consts::SQRT_2;
-// The high/low bounce regime jointly controls negative lag-1 return ACF
-// (target -0.197 .. -0.057), zero_change_frac (0.336 .. 0.751) and the
-// absolute-return ACF decay (lag1 0.152 .. 0.307, lag10 .. 0.156, lag50 ..
-// 0.123). The regime's mean active length (1 / BOUNCE_HIGH_TO_LOW_PROB ~ 33
-// trades) sets the abs-return ACF timescale: too long flattens the lag1->lag10
-// decay above the lag10 ceiling, too short starves the lag50 floor, so these
-// two transition probabilities are pinned together with the flip contrast.
+// The high/low bounce regime jointly controls the parent-end series' lag-1
+// return ACF, zero-change fraction and absolute-return ACF decay; these were
+// tuned to land that series inside the fingerprint's Kraken return bands,
+// which describe per-row returns, not parent ends (see
+// `EVENT_PRICE_REPEAT_PROB`). The regime's mean active length
+// (1 / BOUNCE_HIGH_TO_LOW_PROB ~ 33 parents) sets the abs-return ACF
+// timescale: too long flattens the lag1->lag10 decay, too short starves lag
+// 50, so these two transition probabilities are pinned together with the flip
+// contrast.
 pub(super) const BOUNCE_LOW_FLIP_PROB: f64 = 0.02;
 pub(super) const BOUNCE_HIGH_FLIP_PROB: f64 = 0.25;
 pub(super) const BOUNCE_LOW_TO_HIGH_PROB: f64 = 0.01;

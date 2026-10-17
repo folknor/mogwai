@@ -171,14 +171,78 @@ exchange machinery.** All the machinery of a real exchange can be built against
 the tapes we have. Better tapes are gated on v2 regardless, so an unfitted
 instrument class is not a finding and does not need re-reporting.
 
-- **The BTCUSDT fit sits above its own lag-10 abs-return ACF band.** Over 64
-  seeds the generated lag-10 mean is about 0.165 to 0.170 against the
-  fingerprint band's 0.1565 ceiling, identically under ChaCha12 and
-  `TapeRng` draws, with a heavy upper tail of realizations. `realism`
-  (`mogwai-data`, seed 42) is red on it at tape 38 and runs in every lane, so
-  the plain `brokkr check` is red until the fit moves. Fit work: the GARCH
-  persistence or the arrival clustering that feeds it, re-run over many seeds
-  rather than tuned to seed 42.
+- **The legacy law's return dynamics were fitted to the wrong observable; take
+  on with tape research v2.** Investigated 2026-10-17 (sparred with codex,
+  three rounds), after `realism` went red on `abs_return_acf_lag10` at seed 42.
+  The red was the least of it.
+
+  What was found:
+  - The fingerprint's return bands (`golden_targets`: return ACF lag 1,
+    abs-return ACF lags 1, 10 and 50, zero-change fraction) are min to max
+    across the eight Kraken pairs (`mogwai_lab::fingerprint::build_fingerprint`),
+    and the anchor XBTUSD sits at the edge of every ACF band: max on the three
+    abs lags, min on return lag 1. One realization against that edge is a coin
+    flip however good the fit, which is why seed 42 went in and out of the
+    lag-10 band from tape to tape.
+  - The bands are per Kraken row. `realism` gated them on each generated
+    parent's last price. The rationale (`git show 628c19f^:notes/spec-trade-cadence.md`,
+    section 6.3) was that whole-second Kraken timestamps make per-row
+    statistics "approximately bucket-layer statistics already", and its own
+    risk section admitted that was unmeasured. It is false: coarsening
+    timestamps removes no per-row return; only collapsing prices would. The
+    bounce layer (`EVENT_PRICE_REPEAT_PROB`, the level-step multipliers,
+    `DRIFT_RECENTER_FRAC`, the bounce transition probabilities) was tuned to
+    that comparison.
+  - Three sources are mixed: sweep geometry (children 8.49, levels, parent
+    gaps) from raw Binance BTCUSDT trades grouped by timestamp and side
+    (`analysis/cadence.json`, `mogwai_lab::cadence`); return targets from the
+    full Kraken history; and the gate on generated parent ends. The duration
+    gates are unit-matched (parent-start gaps against inferred-parent gaps)
+    and stay.
+  - The estimators also differ: the corpus `AutoCorr` uses lag-dependent pair
+    counts and the global mean squared, the test's `acf` centred products
+    over the total centred sum of squares.
+
+  Measured, release, 8 seeds of 500k parents (`realism_observation_unit_probe`,
+  ignored, prints both series):
+
+  | Statistic | Kraken band | Parent ends | Per fill |
+  |---|---|---|---|
+  | return ACF lag 1 | -0.197 to -0.057 | -0.07 to -0.14 | +0.013 to +0.025 |
+  | abs ACF lag 1 | 0.152 to 0.307 | 0.26 to 0.28 | 0.098 to 0.125 |
+  | abs ACF lag 10 | 0.018 to 0.156 | 0.145 to 0.230 | 0.045 to 0.072 |
+  | abs ACF lag 50 | 0.039 to 0.123 | 0.084 to 0.196 | 0.024 to 0.043 |
+  | zero-change | 0.336 to 0.751 | about 0.36 | 0.78 |
+
+  Per fill, the series nautilus receives, return lag 1 has the wrong sign:
+  real trades bounce between bid and ask, a generated sweep walks one side
+  monotonically.
+
+  What landed (test-only, no tape byte moved): `realism` gates no return
+  statistic; `the_realized_repeat_rate_and_zero_change_frac_are_recorded` no
+  longer holds its parent-end zero-change to the band;
+  `per_fill_returns_sit_outside_three_kraken_bands` pins the per-fill misses
+  (lag 1 above, abs lag 1 below, zero-change above) as a diagnosis witness,
+  all three judged before reporting. When it fails, reassess; it is not a fit
+  landing.
+
+  What is owed, with v2:
+  - Decide the reference: return statistics and sweep geometry from the same
+    raw-trade corpus and sampling frame, which means the Binance BTCUSDT raw
+    archives. They are not on this host, and `analysis/binance_archive.py`
+    refuses a bulk fetch until the fidelity gate in
+    `notes/sampling-frame-preregistration.md` is ruled on. The Kraken
+    full-history extrema need not stay acceptance limits.
+  - Check the corpus preserves execution order within a tied timestamp; the
+    per-row statistics depend on it.
+  - Refit the bounce layer to the per-fill observable (owes a
+    `TAPE_PROTOCOL_VERSION` bump and the usual re-blessing), then turn the
+    witness into a real gate: multi-seed, accuracy margins justified
+    independently of the generator's own spread, dispersion gated apart,
+    one shared estimator convention pinned on both sides.
+  - `analysis/fingerprint.json`'s `golden_targets._doc` still says the
+    generator "must reproduce these"; it moves with the next fingerprint
+    regeneration, which owes a bump anyway.
 
 - **Nothing has been fitted for equity, perpetual or inverse.** A symbol
   configured as one is served the default tape wearing a different shape. The
