@@ -226,6 +226,24 @@ which for this one type is the contract rather than the defect the previous
 paragraph describes. The venue refused the same frame at its boundary before
 this local check existed; the denial only moved closer.
 
+A quote-denominated quantity is refused for a different reason: not the
+venue's verdict moved closer, but a quantity the wire cannot carry. Nautilus
+hands `OrderInitialized.quantity` to `submit_order` unconverted whatever
+`quote_quantity` says - its risk engine converts only for its own checks - and
+the wire sizes every order in base units with no denomination flag, so
+forwarding a 10,000 USDT buy would send 10,000 of the base asset. An order with
+`quote_quantity = true` on a non-inverse instrument is therefore denied with
+`SUBMIT_FAILED: UNSUPPORTED_QUOTE_QUANTITY: ..`, and so is one whose instrument
+is absent from nautilus's cache, since nothing then establishes what its
+quantity means; the remedy is a base-unit quantity with the flag cleared. On an
+inverse the flag is forwarded, because nautilus itself reads a flagged inverse
+quantity as the contract quantity and never converts it, and the adapter keeps
+the flag on every later `OrderUpdated`. Nautilus's risk engine skips its
+minimum and maximum quantity bounds for any flagged order, inverse included,
+and the venue has no such bounds of its own; the adapter does not re-impose
+them. A venue-native quote quantity, with the venue converting the quantity to
+base units itself, is owed and not built.
+
 Configuration is refused the same way and at the same distance from the venue:
 `validate()` on either client config rejects `dial_timeout_secs = 0`, which
 would otherwise expire every dial before a socket could open and report a local

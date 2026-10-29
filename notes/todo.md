@@ -630,6 +630,22 @@ classes.
   window is a placement and not a river, provably, because the window never
   enters `RiverKey`.
 
+- **Venue-native quote quantity.** A quote-denominated order (`quote_quantity =
+  true` on a non-inverse: a 10,000 USDT buy) is refused in the adapter's
+  `wire_submit` today, because the wire's `SubmitOrder.quantity` is base units
+  with no denomination flag; see `refuse_unrepresentable_quote_quantity` and
+  `docs/adapter-lifecycle.md`. The north star's complete-surface clause owes the
+  real thing: a wire denomination, the engine converting the quantity to base
+  units the way nautilus's simulated matching engine does (a priced order at its
+  stated price on submission, a market-style order at fill, then clearing the
+  flag with an `OrderUpdated` carrying the base quantity), and the adapter emitting that update so nautilus's order stops
+  being quote-denominated. The forks to settle first: whether a resting limit
+  converts once at its price or per fill, what a quantity amend means on a
+  still-quote order, how the mirror and venue-truth reports carry the
+  denomination, and which havoc divergences apply to the conversion ack.
+  Binance spot serves it on market orders only and IB on buys only; the venue
+  answers to the surface an exchange lists, not to either.
+
 ## Engine
 
 - **Trailing-stop fidelity is pass-granular, by documented design - open only

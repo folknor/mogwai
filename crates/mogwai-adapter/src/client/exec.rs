@@ -39,8 +39,8 @@ use nautilus_model::{
     enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSide, TriggerType},
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
-        OrderEventAny, OrderExpired, OrderFilled, OrderModifyRejected, OrderRejected,
-        OrderSubmitted, OrderTriggered, OrderUpdated,
+        OrderDeniedReason, OrderEventAny, OrderExpired, OrderFilled, OrderModifyRejected,
+        OrderRejected, OrderSubmitted, OrderTriggered, OrderUpdated,
     },
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, TradeId, Venue, VenueOrderId,
@@ -443,6 +443,7 @@ impl MogwaiExecutionClient {
         position_id: Option<PositionId>,
         init: &nautilus_model::events::OrderInitialized,
     ) -> anyhow::Result<mogwai_protocol::SubmitOrder> {
+        self.refuse_unrepresentable_quote_quantity(client_order_id, instrument_id, init)?;
         convert::wire_trigger_type(init.trigger_type)?;
         if init
             .trigger_instrument_id
@@ -515,6 +516,65 @@ impl MogwaiExecutionClient {
             );
         }
         Ok(wire)
+    }
+
+    /// Refuses a quote-denominated quantity the wire cannot carry.
+    ///
+    /// The wire `quantity` is in base units - contracts for an inverse - and
+    /// has no denomination flag, while nautilus hands `OrderInitialized.quantity`
+    /// through to `submit_order` untouched whatever `quote_quantity` says: the
+    /// risk engine converts a quote quantity only for its own checks, and only
+    /// the simulated matching engine ever rewrites the order. Forwarding the
+    /// number would size a 10,000 USDT buy as 10,000 base units.
+    ///
+    /// An inverse is the exception, because there nautilus itself reads the
+    /// flagged quantity as the contract quantity: the risk engine's
+    /// `order_risk_quantity` and the matching engine's resize both leave it
+    /// unconverted, so forwarding it is exact. Forwarded orders keep the flag
+    /// on every later `OrderUpdated` (see `OrderRecord::quote_quantity`). The
+    /// risk engine skips its min/max quantity bounds for any flagged order,
+    /// inverse included, and the venue has no such bounds of its own; that
+    /// skip is nautilus policy, the same in its sandbox, and is deliberately
+    /// not re-imposed here. The inverse test reads nautilus's cache - the
+    /// definition the risk engine judged the order against - and an instrument
+    /// absent from it proves no exception, so the order is refused.
+    ///
+    /// Raised as `OrderDeniedReason::UnsupportedQuoteQuantity` through the
+    /// ordinary conversion error, so the engine denies it as
+    /// `SUBMIT_FAILED: UNSUPPORTED_QUOTE_QUANTITY: ..` before any event or
+    /// mirror record exists, and a refused flagged leg aborts its whole list.
+    fn refuse_unrepresentable_quote_quantity(
+        &self,
+        client_order_id: &ClientOrderId,
+        instrument_id: InstrumentId,
+        init: &nautilus_model::events::OrderInitialized,
+    ) -> anyhow::Result<()> {
+        if !init.quote_quantity {
+            return Ok(());
+        }
+        let inverse = self
+            .core
+            .cache()
+            .instrument(&instrument_id)
+            .map(nautilus_model::instruments::Instrument::is_inverse);
+        let detail = match inverse {
+            Some(true) => return Ok(()),
+            Some(false) => format!(
+                "MOGWAI sizes a non-inverse instrument in base units; order {client_order_id} on \
+                 {instrument_id} has quote_quantity=true, and forwarding its quantity would read \
+                 quote units as base units. Supply a base-unit quantity and set \
+                 quote_quantity=false"
+            ),
+            None => format!(
+                "cannot establish quantity semantics for order {client_order_id}: instrument \
+                 {instrument_id} is absent from the nautilus cache, and a quote-flagged quantity \
+                 is forwarded only for a confirmed inverse. Populate the instrument cache, or \
+                 supply a base-unit quantity and set quote_quantity=false"
+            ),
+        };
+        Err(anyhow::Error::new(
+            OrderDeniedReason::unsupported_quote_quantity_with_detail(detail),
+        ))
     }
 
     /// Mirror the order locally and tell nautilus it is on its way.
@@ -597,6 +657,7 @@ impl MogwaiExecutionClient {
                     instrument_id,
                     order_side: init.order_side,
                     order_type: init.order_type,
+                    quote_quantity: init.quote_quantity,
                     status: OrderStatus::Submitted,
                     venue_order_id: None,
                     ts_last: ts_command,
@@ -2662,6 +2723,13 @@ struct OrderRecord {
     instrument_id: InstrumentId,
     order_side: OrderSide,
     order_type: OrderType,
+    /// The order's `OrderInitialized.quote_quantity`, which every `OrderUpdated`
+    /// built for it restates: nautilus assigns the event's flag to the cached
+    /// order, so a literal `false` there would clear it on the first amend ack.
+    /// Only an inverse ever carries `true` this far (`wire_submit` refuses the
+    /// rest), and the wire has no denomination flag to recover it from, so the
+    /// mirror is where it survives.
+    quote_quantity: bool,
     status: OrderStatus,
     venue_order_id: Option<VenueOrderId>,
     ts_last: UnixNanos,
@@ -3113,7 +3181,7 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 updated_price,
                 updated_trigger_price,
                 None,
-                false,
+                record.quote_quantity,
             );
             ctx.emit(|e| e.send_order_event(OrderEventAny::Updated(event)));
         }
@@ -3560,16 +3628,27 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         return;
     };
 
-    let commission = if fill.commission.is_zero() {
-        None
-    } else {
-        // The mirror is already advanced and the fill event must still emit; a
-        // commission that cannot represent as nautilus Money degrades to no
-        // reported commission (with a warning) rather than panicking or
-        // dropping the whole fill.
-        let commission_currency =
-            Currency::from_str(&fill.commission_currency).unwrap_or(quote_currency);
-        match convert::money(fill.commission, commission_currency) {
+    // The venue always states a commission, so it always reaches nautilus,
+    // a zero included: `Some(zero)` in the venue-named currency, exactly what
+    // `fill_report_from_wire` builds for the same row, so a fill delivered
+    // live and one rebuilt by reconciliation agree. An absent commission
+    // means one the venue charged that cannot be represented. The mirror is
+    // already advanced and the fill must still emit, so that degrades to
+    // `None` with a warning rather than panicking or dropping the fill - and
+    // that includes an unknown currency code, which is no evidence for the
+    // settlement currency and is never relabelled as it.
+    let commission = match Currency::from_str(&fill.commission_currency) {
+        Err(err) => {
+            tracing::warn!(
+                order = %client_order_id,
+                trade = %trade_id,
+                currency = %fill.commission_currency,
+                error = %err,
+                "reporting fill without commission: unknown commission currency"
+            );
+            None
+        }
+        Ok(commission_currency) => match convert::money(fill.commission, commission_currency) {
             Ok(money) => Some(money),
             Err(err) => {
                 tracing::warn!(
@@ -3580,7 +3659,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
                 );
                 None
             }
-        }
+        },
     };
     // The liquidity side is the wire's own `fill.liquidity_side`, mapped one to
     // one below; nothing is inferred or defaulted here.
@@ -3965,6 +4044,7 @@ mod tests {
                 instrument_id: InstrumentId::from("EURUSD.MOGWAI"),
                 order_side: OrderSide::Buy,
                 order_type: OrderType::Limit,
+                quote_quantity: false,
                 status,
                 venue_order_id: Some(VenueOrderId::from("V-1")),
                 ts_last: UnixNanos::from(20),
@@ -4072,6 +4152,7 @@ mod tests {
                 instrument_id: InstrumentId::from("EURUSD.MOGWAI"),
                 order_side: OrderSide::Buy,
                 order_type,
+                quote_quantity: false,
                 status,
                 venue_order_id: Some(VenueOrderId::from("V-1")),
                 ts_last: UnixNanos::from(20),
@@ -4247,6 +4328,7 @@ mod tests {
                 instrument_id: InstrumentId::from("BTCUSDT.MOGWAI"),
                 order_side: OrderSide::Buy,
                 order_type: OrderType::Limit,
+                quote_quantity: false,
                 status: OrderStatus::Accepted,
                 venue_order_id: Some(VenueOrderId::from("V-OLD")),
                 ts_last: UnixNanos::from(20),

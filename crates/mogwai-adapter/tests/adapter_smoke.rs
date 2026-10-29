@@ -44,8 +44,9 @@ use nautilus_model::{
         AccountId, ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId,
         Symbol, TraderId, VenueOrderId,
     },
+    instruments::{CryptoPerpetual, InstrumentAny},
     orders::Order,
-    types::{Price, Quantity},
+    types::{Currency, Money, Price, Quantity},
 };
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -457,6 +458,14 @@ async fn adapter_submit_drives_live_exec_events() {
             assert_eq!(fill.instrument_id.venue, *MOGWAI_VENUE);
             assert_eq!(fill.last_qty, Quantity::from("1"));
             assert_eq!(fill.last_px, Price::from("100.00"));
+            // The venue charged nothing and said so: a known zero in the
+            // currency it named, not an absent commission. The fill report
+            // reconciliation rebuilds for the same row carries the same zero.
+            assert_eq!(
+                fill.commission,
+                Some(Money::zero(Currency::USDT())),
+                "a venue-reported zero commission reaches nautilus as a zero, not as None"
+            );
         }
         other => panic!("expected an OrderFilled, got {other:?}"),
     }
@@ -955,22 +964,24 @@ async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
 /// The order-init shapes the venue cannot honor, each refused before any
 /// `OrderSubmitted`. Table-driven because the rows are one rule - the venue
 /// refuses what it cannot serve rather than serving something else quietly -
-/// and because each but the last is built by mutating a legal init, which is
-/// the only way to produce shapes nautilus' own factory will not assemble.
-/// The last row is the exception: nautilus' own `MarketToLimit` constructor
-/// builds its init with `price: None` (the limit determined at fill), while
-/// this venue's wire has the consumer state the limit the remainder rests at,
-/// so the factory-built shape itself is what the rule table refuses. The row
-/// pins that model mismatch loudly; `docs/adapter-lifecycle.md` states the
-/// host-side workaround.
+/// and because every row is built by mutating a legal init, which is the only
+/// way to produce most of these shapes: nautilus' own factory will not
+/// assemble them. The market-to-limit row is the exception in kind: nautilus'
+/// own `MarketToLimit` constructor builds its init with `price: None` (the
+/// limit determined at fill), while this venue's wire has the consumer state
+/// the limit the remainder rests at, so the factory-built shape itself is what
+/// the rule table refuses. The row pins that model mismatch loudly;
+/// `docs/adapter-lifecycle.md` states the host-side workaround.
 ///
 /// The priced-market row is the shape whose refusal used to be the venue's
 /// alone: the adapter forwarded the price and let the decode boundary answer,
 /// which needs a live socket and reports an adapter-visible defect as a venue
 /// rejection. `wire_submit` now runs the venue's own `validate_submit_order` at
-/// `SubmitPhase::PreStamp`, so the whole table is refused by one rule table
-/// rather than two, and the closing assertion below - that nothing reached the
-/// venue - covers it too.
+/// `SubmitPhase::PreStamp`, so the rows the venue's rule table owns are refused
+/// by that one table rather than a second copy. The trigger, trail and
+/// quote-quantity rows are the adapter's own checks, for nautilus fields the
+/// wire has no counterpart for. The closing assertion below - that nothing
+/// reached the venue - covers every row.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn unsupported_init_shapes_are_refused_before_submitted() {
@@ -1035,6 +1046,17 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
         init
     };
 
+    // A quote-denominated quantity on an instrument nautilus's cache does not
+    // hold. The wire sizes in base units, and only a confirmed inverse reads a
+    // flagged quantity as its contract quantity, so absence is a refusal. The
+    // known non-inverse case and the forwarded inverse are pinned by
+    // `a_quote_quantity_is_forwarded_only_for_an_inverse`.
+    let quote_quantity_uncached = {
+        let mut init = legal.clone();
+        init.quote_quantity = true;
+        init
+    };
+
     for (label, init, needles) in [
         (
             "a priced market order",
@@ -1067,6 +1089,14 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
                 "MarketToLimit order must carry a price",
             ],
         ),
+        (
+            "a quote quantity on an uncached instrument",
+            quote_quantity_uncached,
+            [
+                "UNSUPPORTED_QUOTE_QUANTITY",
+                "absent from the nautilus cache",
+            ],
+        ),
     ] {
         let err = client
             .submit_order(submit_command(&order, init))
@@ -1089,6 +1119,276 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
             .all(|text| !text.contains("SubmitOrder")),
         "a refused init must not reach the venue at all"
     );
+}
+
+/// A commission in a currency nautilus does not know still emits the fill,
+/// with no commission on it. The code is no evidence for the settlement
+/// currency, so relabelling the amount as USDT - what the live handler used to
+/// do - would book a fee in a denomination the venue never named.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_commission_in_an_unknown_currency_is_absent_not_relabelled() {
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"1.5","commission_currency":"XQZ","liquidity_side":"taker","ts_event":11}"#
+                .to_string(),
+        );
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_order(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("submit order");
+
+    let timeout = Duration::from_secs(2);
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout, "the local OrderSubmitted").await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout, "the venue's OrderAccepted").await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    match next_exec_event(&mut sink_rx, timeout, "the venue's OrderFilled").await {
+        ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
+            assert_eq!(fill.last_qty, Quantity::from("1"));
+            assert_eq!(
+                fill.commission, None,
+                "an unknown commission currency must not be relabelled as the settlement currency"
+            );
+        }
+        other => panic!("expected an OrderFilled, got {other:?}"),
+    }
+}
+
+/// `BTCUSDT.MOGWAI` as nautilus's cache would hold it, linear or inverse. Only
+/// `is_inverse` matters to the quote-quantity rule; the rest is the minimum
+/// the checked builder needs.
+fn btcusdt_perpetual(is_inverse: bool) -> InstrumentAny {
+    let settlement = if is_inverse {
+        Currency::BTC()
+    } else {
+        Currency::USDT()
+    };
+    InstrumentAny::CryptoPerpetual(
+        CryptoPerpetual::builder()
+            .instrument_id(instrument_id())
+            .raw_symbol(Symbol::from("BTCUSDT"))
+            .base_currency(Currency::BTC())
+            .quote_currency(Currency::USDT())
+            .settlement_currency(settlement)
+            .is_inverse(is_inverse)
+            .price_precision(2)
+            .size_precision(0)
+            .price_increment(Price::from("0.01"))
+            .size_increment(Quantity::from("1"))
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .expect("BTCUSDT perpetual builds"),
+    )
+}
+
+/// A quote-denominated quantity reaches the wire only where nautilus itself
+/// reads it as the contract quantity. The wire sizes in base units with no
+/// denomination flag, so on a non-inverse the number would be misread - a
+/// 10,000 USDT buy sent as 10,000 BTC - and is refused before any event. On an
+/// inverse the risk and matching engines leave a flagged quantity
+/// unconverted, so it is forwarded as stated, and the flag must survive the
+/// amend ack: nautilus assigns `OrderUpdated.is_quote_quantity` to the cached
+/// order, so restating it as false would silently re-denominate the order.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_quote_quantity_is_forwarded_only_for_an_inverse() {
+    // The non-inverse refusal.
+    {
+        let state = Arc::new(StubState::default());
+        let base_url = bound_stub(Arc::clone(&state)).await;
+        let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+        replace_exec_event_sender(sink_tx);
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        cache
+            .borrow_mut()
+            .add_instrument(btcusdt_perpetual(false))
+            .expect("cache linear instrument");
+        let order = cached_order(&cache);
+        let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+        let mut init = order.init_event().clone();
+        init.quote_quantity = true;
+        let err = client
+            .submit_order(submit_command(&order, init))
+            .expect_err("a quote quantity on a non-inverse is refused")
+            .to_string();
+        for needle in [
+            "UNSUPPORTED_QUOTE_QUANTITY",
+            "non-inverse instrument",
+            "set quote_quantity=false",
+        ] {
+            assert!(err.contains(needle), "the refusal names {needle}: {err}");
+        }
+        assert_no_exec_event(&mut sink_rx).await;
+        assert_eq!(client.mirrored_order_status(order.client_order_id()), None);
+        assert!(
+            state
+                .ws_client_messages
+                .lock()
+                .expect("ws client messages mutex")
+                .iter()
+                .all(|text| !text.contains("SubmitOrder")),
+            "a refused quote quantity must not reach the venue"
+        );
+    }
+
+    // The forwarded inverse, through its amend ack.
+    let state = Arc::new(StubState::default());
+    state
+        .ws_exec_frames
+        .lock()
+        .expect("ws exec frames mutex")
+        .push(
+        r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+            .to_string(),
+    );
+    state
+        .ws_modify_frames
+        .lock()
+        .expect("ws modify frames mutex")
+        .push(
+            r#"{"type":"OrderUpdated","client_order_id":"O-1","venue_order_id":"V-1","quantity":"1","price":"99.00","leaves_qty":"1","ts_event":12}"#
+                .to_string(),
+        );
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    cache
+        .borrow_mut()
+        .add_instrument(btcusdt_perpetual(true))
+        .expect("cache inverse instrument");
+    let order = cached_order(&cache);
+    let unflagged = cached_stop_limit(&cache);
+    let client = connected_exec_client(base_url, Rc::clone(&cache), &mut sink_rx).await;
+    let mut init = order.init_event().clone();
+    init.quote_quantity = true;
+    client
+        .submit_order(submit_command(&order, init))
+        .expect("a quote quantity on an inverse is forwarded");
+
+    let timeout = Duration::from_secs(2);
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout, "the inverse order's OrderSubmitted").await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout, "the inverse order's OrderAccepted").await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    let submit = state
+        .ws_client_messages
+        .lock()
+        .expect("ws client messages mutex")
+        .iter()
+        .find(|text| text.contains("SubmitOrder"))
+        .cloned()
+        .expect("the inverse order reached the venue");
+    assert!(
+        submit.contains(r#""quantity":"1""#),
+        "the flagged contract quantity is forwarded as stated: {submit}"
+    );
+
+    client
+        .modify_order(ModifyOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            Some(VenueOrderId::from("V-1")),
+            None,
+            Some(Price::from("99.00")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("amend dispatches");
+    match next_exec_event(&mut sink_rx, timeout, "the inverse order's amend ack").await {
+        ExecutionEvent::Order(OrderEventAny::Updated(updated)) => {
+            assert_eq!(updated.price, Some(Price::from("99.00")));
+            assert!(
+                updated.is_quote_quantity,
+                "the amend ack must restate the order's quote flag, not clear it"
+            );
+        }
+        other => panic!("expected an OrderUpdated, got {other:?}"),
+    }
+
+    // An unflagged order on the same client and instrument, so the flag above
+    // is the order's own stored state rather than a constant: its amend ack
+    // must restate false. The stub replays its frame lists on every command,
+    // so they are swapped to this order's before it is submitted.
+    *state.ws_exec_frames.lock().expect("ws exec frames mutex") = vec![
+        r#"{"type":"OrderAccepted","client_order_id":"O-STOPLIMIT","venue_order_id":"V-7","ts_event":20}"#
+            .to_string(),
+    ];
+    *state.ws_modify_frames.lock().expect("ws modify frames mutex") = vec![
+        r#"{"type":"OrderUpdated","client_order_id":"O-STOPLIMIT","venue_order_id":"V-7","quantity":"1","price":"93.00","trigger_price":"96.00","leaves_qty":"1","ts_event":22}"#
+            .to_string(),
+    ];
+    client
+        .submit_order(submit_command(&unflagged, unflagged.init_event().clone()))
+        .expect("an unflagged order submits");
+    assert!(matches!(
+        next_exec_event(
+            &mut sink_rx,
+            timeout,
+            "the unflagged order's OrderSubmitted"
+        )
+        .await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout, "the unflagged order's OrderAccepted").await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    client
+        .modify_order(ModifyOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            unflagged.client_order_id(),
+            Some(VenueOrderId::from("V-7")),
+            None,
+            Some(Price::from("93.00")),
+            Some(Price::from("96.00")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("amend dispatches");
+    match next_exec_event(&mut sink_rx, timeout, "the unflagged order's amend ack").await {
+        ExecutionEvent::Order(OrderEventAny::Updated(updated)) => {
+            assert_eq!(updated.client_order_id, unflagged.client_order_id());
+            assert!(
+                !updated.is_quote_quantity,
+                "an unflagged order's amend ack must not acquire the quote flag"
+            );
+        }
+        other => panic!("expected an OrderUpdated, got {other:?}"),
+    }
 }
 
 /// The mirror regression section 3.5 names: an amend ack recomputes status from

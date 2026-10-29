@@ -271,7 +271,12 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    currency's, and a fill whose cumulative commission would leave `Money`'s
    bounds is refused before it changes the position. Neither reaches mogwai
    today: `convert::money` builds every commission at the currency's precision,
-   so there is nothing finer to accumulate. Since 0.65
+   so there is nothing finer to accumulate. The venue states a commission on
+   every fill, and a zero reaches nautilus as a zero in the venue-named
+   currency, never as an absent commission, on the live fill and on the fill
+   report reconciliation rebuilds alike; a live fill carries no commission only
+   when the venue's amount or currency code cannot be represented, and says so
+   in a warning. Since 0.65
    instruments carry no maker or taker fee at all; the rates moved to the venue
    `fee_model`, which only the simulated matching engine reads, so the live
    path has no fee schedule to compare a reported commission against. That is
