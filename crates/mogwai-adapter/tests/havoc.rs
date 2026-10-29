@@ -205,7 +205,7 @@ async fn assert_only_instrument_prologue(
         match tokio::time::timeout(remaining, rx.recv()).await {
             // Elapsed silent, or sink closed: nothing (more) can leak through.
             Err(_) | Ok(None) => return,
-            Ok(Some(DataEvent::Instrument(_))) => continue,
+            Ok(Some(DataEvent::Data(Data::Instrument(_)))) => continue,
             Ok(Some(other)) => panic!("expected no data events within the window, got {other:?}"),
         }
     }
@@ -1459,7 +1459,7 @@ async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
     {
         while let Ok(event) = rx.try_recv() {
             assert!(
-                matches!(event, DataEvent::Instrument(_)),
+                matches!(event, DataEvent::Data(Data::Instrument(_))),
                 "no stream data may reach the sink before the blackout lifts; got {event:?}"
             );
         }
@@ -1550,7 +1550,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
     // the time the second dial happens.
     while let Ok(event) = rx.try_recv() {
         assert!(
-            matches!(event, DataEvent::Instrument(_)),
+            matches!(event, DataEvent::Data(Data::Instrument(_))),
             "the blackout, not a served-then-idle socket, must be what cost the \
              re-dial; got {event:?} before the second handshake"
         );

@@ -23,17 +23,17 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{InstrumentDef, SimClock, Symbol, TradeTick, VenueMessage};
 use nautilus_common::{
-    clients::DataClient,
+    clients::{DataClient, execute_bar_subscriptions, execute_instrument_subscriptions},
     live::{get_data_event_sender, get_runtime, sender::EventSender},
     messages::{
         DataEvent,
         data::{
-            BarsResponse, DataResponse, InstrumentResponse, InstrumentsResponse, QuotesResponse,
-            RequestBars, RequestInstrument, RequestInstruments, RequestQuotes, RequestTrades,
-            SubscribeBars, SubscribeFundingRates, SubscribeInstrument, SubscribeInstruments,
-            SubscribeQuotes, SubscribeTrades, TradesResponse, UnsubscribeBars,
-            UnsubscribeFundingRates, UnsubscribeInstrument, UnsubscribeInstruments,
-            UnsubscribeQuotes, UnsubscribeTrades,
+            BarsResponse, DataRequestFailed, DataResponse, InstrumentResponse, InstrumentsResponse,
+            QuotesResponse, RequestBars, RequestInstrument, RequestInstruments, RequestQuotes,
+            RequestTrades, SubscribeBars, SubscribeFundingRates, SubscribeInstrument,
+            SubscribeInstruments, SubscribeQuotes, SubscribeTrades, TradesResponse,
+            UnsubscribeBars, UnsubscribeFundingRates, UnsubscribeInstrument,
+            UnsubscribeInstruments, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
 };
@@ -101,6 +101,18 @@ pub struct MogwaiDataClient {
     pending_history: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HistoryReply>>>>,
     /// Monotonic source of correlation ids for this client's own requests.
     next_request: Arc<std::sync::atomic::AtomicU64>,
+    /// Every nautilus data request whose answer a spawned task still owes.
+    ///
+    /// The id in this set is the right to resolve the request, and exactly one
+    /// side takes it: the task, through `resolve_request`, or `stop()` and
+    /// `connect()`, through `fail_outstanding_requests`, which answer it as
+    /// failed because they abort the task that would have. Both remove the id
+    /// and send under this one lock, so the loser finds nothing and sends
+    /// nothing, and a teardown that returns has made its send attempt for every
+    /// request it found. That holds only for unique outstanding request ids,
+    /// which nautilus's engine also assumes, since it keys its own inflight
+    /// table by them.
+    outstanding_requests: Arc<Mutex<std::collections::HashSet<nautilus_core::UUID4>>>,
 }
 
 /// What the reader hands back to a waiting history request: a page, or the
@@ -152,7 +164,39 @@ impl MogwaiDataClient {
             ws_cmd: None,
             pending_history: Arc::new(Mutex::new(HashMap::new())),
             next_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            outstanding_requests: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
+    }
+
+    /// Claim the right to answer `request_id` for a task about to be spawned.
+    /// Called after every synchronous precondition has passed, so a request
+    /// refused with `Err` (which the engine answers itself) is never claimed.
+    fn register_request(&self, request_id: nautilus_core::UUID4) {
+        lock_recover(&self.outstanding_requests, "outstanding requests").insert(request_id);
+    }
+
+    /// Answer every request a spawned task still owes, as failed, because the
+    /// caller is about to abort those tasks or already has. Without this a
+    /// request in flight at `stop()` or a reconnect was never answered at all:
+    /// its task died mid-page and nautilus kept the request pending until the
+    /// consumer's own timeout. No payload is carried - nothing was retrieved
+    /// that could be trusted as complete.
+    fn fail_outstanding_requests(&self, reason: &str) {
+        let mut outstanding = lock_recover(&self.outstanding_requests, "outstanding requests");
+        let Ok(sink) = self.sink() else {
+            // No sink means no request could have been registered: every
+            // `request_*` takes the sink before it registers.
+            outstanding.clear();
+            return;
+        };
+        for request_id in outstanding.drain() {
+            tracing::error!(%request_id, reason, "data request failed");
+            drop(sink.send(DataEvent::RequestFailed(DataRequestFailed {
+                request_id,
+                reason: reason.to_owned(),
+                response: None,
+            })));
+        }
     }
 
     /// Retires the current transport generation's connectivity flag by
@@ -173,20 +217,7 @@ impl MogwaiDataClient {
     }
 
     fn subscribe_symbol(&self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
-        // The subscription symbol is derived from the nautilus `instrument_id`,
-        // while `config.symbol` is what the socket named on its upgrade - two
-        // sources of truth for one fact. Unreconciled, a host subscribing ES on
-        // a socket bound to MNQ would receive MNQ ticks relabelled ES by
-        // nautilus, silently, with no frame and no log. So they must agree
-        // case-exactly, matching the venue's own comparison. An absent
-        // `config.symbol` takes the venue default and applies no check, which
-        // is the pre-carrier behaviour unchanged.
-        if let Some(bound) = self.config.symbol.as_deref() {
-            ensure!(
-                symbol.as_ref() == bound,
-                "subscription symbol {symbol} does not match the symbol this connection is bound to ({bound})"
-            );
-        }
+        ensure_bound_symbol(self.config.symbol.as_deref(), &symbol, "subscription")?;
         // The subscription is satisfied entirely locally. Nautilus still calls
         // subscribe/unsubscribe and this client must still implement them, but
         // the venue serves one run's one tape and pushes it unbidden, so there
@@ -234,17 +265,26 @@ impl MogwaiDataClient {
             .lock()
             .map_err(|_| anyhow::anyhow!("quote delivery mutex poisoned"))?;
         self.subscribe_symbol(symbol.into(), SubKind::Quotes)?;
-        let cached = self
-            .subs
-            .lock()
-            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?
+        // Nothing after the increment may fail: the member is accepted the
+        // moment its counter moves, and an `Err` from here on would report it
+        // refused while it holds a count the engine will never release. So
+        // the relock recovers rather than refusing, and the cached-book
+        // replay is best effort.
+        let cached = lock_recover(&self.subs, "subscriptions")
             .get(symbol)
             .and_then(|state| state.cached_quote.clone());
         after_enable();
         if let Some(quote) = cached
             && let Some(def) = instrument_def(&self.instruments, symbol)
         {
-            emit_quote(&quote, &self.sink()?, &def, self.sim);
+            match self.sink() {
+                Ok(sink) => emit_quote(&quote, &sink, &def, self.sim),
+                Err(err) => tracing::warn!(
+                    %symbol,
+                    error = %err,
+                    "quote subscription accepted, but the cached book could not be replayed"
+                ),
+            }
         }
         Ok(())
     }
@@ -255,16 +295,22 @@ impl MogwaiDataClient {
             .lock()
             .map_err(|_| anyhow::anyhow!("market delivery mutex poisoned"))?;
         self.subscribe_symbol(symbol.into(), SubKind::Funding)?;
-        let cached = self
-            .subs
-            .lock()
-            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?
+        // Infallible past the increment, for the reason given in
+        // `subscribe_quotes_inner`.
+        let cached = lock_recover(&self.subs, "subscriptions")
             .get(symbol)
             .and_then(|state| state.cached_funding.clone());
         if let Some(cached) = cached
             && let Some(def) = instrument_def(&self.instruments, symbol)
         {
-            emit_funding(&cached, &self.sink()?, &def, self.sim);
+            match self.sink() {
+                Ok(sink) => emit_funding(&cached, &sink, &def, self.sim),
+                Err(err) => tracing::warn!(
+                    %symbol,
+                    error = %err,
+                    "funding subscription accepted, but the standing rate could not be replayed"
+                ),
+            }
         }
         Ok(())
     }
@@ -276,11 +322,14 @@ impl MogwaiDataClient {
     /// that kind can replay the current book or the standing rate; a row that
     /// has cached neither is retired. Nothing is sent to the venue, which keeps
     /// pushing the run's one tape either way.
-    fn unsubscribe_symbol(&mut self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
-        let mut subs = self
-            .subs
-            .lock()
-            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
+    ///
+    /// Infallible, and the lock recovers rather than refusing, because a
+    /// release is the second half of `unsubscribe_bar`'s coupled release: that
+    /// member has already dropped its bar ref when it gets here, so a refusal
+    /// would report the member unreleased while half of it was gone, and a
+    /// retry could never find the ref again to finish the job.
+    fn unsubscribe_symbol(&mut self, symbol: Symbol, kind: SubKind) {
+        let mut subs = lock_recover(&self.subs, "subscriptions");
         if let Some(state) = subs.get_mut(&symbol) {
             state.decrement(kind);
             if state.total() == 0 && state.cached_quote.is_none() && state.cached_funding.is_none()
@@ -288,7 +337,6 @@ impl MogwaiDataClient {
                 subs.remove(&symbol);
             }
         }
-        Ok(())
     }
 
     fn sink(&self) -> anyhow::Result<EventSender<DataEvent>> {
@@ -354,6 +402,129 @@ impl MogwaiDataClient {
             }
         }
     }
+
+    /// One member of a `subscribe_bars` batch, atomic on its own: either both
+    /// counters move or neither does. The batch contract it serves is stated
+    /// over `subscribe_quotes` in the trait impl.
+    fn subscribe_bar(&self, bar_type: BarType) -> anyhow::Result<()> {
+        let window = BarAggregator::new(bar_type)?;
+        let symbol = symbol_from_instrument(bar_type.instrument_id());
+        {
+            // `lock_recover`, matching the rollback below and every other bar
+            // lock in this client. The two halves of one increment-then-roll-
+            // back pair must not disagree about poisoning: failing the
+            // increment on a poisoned guard while the rollback recovers it
+            // would make the poisoned path take a branch no test covers.
+            let mut bars = lock_recover(&self.bars, "bar");
+            bars.entry(bar_type)
+                .or_insert(BarSubState { refs: 0, window })
+                .refs += 1;
+        }
+        // Roll the ref back when the symbol subscription refuses. The
+        // per-`BarType` ref and the per-symbol `SubState.bars` count are the
+        // two halves of one subscription and must move together - that is the
+        // whole of the release rule in `unsubscribe_bar`, stated there from the
+        // release side. `subscribe_symbol` can refuse (the bound-symbol check,
+        // or a poisoned subscription table), and a ref left standing over a
+        // refusal is the same cross-counter desync arriving from the subscribe
+        // side: a later unsubscribe for that bar type finds `refs > 0`, so it
+        // matches, and it spends a symbol-count decrement belonging to a
+        // different bar type's live subscription - which, at zero, darkens the
+        // surviving feed. In a batch the rollback is what lets the members
+        // around a refused one stand: only this member's own ref is undone.
+        if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars) {
+            let mut bars = lock_recover(&self.bars, "bar");
+            if let Some(state) = bars.get_mut(&bar_type) {
+                state.refs = state.refs.saturating_sub(1);
+                if state.refs == 0 {
+                    bars.remove(&bar_type);
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// One member of an `unsubscribe_bars` batch.
+    fn unsubscribe_bar(&mut self, bar_type: BarType) -> anyhow::Result<()> {
+        let symbol = symbol_from_instrument(bar_type.instrument_id());
+        // Decrement the per-symbol bars count only when this bar type actually had
+        // a live subscription to release. The per-BarType refs and the
+        // per-symbol SubState.bars count are incremented together on subscribe, so
+        // they must be decremented together. An unmatched release (a bar type
+        // never subscribed, a member of a batch whose subscribe was refused, or a
+        // double-unsubscribe interleaved by nautilus command replay) that still
+        // decremented the symbol count would steal a
+        // decrement belonging to a different bar type's live subscription. No
+        // frame goes to the venue either way - subscriptions are satisfied
+        // entirely by this local table - and that is exactly what makes the
+        // theft dangerous: if it drops the symbol's bars count to 0, the WS
+        // reader stops forwarding that symbol's ticks to the bar path while the
+        // venue keeps pushing them, so the surviving bar type goes dark with
+        // nothing on the wire to show for it. Saturating arithmetic prevents
+        // underflow, not this cross-type theft - so gate the symbol decrement
+        // on a real match.
+        let (matched, to_flush) = {
+            let mut bars = self
+                .bars
+                .lock()
+                .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?;
+            let refs_after = match bars.get_mut(&bar_type) {
+                Some(state) if state.refs > 0 => {
+                    state.refs -= 1;
+                    Some(state.refs)
+                }
+                _ => None,
+            };
+            match refs_after {
+                // On the last release, take the removed bar type's active window
+                // out with it so a completed-but-withheld bar can be flushed
+                // below rather than silently discarded.
+                Some(0) => (true, bars.remove(&bar_type).map(|state| state.window)),
+                Some(_) => (true, None),
+                None => (false, None),
+            }
+        };
+        if matched {
+            // Flush the removed bar type's active window only if it already closed
+            // (close_ts <= sim-now) but was withheld only for lack of a later
+            // trade to cross its boundary - the discard-on-unsubscribe case.
+            // A genuinely in-progress window (close_ts still in the future) is
+            // dropped, not emitted: shipping it would inject a future-stamped,
+            // incomplete bar a consumer could not tell from a real completed one.
+            // The teardown twin of this flush lives in `flush_completed_bars`
+            // (called from `stop`). Closing a live in-progress window on time on
+            // a clock timer is a separate feature, deliberately not built - see
+            // `flush_completed_bars` and the withheld-bar note in havoc.md.
+            if let Some(mut window) = to_flush
+                && let Some(def) = instrument_def(&self.instruments, &symbol)
+                && let Some(flushed) = window.take_closed(&def, now_unix_nanos(self.sim))
+            {
+                match flushed {
+                    Ok(bar) => {
+                        if let Ok(sink) = self.sink() {
+                            drop(sink.send(DataEvent::Data(Data::Bar(bar))));
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        %bar_type,
+                        error = %err,
+                        "dropping unrepresentable bar on unsubscribe flush"
+                    ),
+                }
+            }
+            self.unsubscribe_symbol(symbol, SubKind::Bars);
+        } else {
+            // Reported as released, not refused: the engine is told this bar
+            // type is no longer held, which is true - it never was.
+            tracing::warn!(
+                %bar_type,
+                "ignoring unsubscribe_bars with no matching subscription; \
+                 not touching the symbol's shared bars count"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait(?Send)]
@@ -376,6 +547,12 @@ impl DataClient for MogwaiDataClient {
         // request must fail synchronously instead of entering a dead queue.
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        // The aborted tasks include every `request_*` still collecting, and an
+        // aborted task answers nothing, so the requests it owed are answered
+        // here.
+        self.fail_outstanding_requests(
+            "the mogwai data client stopped before the request completed",
+        );
         self.retire_connected_flag();
         // Dropping every sender wakes history collectors through their existing
         // abandoned-session arm instead of making them wait out the request
@@ -421,6 +598,10 @@ impl DataClient for MogwaiDataClient {
         // so a second connect cannot leave two readers sharing `connected`.
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        // Before the first await, as `stop()` does it and for the same reason.
+        self.fail_outstanding_requests(
+            "the mogwai data client reconnected before the request completed",
+        );
         self.retire_connected_flag();
         lock_recover(&self.pending_history, "pending history").clear();
         let http_base_url = self.config.http_base_url();
@@ -679,7 +860,9 @@ impl DataClient for MogwaiDataClient {
                     let ts_init = now_unix_nanos(sim);
                     for def in defs {
                         if let Some(instrument) = instrument_any_or_warn(&def, ts_init) {
-                            drop(sink.send(DataEvent::Instrument(instrument)));
+                            drop(
+                                sink.send(DataEvent::Data(Data::Instrument(Box::new(instrument)))),
+                            );
                         }
                     }
                 }
@@ -688,8 +871,18 @@ impl DataClient for MogwaiDataClient {
         Ok(())
     }
 
+    /// One fetch answers the whole batch: the venue serves its instrument set
+    /// as one document, so a batch of N ids is one HTTP round trip that emits
+    /// the requested subset, not N round trips. Acceptance is the dispatch of
+    /// that fetch, so every member is accepted together; a member the venue
+    /// does not define simply emits nothing, as a single-id subscription for an
+    /// unknown symbol always did.
     fn subscribe_instrument(&mut self, cmd: SubscribeInstrument) -> anyhow::Result<()> {
-        let symbol = symbol_from_instrument(cmd.instrument_id);
+        let symbols: std::collections::HashSet<Symbol> = cmd
+            .instrument_ids
+            .iter()
+            .map(|id| symbol_from_instrument(*id))
+            .collect();
         let sink = self.sink()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
@@ -703,10 +896,12 @@ impl DataClient for MogwaiDataClient {
                     cache_instruments(&instruments, defs.clone());
                     let ts_init = now_unix_nanos(sim);
                     for def in defs {
-                        if def.symbol == symbol
+                        if symbols.contains(&def.symbol)
                             && let Some(instrument) = instrument_any_or_warn(&def, ts_init)
                         {
-                            drop(sink.send(DataEvent::Instrument(instrument)));
+                            drop(
+                                sink.send(DataEvent::Data(Data::Instrument(Box::new(instrument)))),
+                            );
                         }
                     }
                 }
@@ -723,149 +918,132 @@ impl DataClient for MogwaiDataClient {
         Ok(())
     }
 
+    // The batch contract, one rule for quotes, trades, funding and bars, in
+    // both directions: each member is applied on its own and is atomic on its
+    // own, a refused member does not stop the members after it, and nothing an
+    // earlier member did is rolled back. A failure returns nautilus's
+    // `SubscriptionError` naming exactly the members that were applied.
+    //
+    // Per member rather than all-or-nothing because that is the contract the
+    // engine is built to: the `DataClient` trait asks for best effort without
+    // rolling back accepted members, and `DataClientAdapter::subscribe_batch`
+    // records precisely the ids a `SubscriptionError` lists as active and no
+    // others. That listing is what keeps the engine's own subscription set and
+    // this client's counters describing the same subscriptions. A loop that
+    // stopped at the first refusal and returned a bare error would tell the
+    // engine nothing was accepted while the members before the refusal held
+    // counts here; the engine would never release them, so those feeds could
+    // not be turned off, and a re-subscribe would count them twice.
+    //
+    // Member atomicity is the other half, and it is what the bar member's
+    // rollback in `subscribe_bar` provides: its two counters move together or
+    // not at all, so a refusal midway through a batch leaves no stray ref that
+    // a later unsubscribe could spend against a surviving feed. Subscriptions
+    // are local table entries, so there is no venue-side state to unwind.
     fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
-        let symbol = symbol_from_instrument(cmd.instrument_id);
-        self.subscribe_quotes_inner(&symbol, || {})
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.subscribe_quotes_inner(&symbol_from_instrument(id), || {})
+        })
     }
 
     fn subscribe_funding_rates(&mut self, cmd: SubscribeFundingRates) -> anyhow::Result<()> {
-        self.subscribe_funding_inner(&symbol_from_instrument(cmd.instrument_id))
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.subscribe_funding_inner(&symbol_from_instrument(id))
+        })
     }
 
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
-        let symbol = symbol_from_instrument(cmd.instrument_id);
-        self.subscribe_symbol(symbol, SubKind::Trades)
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.subscribe_symbol(symbol_from_instrument(id), SubKind::Trades)
+        })
     }
 
     fn subscribe_bars(&mut self, cmd: SubscribeBars) -> anyhow::Result<()> {
-        let window = BarAggregator::new(cmd.bar_type)?;
-        let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
-        {
-            // `lock_recover`, matching the rollback below and every other bar
-            // lock in this client. The two halves of one increment-then-roll-
-            // back pair must not disagree about poisoning: failing the
-            // increment on a poisoned guard while the rollback recovers it
-            // would make the poisoned path take a branch no test covers.
-            let mut bars = lock_recover(&self.bars, "bar");
-            bars.entry(cmd.bar_type)
-                .or_insert(BarSubState { refs: 0, window })
-                .refs += 1;
-        }
-        // Roll the ref back when the symbol subscription refuses. The
-        // per-`BarType` ref and the per-symbol `SubState.bars` count are the
-        // two halves of one subscription and must move together - that is the
-        // whole of the release rule in `unsubscribe_bars`, stated there from the
-        // release side. `subscribe_symbol` can refuse (the bound-symbol check),
-        // and a ref left standing over a refusal is the same cross-counter
-        // desync arriving from the subscribe side: a later `unsubscribe_bars`
-        // for that bar type finds `refs > 0`, so it matches, and it spends a
-        // symbol-count decrement belonging to a different bar type's live
-        // subscription - which, at zero, darkens the surviving feed.
-        if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars) {
-            let mut bars = lock_recover(&self.bars, "bar");
-            if let Some(state) = bars.get_mut(&cmd.bar_type) {
-                state.refs = state.refs.saturating_sub(1);
-                if state.refs == 0 {
-                    bars.remove(&cmd.bar_type);
-                }
-            }
-            return Err(err);
-        }
-        Ok(())
+        execute_bar_subscriptions(&cmd.bar_types, |bar_type| self.subscribe_bar(bar_type))
     }
 
+    // An instrument-keyed release cannot fail (see `unsubscribe_symbol`), so
+    // every member is released and the batch is accepted whole.
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
-        self.unsubscribe_symbol(symbol_from_instrument(cmd.instrument_id), SubKind::Quotes)
+        for &id in &cmd.instrument_ids {
+            self.unsubscribe_symbol(symbol_from_instrument(id), SubKind::Quotes);
+        }
+        Ok(())
     }
 
     fn unsubscribe_funding_rates(&mut self, cmd: &UnsubscribeFundingRates) -> anyhow::Result<()> {
-        self.unsubscribe_symbol(symbol_from_instrument(cmd.instrument_id), SubKind::Funding)
-    }
-
-    fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
-        self.unsubscribe_symbol(symbol_from_instrument(cmd.instrument_id), SubKind::Trades)
-    }
-
-    fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
-        let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
-        // Decrement the per-symbol bars count only when this bar type actually had
-        // a live subscription to release. The per-BarType refs and the
-        // per-symbol SubState.bars count are incremented together on subscribe, so
-        // they must be decremented together. An unmatched unsubscribe_bars (a bar
-        // type never subscribed, or a double-unsubscribe interleaved by nautilus
-        // command replay) that still decremented the symbol count would steal a
-        // decrement belonging to a different bar type's live subscription. No
-        // frame goes to the venue either way - subscriptions are satisfied
-        // entirely by this local table - and that is exactly what makes the
-        // theft dangerous: if it drops the symbol's bars count to 0, the WS
-        // reader stops forwarding that symbol's ticks to the bar path while the
-        // venue keeps pushing them, so the surviving bar type goes dark with
-        // nothing on the wire to show for it. Saturating arithmetic prevents
-        // underflow, not this cross-type theft - so gate the symbol decrement
-        // on a real match.
-        let (matched, to_flush) = {
-            let mut bars = self
-                .bars
-                .lock()
-                .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?;
-            let refs_after = match bars.get_mut(&cmd.bar_type) {
-                Some(state) if state.refs > 0 => {
-                    state.refs -= 1;
-                    Some(state.refs)
-                }
-                _ => None,
-            };
-            match refs_after {
-                // On the last release, take the removed bar type's active window
-                // out with it so a completed-but-withheld bar can be flushed
-                // below rather than silently discarded.
-                Some(0) => (true, bars.remove(&cmd.bar_type).map(|state| state.window)),
-                Some(_) => (true, None),
-                None => (false, None),
-            }
-        };
-        if matched {
-            // Flush the removed bar type's active window only if it already closed
-            // (close_ts <= sim-now) but was withheld only for lack of a later
-            // trade to cross its boundary - the discard-on-unsubscribe case.
-            // A genuinely in-progress window (close_ts still in the future) is
-            // dropped, not emitted: shipping it would inject a future-stamped,
-            // incomplete bar a consumer could not tell from a real completed one.
-            // The teardown twin of this flush lives in `flush_completed_bars`
-            // (called from `stop`). Closing a live in-progress window on time on
-            // a clock timer is a separate feature, deliberately not built - see
-            // `flush_completed_bars` and the withheld-bar note in havoc.md.
-            if let Some(mut window) = to_flush
-                && let Some(def) = instrument_def(&self.instruments, &symbol)
-                && let Some(flushed) = window.take_closed(&def, now_unix_nanos(self.sim))
-            {
-                match flushed {
-                    Ok(bar) => {
-                        if let Ok(sink) = self.sink() {
-                            drop(sink.send(DataEvent::Data(Data::Bar(bar))));
-                        }
-                    }
-                    Err(err) => tracing::warn!(
-                        bar_type = %cmd.bar_type,
-                        error = %err,
-                        "dropping unrepresentable bar on unsubscribe flush"
-                    ),
-                }
-            }
-            self.unsubscribe_symbol(symbol, SubKind::Bars)?;
-        } else {
-            tracing::warn!(
-                bar_type = %cmd.bar_type,
-                "ignoring unsubscribe_bars with no matching subscription; \
-                 not touching the symbol's shared bars count"
-            );
+        for &id in &cmd.instrument_ids {
+            self.unsubscribe_symbol(symbol_from_instrument(id), SubKind::Funding);
         }
         Ok(())
     }
 
+    fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
+        for &id in &cmd.instrument_ids {
+            self.unsubscribe_symbol(symbol_from_instrument(id), SubKind::Trades);
+        }
+        Ok(())
+    }
+
+    fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
+        execute_bar_subscriptions(&cmd.bar_types, |bar_type| self.unsubscribe_bar(bar_type))
+    }
+
+    // How a history request is answered, one rule for trades, quotes and bars.
+    //
+    // Every request resolves, exactly once, and the same holds for the two
+    // instrument requests. A success goes out as a payload response; a failure
+    // to retrieve goes out as nautilus's `DataRequestFailed`, naming the
+    // reason. The failure channel is the point: an empty success is
+    // indistinguishable from a quiet window, and this river has multi-hour
+    // droughts.
+    //
+    // A failure carries a payload only when the history was actually
+    // retrieved for at least one member, and then the payload is exactly what
+    // those members got, which may be no rows - a truthful quiet window for
+    // them. A failure that retrieved nothing (an off-river window, a refused
+    // or dropped page session, no member resolvable, a teardown) carries
+    // none. That is deliberate: nautilus's `DataActor` runs the typed hook
+    // (`on_historical_bars` and kin) before it hands the envelope with its
+    // failure reason to `on_data_response`, so an empty payload on a failure
+    // would show a strategy a quiet window first and the failure second.
+    //
+    // A synchronous `Err` from these handlers resolves too (the engine answers
+    // it with a terminal failure envelope), so `?` on a precondition is an
+    // honest refusal. The engine's reason for one is only its own context
+    // line, though, which is why the off-river refusal answers in band with
+    // the floor named. Once a task is spawned the request is registered as
+    // outstanding and answered through `resolve_request`, and `stop()` and
+    // `connect()` answer whatever is still outstanding when they abort it.
+    //
+    // A success goes out as `DataEvent::Response`, the payload-only reply,
+    // rather than as a completed `DataResponseEnvelope`, and that is a choice
+    // about catalog write-back. Nautilus writes a response into a host's
+    // catalog only on an envelope that certifies coverage, and a mogwai window
+    // is one run's realization under an instrument id that every run and
+    // every seed shares: certified, it would let a later run read this run's
+    // water back as history. What a host already stored is read before any
+    // request reaches this client, so isolating runs that share a catalog is
+    // the host's to do.
+    //
+    // Rows that fail conversion to nautilus types are dropped with a warning
+    // in `historical_trades`/`historical_quotes` rather than failing the
+    // request; that is a representation refusal, not a retrieval failure.
+    //
+    // A request may name several instruments. This socket reads one river, so
+    // the window is paged once and its rows are partitioned by label: a member
+    // gets only the rows its own symbol labels, and a member this connection
+    // is not bound to is a member failure rather than an empty answer - the
+    // same bound-symbol rule the subscribe path applies. Without the partition,
+    // every member would be handed the whole river relabelled as itself.
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
+        ensure!(
+            !request.instrument_ids.is_empty(),
+            "request_trades: the request names no instrument"
+        );
         let sink = self.sink()?;
         let session = self.history_session()?;
+        let bound = self.config.symbol.clone();
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -890,100 +1068,101 @@ impl DataClient for MogwaiDataClient {
         // which is the only party that knows its own present.
         let end = date_to_unix_nanos(request.end)
             .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
-        // Refuse an off-river window at the boundary, loudly - but answer it anyway.
-        // Returning the error to nautilus is not a refusal the requester ever
-        // sees: `DataEngine::execute` log::error!s a synchronous client error
-        // and emits no correlated response, so `?` here leaves the request
-        // outstanding forever and the consumer burns its whole timeout on what
-        // looks like a hung venue. Log the named diagnostic and answer empty.
+        // Refuse an off-river window at the boundary, loudly, and answer it as
+        // a failure that retrieved nothing, per the rule above.
         if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_trades: refusing an off-river window; answering with an empty trade response so the request resolves");
-            drop(sink.send(DataEvent::Response(DataResponse::Trades(
-                TradesResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.instrument_id,
-                    Vec::new(),
-                    start,
-                    end,
-                    now_unix_nanos(sim),
-                    request.params,
-                ),
-            ))));
+            tracing::error!(error = %err, "request_trades: refusing an off-river window");
+            drop(sink.send(request_event(
+                request.request_id,
+                None,
+                &[format!("{err:#}")],
+            )));
             return Ok(());
         }
+        let outstanding = Arc::clone(&self.outstanding_requests);
+        self.register_request(request.request_id);
         track_task(&self.task_handles, get_runtime().spawn(async move {
-            let symbol = symbol_from_instrument(request.instrument_id);
             // Page the window rather than issuing one MAX_HISTORY_LIMIT-capped
             // request: a window with more than 1000 trades used to return only
             // its oldest 1000, with the response still claiming the full range.
             // `request.limit` counts trades here, so it becomes the pagination
-            // ceiling.
+            // ceiling. The engine refuses a limit on a multi-instrument request,
+            // so a ceiling only ever bounds a single member's rows.
             let max_trades = request.limit.map(std::num::NonZeroUsize::get);
-            // Always-yields block, for the reason spelled out in `request_bars`:
-            // a failure arm that returned from the task left the nautilus
-            // request unresolved, which the consumer cannot tell from a hang.
-            let data = 'trades: {
-                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-                {
-                    Ok(def) => def,
-                    Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_trades: instrument lookup failed; answering with an empty trade response so the request resolves");
-                        break 'trades Vec::new();
-                    }
-                };
+            let mut failures = Vec::new();
+            let members = resolve_history_members(
+                &request.instrument_ids,
+                bound.as_deref(),
+                &http,
+                &http_quota,
+                &base,
+                &instruments,
+                &mut failures,
+            )
+            .await;
+            let mut data = Vec::new();
+            let mut retrieved = false;
+            if !members.is_empty() {
                 // Over this client's OWN socket, which is what makes the rows
                 // this passenger's river rather than whatever the label
                 // resolves to. The symbol is still used to find the instrument
-                // def above - that is instrument identity, which a label does
-                // name - but it selects no water here.
-                let (rows, truncated) = match session
+                // def - that is instrument identity, which a label does name -
+                // and to partition the rows, but it selects no water here.
+                match session
                     .collect(mogwai_protocol::HistoryKind::Trades, start, end, max_trades)
                     .await
                 {
-                    Ok(result) => result,
-                    Err(err) => {
-                        // Surfaced rather than silently emptied: a refusal, a
-                        // timeout or a dropped socket must be visible, not
-                        // mistaken for "no trades in the window".
-                        tracing::error!(%symbol, error = %err, "request_trades: history failed; answering with an empty trade response so the request resolves");
-                        break 'trades Vec::new();
+                    Ok((rows, truncated)) => {
+                        let trades: Vec<mogwai_protocol::TradeTick> = rows
+                            .into_iter()
+                            .filter_map(|row| match row {
+                                mogwai_protocol::HistoryRow::Trade(trade) => Some(trade),
+                                mogwai_protocol::HistoryRow::Quote(_) => None,
+                            })
+                            .collect();
+                        if truncated {
+                            tracing::warn!(
+                                trades = trades.len(),
+                                "request_trades: history window truncated before its end at the caller's own trade limit; the requested history may not splice contiguously into live"
+                            );
+                        }
+                        for (id, def) in &members {
+                            data.extend(historical_trades(&trades, *id, def));
+                        }
+                        retrieved = true;
                     }
-                };
-                let trades: Vec<mogwai_protocol::TradeTick> = rows
-                    .into_iter()
-                    .filter_map(|row| match row {
-                        mogwai_protocol::HistoryRow::Trade(trade) => Some(trade),
-                        mogwai_protocol::HistoryRow::Quote(_) => None,
-                    })
-                    .collect();
-                if truncated {
-                    tracing::warn!(
-                        %symbol,
-                        trades = trades.len(),
-                        "request_trades: history window truncated before its end at the caller's own trade limit; the requested history may not splice contiguously into live"
-                    );
+                    // Surfaced rather than silently emptied: a refusal, a
+                    // timeout or a dropped socket must be visible, not mistaken
+                    // for "no trades in the window".
+                    Err(err) => failures.push(format!("history failed: {err:#}")),
                 }
-                historical_trades(&trades, request.instrument_id, &def)
-            };
-            let response = TradesResponse::new(
-                request.request_id,
-                client_id,
-                request.instrument_id,
-                data,
-                start,
-                end,
-                now_unix_nanos(sim),
-                request.params,
-            );
-            drop(sink.send(DataEvent::Response(DataResponse::Trades(response))));
+            }
+            data.sort_by_key(|trade| trade.ts_init);
+            let response = retrieved.then(|| {
+                DataResponse::Trades(TradesResponse::new(
+                    request.request_id,
+                    client_id,
+                    request.instrument_ids,
+                    data,
+                    start,
+                    end,
+                    now_unix_nanos(sim),
+                    request.params,
+                ))
+            });
+            resolve_request(&outstanding, &sink, request.request_id, response, &failures);
         }));
         Ok(())
     }
 
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
+        ensure!(
+            !request.instrument_ids.is_empty(),
+            "request_quotes: the request names no instrument"
+        );
         let sink = self.sink()?;
         let session = self.history_session()?;
+        let bound = self.config.symbol.clone();
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -996,77 +1175,88 @@ impl DataClient for MogwaiDataClient {
         let end = date_to_unix_nanos(request.end)
             .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
         if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_quotes: refusing an off-river window; answering empty");
-            drop(sink.send(DataEvent::Response(DataResponse::Quotes(
-                QuotesResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.instrument_id,
-                    Vec::new(),
-                    start,
-                    end,
-                    now_unix_nanos(sim),
-                    request.params,
-                ),
-            ))));
+            tracing::error!(error = %err, "request_quotes: refusing an off-river window");
+            drop(sink.send(request_event(
+                request.request_id,
+                None,
+                &[format!("{err:#}")],
+            )));
             return Ok(());
         }
-        track_task(&self.task_handles, get_runtime().spawn(async move {
-            let symbol = symbol_from_instrument(request.instrument_id);
-            let data = 'quotes: {
-                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await {
-                    Ok(def) => def,
-                    Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_quotes: instrument lookup failed; answering empty");
-                        break 'quotes Vec::new();
+        let outstanding = Arc::clone(&self.outstanding_requests);
+        self.register_request(request.request_id);
+        track_task(
+            &self.task_handles,
+            get_runtime().spawn(async move {
+                let mut failures = Vec::new();
+                let members = resolve_history_members(
+                    &request.instrument_ids,
+                    bound.as_deref(),
+                    &http,
+                    &http_quota,
+                    &base,
+                    &instruments,
+                    &mut failures,
+                )
+                .await;
+                let mut data = Vec::new();
+                let mut retrieved = false;
+                if !members.is_empty() {
+                    // `collect` already trims to the row ceiling, and quote rows
+                    // are a subset of the rows, so no second cut is needed here.
+                    let limit = request.limit.map(std::num::NonZeroUsize::get);
+                    match session
+                        .collect(mogwai_protocol::HistoryKind::Quotes, start, end, limit)
+                        .await
+                    {
+                        Ok((rows, truncated)) => {
+                            let quotes: Vec<mogwai_protocol::QuoteTick> = rows
+                                .into_iter()
+                                .filter_map(|row| match row {
+                                    mogwai_protocol::HistoryRow::Quote(quote) => Some(quote),
+                                    mogwai_protocol::HistoryRow::Trade(_) => None,
+                                })
+                                .collect();
+                            if truncated {
+                                tracing::warn!("quote history truncated at the caller's own limit");
+                            }
+                            for (id, def) in &members {
+                                data.extend(historical_quotes(&quotes, *id, def));
+                            }
+                            retrieved = true;
+                        }
+                        Err(err) => failures.push(format!("history failed: {err:#}")),
                     }
-                };
-                let limit = request.limit.map(std::num::NonZeroUsize::get);
-                let (rows, truncated) = match session
-                    .collect(mogwai_protocol::HistoryKind::Quotes, start, end, limit)
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_quotes: history failed; answering empty");
-                        break 'quotes Vec::new();
-                    }
-                };
-                let quotes: Vec<mogwai_protocol::QuoteTick> = rows
-                    .into_iter()
-                    .filter_map(|row| match row {
-                        mogwai_protocol::HistoryRow::Quote(quote) => Some(quote),
-                        mogwai_protocol::HistoryRow::Trade(_) => None,
-                    })
-                    .collect();
-                if truncated {
-                    tracing::warn!(%symbol, "quote history truncated at the caller's own limit");
                 }
-                let quotes: Vec<mogwai_protocol::QuoteTick> = quotes
-                    .into_iter()
-                    .take(limit.unwrap_or(usize::MAX))
-                    .collect();
-                historical_quotes(&quotes, request.instrument_id, &def)
-            };
-            let response = QuotesResponse::new(
-                request.request_id,
-                client_id,
-                request.instrument_id,
-                data,
-                start,
-                end,
-                now_unix_nanos(sim),
-                request.params,
-            );
-            drop(sink.send(DataEvent::Response(DataResponse::Quotes(response))));
-        }));
+                data.sort_by_key(|quote| quote.ts_init);
+                let response = retrieved.then(|| {
+                    DataResponse::Quotes(QuotesResponse::new(
+                        request.request_id,
+                        client_id,
+                        request.instrument_ids,
+                        data,
+                        start,
+                        end,
+                        now_unix_nanos(sim),
+                        request.params,
+                    ))
+                });
+                resolve_request(&outstanding, &sink, request.request_id, response, &failures);
+            }),
+        );
         Ok(())
     }
 
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
-        let interval = crate::bars::admit(&request.bar_type)?.get();
+        // One bar type per request. The engine's request validation already
+        // refuses a longer list for bars, so this only restates it for a host
+        // that drives the client directly; the synchronous `Err` resolves the
+        // request as failed either way.
+        let bar_type = request.single_bar_type()?;
+        let interval = crate::bars::admit(&bar_type)?.get();
         let sink = self.sink()?;
         let session = self.history_session()?;
+        let bound = self.config.symbol.clone();
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -1078,29 +1268,24 @@ impl DataClient for MogwaiDataClient {
         // the reasons spelled out in `request_trades`.
         let end = date_to_unix_nanos(request.end)
             .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
-        // Refuse an off-river history window at the boundary, naming the floor -
-        // but answer it anyway, for the reason spelled out in `request_trades`: a
-        // synchronous `Err` is logged by the data engine and never turned into
-        // a response, so `?` here would leave the history request unresolved.
+        // Refuse an off-river history window at the boundary, naming the floor,
+        // and answer it as a failure that retrieved nothing, by the rule stated
+        // over `request_trades`.
         if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_bars: refusing an off-river history window; answering with an empty bar response so the request resolves");
-            drop(
-                sink.send(DataEvent::Response(DataResponse::Bars(BarsResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.bar_type,
-                    Vec::new(),
-                    start,
-                    end,
-                    now_unix_nanos(sim),
-                    request.params,
-                )))),
-            );
+            tracing::error!(error = %err, "request_bars: refusing an off-river history window");
+            drop(sink.send(request_event(
+                request.request_id,
+                None,
+                &[format!("{err:#}")],
+            )));
             return Ok(());
         }
+        let outstanding = Arc::clone(&self.outstanding_requests);
+        self.register_request(request.request_id);
         track_task(&self.task_handles, get_runtime().spawn(async move {
-            let instrument_id = request.bar_type.instrument_id();
+            let instrument_id = bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
+            let mut failures = Vec::new();
             // Page the window, translating nautilus's bar-count limit into a
             // bar-span pagination target: the old single request applied a
             // bar-count limit as a trade-page limit, so a history request for
@@ -1108,22 +1293,28 @@ impl DataClient for MogwaiDataClient {
             // covering only the oldest edge, under-delivering or timing out
             // the history request.
             let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
-            // Every exit from this block yields bars, so the response below is
+            // Every exit from this block yields bars, so the result below is
             // always sent. A failure arm used to `return` straight out of the
             // task, which left the nautilus request unresolved forever: from the
             // consumer that is indistinguishable from a hang, and it burns the
             // whole history-request timeout before dying with nothing but a
-            // line in the worker log to show for it. An empty response is a
-            // truthful answer that at least resolves; the error detail rides
-            // the log.
+            // line in the worker log to show for it. A failure arm now records
+            // its reason and breaks out, and the result goes out as a
+            // `DataRequestFailed` carrying that reason and no payload: one
+            // bar type is one member, so a failure here retrieved nothing.
             let bars: Vec<Bar> = 'bars: {
-                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-                {
-                    Ok(def) => def,
-                    Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: instrument lookup failed; answering with an empty bar response so the request resolves");
-                        break 'bars Vec::new();
-                    }
+                let members = resolve_history_members(
+                    &[instrument_id],
+                    bound.as_deref(),
+                    &http,
+                    &http_quota,
+                    &base,
+                    &instruments,
+                    &mut failures,
+                )
+                .await;
+                let Some((_, def)) = members.into_iter().next() else {
+                    break 'bars Vec::new();
                 };
                 // Bars are folded from trades, so this asks for the trade
                 // stream and stops when the span it has covers the bars the
@@ -1141,15 +1332,20 @@ impl DataClient for MogwaiDataClient {
                 {
                     Ok(result) => result,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: history failed; answering with an empty bar response so the request resolves");
+                        failures.push(format!("history failed: {err:#}"));
                         break 'bars Vec::new();
                     }
                 };
+                // Only rows this bar type's own label names, for the partition
+                // reason stated over `request_trades`.
                 let trades: Vec<mogwai_protocol::TradeTick> = rows
                     .into_iter()
                     .filter_map(|row| match row {
-                        mogwai_protocol::HistoryRow::Trade(trade) => Some(trade),
-                        mogwai_protocol::HistoryRow::Quote(_) => None,
+                        mogwai_protocol::HistoryRow::Trade(trade) if trade.symbol == def.symbol => {
+                            Some(trade)
+                        }
+                        mogwai_protocol::HistoryRow::Trade(_)
+                        | mogwai_protocol::HistoryRow::Quote(_) => None,
                     })
                     .collect();
                 if truncated {
@@ -1158,10 +1354,10 @@ impl DataClient for MogwaiDataClient {
                         "request_bars: history window truncated before its end at the caller's own bar limit; the requested history may not splice contiguously into live"
                     );
                 }
-                let mut bars = match aggregate_bars(&request.bar_type, &trades, &def, end) {
+                let mut bars = match aggregate_bars(&bar_type, &trades, &def, end) {
                     Ok(bars) => bars,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: bar type refused; answering with an empty bar response so the request resolves");
+                        failures.push(format!("bar type {bar_type} refused: {err:#}"));
                         break 'bars Vec::new();
                     }
                 };
@@ -1188,7 +1384,7 @@ impl DataClient for MogwaiDataClient {
                 if bars.is_empty() || short {
                     tracing::warn!(
                         %symbol,
-                        bar_type = %request.bar_type,
+                        %bar_type,
                         ?start,
                         ?end,
                         requested = ?bar_limit,
@@ -1202,17 +1398,19 @@ impl DataClient for MogwaiDataClient {
                 }
                 bars
             };
-            let response = BarsResponse::new(
-                request.request_id,
-                client_id,
-                request.bar_type,
-                bars,
-                start,
-                end,
-                now_unix_nanos(sim),
-                request.params,
-            );
-            drop(sink.send(DataEvent::Response(DataResponse::Bars(response))));
+            let response = failures.is_empty().then(|| {
+                DataResponse::Bars(BarsResponse::new(
+                    request.request_id,
+                    client_id,
+                    bar_type,
+                    bars,
+                    start,
+                    end,
+                    now_unix_nanos(sim),
+                    request.params,
+                ))
+            });
+            resolve_request(&outstanding, &sink, request.request_id, response, &failures);
         }));
         Ok(())
     }
@@ -1225,43 +1423,75 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
+        let outstanding = Arc::clone(&self.outstanding_requests);
+        self.register_request(request.request_id);
         track_task(
             &self.task_handles,
             get_runtime().spawn(async move {
-                // Same always-answer rule as `request_bars`/`request_trades`:
-                // the old `if let Ok` swallowed a failed fetch entirely, and
-                // the nautilus request then never resolved. Answer with an
-                // empty set and put the reason in the log.
+                // Same always-answer rule as the history requests: the old
+                // `if let Ok` swallowed a failed fetch entirely, and the
+                // nautilus request then never resolved. A failed fetch now
+                // resolves as a failure with no payload. A definition nautilus
+                // cannot represent (a `forex` symbol, which `convert` refuses
+                // by name) is left out of the listing with a warning and is not
+                // a failure: this request asks for what the venue can publish,
+                // and a standing refusal would otherwise fail every listing of
+                // a venue that serves one such symbol.
                 let ts_init = now_unix_nanos(sim);
-                let data = match fetch_instruments(&http, &http_quota, &base).await {
+                let response = match fetch_instruments(&http, &http_quota, &base).await {
                     Ok(defs) => {
                         cache_instruments(&instruments, defs.clone());
-                        defs.iter()
+                        let data = defs
+                            .iter()
                             .filter_map(|def| instrument_any_or_warn(def, ts_init))
-                            .collect()
+                            .collect();
+                        Ok(DataResponse::Instruments(InstrumentsResponse::new(
+                            request.request_id,
+                            client_id,
+                            request.venue.unwrap_or(*MOGWAI_VENUE),
+                            data,
+                            date_to_unix_nanos(request.start),
+                            date_to_unix_nanos(request.end),
+                            ts_init,
+                            request.params,
+                        )))
                     }
-                    Err(err) => {
-                        tracing::error!(error = %err, "request_instruments: instrument fetch failed; answering with an empty instrument response so the request resolves");
-                        Vec::new()
-                    }
+                    Err(err) => Err(format!("instrument fetch failed: {err:#}")),
                 };
-                let response = InstrumentsResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.venue.unwrap_or(*MOGWAI_VENUE),
-                    data,
-                    date_to_unix_nanos(request.start),
-                    date_to_unix_nanos(request.end),
-                    ts_init,
-                    request.params,
-                );
-                drop(sink.send(DataEvent::Response(DataResponse::Instruments(response))));
+                match response {
+                    Ok(response) => {
+                        resolve_request(
+                            &outstanding,
+                            &sink,
+                            request.request_id,
+                            Some(response),
+                            &[],
+                        );
+                    }
+                    Err(reason) => {
+                        resolve_request(&outstanding, &sink, request.request_id, None, &[reason]);
+                    }
+                }
             }),
         );
         Ok(())
     }
 
+    /// Several ids answer as one `InstrumentsResponse` of those that resolved;
+    /// one id answers as an `InstrumentResponse`, the upstream shape. Any id
+    /// that fails - including one whose definition nautilus cannot represent,
+    /// since this request names it - resolves the request as failed, carrying
+    /// the instruments that did resolve when at least one did, and no payload
+    /// when none did. `InstrumentResponse` holds exactly one instrument and has
+    /// no empty form, so a failed single-id request used to be unanswerable
+    /// and stayed unresolved; the failure channel is what lets it resolve now.
+    /// Instrument identity is not bound to the socket's river, so no
+    /// bound-symbol rule applies here.
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
+        ensure!(
+            !request.instrument_ids.is_empty(),
+            "request_instrument: the request names no instrument"
+        );
         let sink = self.sink()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
@@ -1269,48 +1499,57 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
+        let outstanding = Arc::clone(&self.outstanding_requests);
+        self.register_request(request.request_id);
         track_task(
             &self.task_handles,
             get_runtime().spawn(async move {
-                let symbol = symbol_from_instrument(request.instrument_id);
-                // The one generator that cannot answer on failure at all:
-                // `InstrumentResponse` carries exactly one `InstrumentAny` and
-                // has no empty form, so there is no truthful response to send
-                // when the instrument cannot be resolved - unlike the bars,
-                // trades and instruments generators, which all answer empty
-                // rather than leaving the request unresolved. Log loudly at
-                // both failure points so the unresolved request is at least
-                // diagnosable.
-                match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await {
-                    Ok(def) => {
-                        let ts_init = now_unix_nanos(sim);
-                        if let Some(data) = instrument_any_or_warn(&def, ts_init) {
-                            let response = InstrumentResponse::new(
-                                request.request_id,
-                                client_id,
-                                request.instrument_id,
-                                data,
-                                date_to_unix_nanos(request.start),
-                                date_to_unix_nanos(request.end),
-                                ts_init,
-                                request.params,
-                            );
-                            drop(sink.send(DataEvent::Response(DataResponse::Instrument(
-                                Box::new(response),
-                            ))));
-                        } else {
-                            tracing::error!(
-                                %symbol,
-                                "request_instrument: the venue's definition is unrepresentable as a nautilus instrument; the request cannot be answered and will not resolve"
-                            );
-                        }
+                let ts_init = now_unix_nanos(sim);
+                let mut failures = Vec::new();
+                let mut data = Vec::new();
+                for &id in &request.instrument_ids {
+                    let symbol = symbol_from_instrument(id);
+                    match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+                    {
+                        Ok(def) => match instrument_any_or_warn(&def, ts_init) {
+                            Some(instrument) => data.push(instrument),
+                            None => failures.push(format!(
+                                "{id}: the venue's definition is unrepresentable as a nautilus instrument"
+                            )),
+                        },
+                        Err(err) => failures.push(format!("{id}: {err:#}")),
                     }
-                    Err(err) => tracing::error!(
-                        %symbol,
-                        error = %err,
-                        "request_instrument: instrument lookup failed; the request cannot be answered and will not resolve"
-                    ),
                 }
+                let start = date_to_unix_nanos(request.start);
+                let end = date_to_unix_nanos(request.end);
+                let response = if let [single] = request.instrument_ids.as_slice() {
+                    data.pop().map(|instrument| {
+                        DataResponse::Instrument(Box::new(InstrumentResponse::new(
+                            request.request_id,
+                            client_id,
+                            *single,
+                            instrument,
+                            start,
+                            end,
+                            ts_init,
+                            request.params.clone(),
+                        )))
+                    })
+                } else {
+                    (!data.is_empty()).then(|| {
+                        DataResponse::Instruments(InstrumentsResponse::new(
+                            request.request_id,
+                            client_id,
+                            *MOGWAI_VENUE,
+                            data,
+                            start,
+                            end,
+                            ts_init,
+                            request.params.clone(),
+                        ))
+                    })
+                };
+                resolve_request(&outstanding, &sink, request.request_id, response, &failures);
             }),
         );
         Ok(())
@@ -1502,6 +1741,107 @@ impl HistorySession {
     }
 }
 
+/// Refuse a symbol this connection was not bound to.
+///
+/// The symbol is derived from the nautilus `instrument_id`, while
+/// `config.symbol` is what the socket named on its upgrade - two sources of
+/// truth for one fact. Unreconciled, a host subscribing ES on a socket bound to
+/// MNQ would receive MNQ ticks relabelled ES by nautilus, silently, with no
+/// frame and no log, and a history request for ES would be answered with MNQ's
+/// river. So they must agree case-exactly, matching the venue's own
+/// comparison. An absent `config.symbol` takes the venue default and applies no
+/// check, which is the pre-carrier behaviour unchanged.
+fn ensure_bound_symbol(bound: Option<&str>, symbol: &str, what: &str) -> anyhow::Result<()> {
+    if let Some(bound) = bound {
+        ensure!(
+            symbol == bound,
+            "{what} symbol {symbol} does not match the symbol this connection is bound to ({bound})"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the members of a history request to the instrument defs whose rows
+/// they will be given, recording a reason for each member that cannot be
+/// served: one this connection is not bound to, or one whose def cannot be
+/// found. The survivors keep the request's order.
+async fn resolve_history_members(
+    ids: &[InstrumentId],
+    bound: Option<&str>,
+    http: &HttpClient,
+    http_quota: &HttpQuota,
+    base: &str,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    failures: &mut Vec<String>,
+) -> Vec<(InstrumentId, InstrumentDef)> {
+    let mut members = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let symbol = symbol_from_instrument(id);
+        if let Err(err) = ensure_bound_symbol(bound, &symbol, "history") {
+            failures.push(format!("{id}: {err:#}"));
+            continue;
+        }
+        match ensure_instrument(http, http_quota, base, instruments, &symbol).await {
+            Ok(def) => members.push((id, def)),
+            Err(err) => failures.push(format!("{id}: instrument lookup failed: {err:#}")),
+        }
+    }
+    members
+}
+
+/// The one event that answers a request: a payload response when nothing
+/// failed, otherwise a `DataRequestFailed` naming every failure and carrying
+/// whatever payload the caller judged retrieved (see the rule over
+/// `request_trades`).
+///
+/// No failures and no payload is not a state any caller reaches, but it is
+/// still answered, as a failure, because a request left unresolved is one the
+/// consumer cannot tell from a hung venue.
+fn request_event(
+    request_id: nautilus_core::UUID4,
+    response: Option<DataResponse>,
+    failures: &[String],
+) -> DataEvent {
+    match (failures.is_empty(), response) {
+        (true, Some(response)) => DataEvent::Response(response),
+        (true, None) => DataEvent::RequestFailed(DataRequestFailed {
+            request_id,
+            reason: "the request produced no response".to_owned(),
+            response: None,
+        }),
+        (false, response) => {
+            let reason = failures.join("; ");
+            tracing::error!(%request_id, %reason, "data request failed");
+            DataEvent::RequestFailed(DataRequestFailed {
+                request_id,
+                reason,
+                response,
+            })
+        }
+    }
+}
+
+/// Answer a registered request from its own task, unless a teardown already
+/// answered it. The removal and the send happen under the registry lock, the
+/// one `MogwaiDataClient::fail_outstanding_requests` drains under, so exactly
+/// one of the two sends; holding a std mutex across the send is sound because
+/// it is a synchronous unbounded push with no await and no inline receiver.
+/// "Sends" is the whole guarantee: with the sink's receiver gone, nothing can
+/// deliver the answer.
+fn resolve_request(
+    outstanding: &Mutex<std::collections::HashSet<nautilus_core::UUID4>>,
+    sink: &EventSender<DataEvent>,
+    request_id: nautilus_core::UUID4,
+    response: Option<DataResponse>,
+    failures: &[String],
+) {
+    let event = request_event(request_id, response, failures);
+    let mut outstanding = lock_recover(outstanding, "outstanding requests");
+    if outstanding.remove(&request_id) {
+        drop(sink.send(event));
+    }
+}
+
 /// Hand a history frame to whichever request is waiting on it, or give the
 /// message back so the market path can have it.
 ///
@@ -1642,9 +1982,10 @@ async fn handle_market_message(
             // between a quiet market and a dropped one. The standing
             // preference is an assert, a type or a guard over a verification,
             // and none of the three is available here: nautilus's `DataEvent`
-            // carries no gap or degradation variant (`Response`, `Data`,
-            // `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks`
-            // only), the client is handed to the host as a `dyn DataClient`
+            // carries no gap or degradation variant (`Data`, `Response`,
+            // `RequestFailed` and `ResponseEnvelope`, the last three scoped to
+            // a correlated request, plus two `defi`-gated pool variants), the
+            // client is handed to the host as a `dyn DataClient`
             // with no downcast, and fabricating an `InstrumentStatus` would
             // report a venue halt that did not happen. Refusing - tearing the
             // socket down - would turn a recoverable gap into a total outage
@@ -1901,6 +2242,11 @@ fn emit_live_bars(
 /// and nautilus's `DataResponse::trim_to_bounds` trims vector payloads on
 /// `ts_init` - so a conversion-time stamp lands past `end` and every history
 /// request comes back empty at the data engine.
+///
+/// Only rows labelled with the def's own symbol are converted. A history page
+/// carries the socket's whole river, and stamping every row with the requested
+/// `instrument_id` regardless of its label would hand one member another
+/// label's water under its own name.
 fn historical_trades(
     trades: &[mogwai_protocol::TradeTick],
     instrument_id: InstrumentId,
@@ -1908,6 +2254,7 @@ fn historical_trades(
 ) -> Vec<nautilus_model::data::TradeTick> {
     trades
         .iter()
+        .filter(|t| t.symbol == def.symbol)
         .filter_map(|t| {
             convert::trade_tick(t, instrument_id, def, UnixNanos::from(t.ts_event))
                 .map_err(|err| {
@@ -1923,7 +2270,7 @@ fn historical_trades(
         .collect()
 }
 
-/// The quote twin of `historical_trades`, for the same reason.
+/// The quote twin of `historical_trades`, for the same reasons.
 fn historical_quotes(
     quotes: &[mogwai_protocol::QuoteTick],
     instrument_id: InstrumentId,
@@ -1931,6 +2278,7 @@ fn historical_quotes(
 ) -> Vec<nautilus_model::data::QuoteTick> {
     quotes
         .iter()
+        .filter(|quote| quote.symbol == def.symbol)
         .filter_map(|quote| {
             convert::quote_tick(quote, instrument_id, def, UnixNanos::from(quote.ts_event))
                 .map_err(|err| {
@@ -2082,7 +2430,7 @@ mod quote_cache_tests {
             3,
             "historical bars must carry ts_init within the pinned window or nautilus trims them all"
         );
-        for bar in &trimmed.data {
+        for bar in trimmed.data.iter() {
             assert_eq!(
                 bar.ts_init, bar.ts_event,
                 "a historical bar's ts_init is its own close"
@@ -2202,11 +2550,202 @@ mod quote_cache_tests {
         );
     }
 
+    fn mogwai_bar(symbol: &str, minutes: u64) -> BarType {
+        BarType::from(format!("{symbol}.MOGWAI-{minutes}-MINUTE-LAST-EXTERNAL").as_str())
+    }
+
+    fn mogwai_id(symbol: &str) -> InstrumentId {
+        InstrumentId::from(format!("{symbol}.MOGWAI").as_str())
+    }
+
+    fn accepted_bars(error: &anyhow::Error) -> Vec<BarType> {
+        error
+            .downcast_ref::<nautilus_common::messages::data::SubscriptionError>()
+            .unwrap_or_else(|| panic!("a partial batch must report its accepted members: {error}"))
+            .bar_types_accepted
+            .clone()
+    }
+
+    fn accepted_ids(error: &anyhow::Error) -> Vec<InstrumentId> {
+        error
+            .downcast_ref::<nautilus_common::messages::data::SubscriptionError>()
+            .unwrap_or_else(|| panic!("a partial batch must report its accepted members: {error}"))
+            .instrument_ids_accepted
+            .clone()
+    }
+
+    /// A bar batch with a refused member in the middle.
+    ///
+    /// The members on either side of the refusal stand, the refused one leaves
+    /// nothing behind in either counter, and the engine is told exactly which
+    /// two were accepted - that listing is the only way its own subscription
+    /// set comes to match this client's. Three ways to get this wrong, each
+    /// caught by a different assertion: a loop that stopped at the refusal
+    /// never subscribes the third member and returns a bare error; a member
+    /// without its rollback leaves the refused bar type's ref standing; and a
+    /// bare error, even after a complete loop, tells the engine nothing was
+    /// accepted. Then the surviving feed is released past the refused member,
+    /// to show the refusal cannot be spent against it.
+    #[test]
+    fn a_bar_batch_with_a_refused_member_keeps_the_rest_and_reports_them() {
+        let mut client = client_bound_to(Some("MNQ"));
+        let one = mogwai_bar("MNQ", 1);
+        let refused = mogwai_bar("MES", 1);
+        let five = mogwai_bar("MNQ", 5);
+        let cmd = SubscribeBars::new(
+            vec![one, refused, five],
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+
+        let error = client
+            .subscribe_bars(cmd)
+            .expect_err("a member outside the bound river fails the batch");
+        assert!(error.to_string().contains("bound to (MNQ)"), "{error}");
+        assert_eq!(
+            accepted_bars(&error),
+            vec![one, five],
+            "exactly the applied members are reported, in order"
+        );
+        {
+            let bars = lock_recover(&client.bars, "bar");
+            assert!(
+                !bars.contains_key(&refused),
+                "the refused member must leave no bar ref standing"
+            );
+            assert_eq!(bars.get(&one).map(|state| state.refs), Some(1));
+            assert_eq!(
+                bars.get(&five).map(|state| state.refs),
+                Some(1),
+                "a member after the refusal is still applied"
+            );
+        }
+        {
+            let subs = lock_recover(&client.subs, "subscriptions");
+            assert_eq!(
+                subs.get("MNQ").map(|state| state.bars),
+                Some(2),
+                "the symbol count moves with exactly the two accepted refs"
+            );
+            assert!(!subs.contains_key("MES"));
+        }
+
+        // Release the refused member and one survivor together. The refused
+        // one has nothing to release and must not spend a decrement; the
+        // other survivor's feed must stay live.
+        let release = UnsubscribeBars::new(
+            vec![refused, one],
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+        client
+            .unsubscribe_bars(&release)
+            .expect("releasing an unheld bar type is not an error");
+        assert_eq!(
+            lock_recover(&client.subs, "subscriptions")
+                .get("MNQ")
+                .map(|state| state.bars),
+            Some(1),
+            "the surviving bar type keeps its feed"
+        );
+        let bars = lock_recover(&client.bars, "bar");
+        assert!(!bars.contains_key(&one));
+        assert_eq!(bars.get(&five).map(|state| state.refs), Some(1));
+    }
+
+    /// The instrument-keyed twin, across all three kinds that share the
+    /// contract. The refused member is first, so a loop that stopped at it
+    /// would apply nothing at all.
+    #[test]
+    fn quote_trade_and_funding_batches_with_a_refused_member_keep_the_rest() {
+        let mut client = client_bound_to(Some("MNQ"));
+        let refused = mogwai_id("MES");
+        let served = mogwai_id("MNQ");
+        let client_id = Some(ClientId::from("MOGWAI-DATA"));
+
+        let error = client
+            .subscribe_quotes(SubscribeQuotes::new(
+                vec![refused, served],
+                client_id,
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect_err("quotes: the refused member fails the batch");
+        assert_eq!(accepted_ids(&error), vec![served], "quotes");
+
+        let error = client
+            .subscribe_trades(SubscribeTrades::new(
+                vec![refused, served],
+                client_id,
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect_err("trades: the refused member fails the batch");
+        assert_eq!(accepted_ids(&error), vec![served], "trades");
+
+        let error = client
+            .subscribe_funding_rates(SubscribeFundingRates::new(
+                vec![refused, served],
+                client_id,
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect_err("funding: the refused member fails the batch");
+        assert_eq!(accepted_ids(&error), vec![served], "funding");
+
+        {
+            let subs = lock_recover(&client.subs, "subscriptions");
+            let state = subs.get("MNQ").expect("the served member was applied");
+            assert_eq!(
+                (state.quotes, state.trades, state.funding),
+                (1, 1, 1),
+                "each served member counted once per kind"
+            );
+            assert!(!subs.contains_key("MES"), "the refused member left no row");
+        }
+
+        // And the release side: the whole batch releases, and the served
+        // member's counts return to zero rather than being left or overspent.
+        client
+            .unsubscribe_trades(&UnsubscribeTrades::new(
+                vec![refused, served],
+                client_id,
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("releasing a batch is accepted whole");
+        let subs = lock_recover(&client.subs, "subscriptions");
+        let state = subs
+            .get("MNQ")
+            .expect("quotes and funding still hold the row");
+        assert_eq!((state.quotes, state.trades, state.funding), (1, 0, 1));
+    }
+
     /// The data client's teardown, which had none of the execution client's.
     ///
     /// `stop()` aborts the reader, so nothing will ever answer a history page
     /// that is in flight when it lands: the waiter used to park for the whole
-    /// havoc-scaled request timeout - 30 s by default - and then answer empty,
+    /// havoc-scaled request timeout - 30 s by default - and then give up,
     /// while `history_session()` kept handing out a sender for a dead
     /// generation. Both halves are asserted here, and the ordering matters as
     /// much as the clearing: `ws_cmd` is dropped before the abort, so a request
@@ -2244,6 +2783,166 @@ mod quote_cache_tests {
             panic!("a stopped client has no river to page");
         };
         assert!(error.to_string().contains("not connected"), "{error}");
+    }
+
+    /// A request whose task is aborted by `stop()` is answered by `stop()`.
+    ///
+    /// Every `request_*` task is tracked and aborted with the rest, and an
+    /// aborted task sends nothing, so a request in flight at teardown used to
+    /// stay pending at the engine until the consumer's own timeout - while the
+    /// handlers' doc said every request resolves. The answer is a failure with
+    /// no payload, and it is on the sink by the time `stop()` returns, which
+    /// is why this reads with `try_recv`.
+    #[test]
+    fn stopping_the_data_client_answers_the_requests_its_tasks_owed() {
+        let mut client = client_bound_to(None);
+        let (tx, mut rx) = unbounded_channel::<DataEvent>();
+        client.sink = Some(tx.into());
+        let owed = UUID4::new();
+        client.register_request(owed);
+
+        client.stop().expect("stop is infallible here");
+
+        match rx.try_recv() {
+            Ok(DataEvent::RequestFailed(failure)) => {
+                assert_eq!(failure.request_id, owed);
+                assert!(failure.response.is_none(), "a teardown retrieved nothing");
+                assert!(failure.reason.contains("stopped"), "{}", failure.reason);
+            }
+            other => panic!("the owed request must be answered as failed, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "answered exactly once");
+        assert!(
+            lock_recover(&client.outstanding_requests, "test").is_empty(),
+            "nothing is left owed"
+        );
+    }
+
+    /// The other half of the ownership rule: whichever side removes the id
+    /// answers, and the other sends nothing, in both orders.
+    #[test]
+    fn a_request_is_answered_once_whichever_side_wins() {
+        let client = {
+            let mut client = client_bound_to(None);
+            let (tx, rx) = unbounded_channel::<DataEvent>();
+            client.sink = Some(tx.into());
+            (client, rx)
+        };
+        let (client, mut rx) = client;
+        let sink = client.sink().expect("sink");
+
+        // The task wins: it answers, and a later teardown finds nothing.
+        let first = UUID4::new();
+        client.register_request(first);
+        resolve_request(
+            &client.outstanding_requests,
+            &sink,
+            first,
+            None,
+            &["boom".to_owned()],
+        );
+        client.fail_outstanding_requests("teardown");
+        let Ok(DataEvent::RequestFailed(failure)) = rx.try_recv() else {
+            panic!("the task's own answer goes out");
+        };
+        assert_eq!(failure.reason, "boom");
+        assert!(
+            rx.try_recv().is_err(),
+            "the teardown must not answer it again"
+        );
+
+        // The teardown wins: it answers, and the late task sends nothing.
+        let second = UUID4::new();
+        client.register_request(second);
+        client.fail_outstanding_requests("teardown");
+        resolve_request(
+            &client.outstanding_requests,
+            &sink,
+            second,
+            None,
+            &["late".to_owned()],
+        );
+        let Ok(DataEvent::RequestFailed(failure)) = rx.try_recv() else {
+            panic!("the teardown's answer goes out");
+        };
+        assert_eq!(failure.reason, "teardown");
+        assert!(
+            rx.try_recv().is_err(),
+            "the late task must not answer it again"
+        );
+    }
+
+    /// A history member outside the bound river is a member failure.
+    ///
+    /// The history path used to have no bound-symbol check at all, and the
+    /// rows were stamped with whatever id was asked for, so on a socket bound
+    /// to MNQ a request for MES came back as MNQ's river relabelled MES - a
+    /// full, plausible, wrong window. The refusal comes before any lookup.
+    #[tokio::test]
+    async fn a_history_member_outside_the_bound_river_fails_without_a_lookup() {
+        let client = client_bound_to(Some("MNQ"));
+        let mut failures = Vec::new();
+        let members = resolve_history_members(
+            &[mogwai_id("MES")],
+            client.config.symbol.as_deref(),
+            &client.http,
+            &client.http_quota,
+            &client.config.http_base_url(),
+            &client.instruments,
+            &mut failures,
+        )
+        .await;
+        assert!(members.is_empty(), "the refused member is not served");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("bound to (MNQ)"), "{failures:?}");
+    }
+
+    /// A quote member is accepted the moment its counter moves, so nothing
+    /// after the increment may refuse it. With a cached book and no sink, the
+    /// replay used to `?` out after the count had moved: the member was
+    /// reported refused while holding a count the engine would never release.
+    #[test]
+    fn a_quote_member_with_no_sink_for_its_replay_is_still_accepted() {
+        let mut client = client_bound_to(None);
+        // Any class will do: the replay only needs the def to be present.
+        let def = InstrumentDef {
+            symbol: "MNQ".into(),
+            class: mogwai_protocol::InstrumentClass::Perpetual {
+                underlying: "MNQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                asset_class: mogwai_protocol::WireAssetClass::Index,
+                funding_interval_ns: 28_800_000_000_000,
+                funding_rate: Decimal::ZERO,
+                index_symbol: None,
+                funding_clamp: Decimal::ZERO,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        };
+        lock_recover(&client.instruments, "test").insert(Arc::clone(&def.symbol), def);
+        assert!(!retain_quote(&client.subs, &quote_for("MNQ", 7)));
+        assert!(client.sink.is_none());
+
+        client
+            .subscribe_quotes(SubscribeQuotes::new(
+                mogwai_id("MNQ"),
+                Some(ClientId::from("MOGWAI-DATA")),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("the member is accepted even though its replay had nowhere to go");
+        assert_eq!(
+            lock_recover(&client.subs, "test")
+                .get("MNQ")
+                .map(|state| state.quotes),
+            Some(1)
+        );
     }
 
     #[test]

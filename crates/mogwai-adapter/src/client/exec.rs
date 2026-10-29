@@ -1880,14 +1880,21 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     /// Composes the three report generators into the mass status the live
-    /// node's startup reconciliation consumes. The trait default returns
-    /// `Ok(None)`, which the node logs as "no mass status available (likely
-    /// adapter error)" and then reconciles nothing at all - a worker restarted while
-    /// holding an open mogwai position would boot flat and only discover the
-    /// venue net via the periodic position poll, mid-run, as a late external
-    /// adoption. Following the canonical adapter shape (e.g. kraken spot):
-    /// open orders, their fills, and current positions, bounded by the
-    /// caller's lookback.
+    /// node's startup reconciliation consumes: open orders, their fills, and
+    /// current positions, bounded by the caller's lookback.
+    ///
+    /// Overridden rather than left to the trait default for the clock. The
+    /// default composes the same three generators (through the free function
+    /// `nautilus_common::clients::execution::generate_mass_status`), but it
+    /// stamps the mass status and computes the lookback from nautilus's
+    /// realtime clock, which upstream documents as correct only for realtime
+    /// clients; every timestamp this mirror holds lives on the venue's sim
+    /// axis. The shape also differs on purpose: the default asks for every
+    /// order report in the lookback and bounds fills by it, while this asks
+    /// for open orders only and keeps every fill of an open order whatever its
+    /// age, for the average-price reason given at the fill pass below. So
+    /// calling the free function on the sim clock would change what is
+    /// reconciled, not only who stamps it.
     ///
     /// `lookback_mins` maps to the same `start` bound the three generators
     /// already apply (each filters records by `ts_last`/`ts_event` within
@@ -3807,10 +3814,10 @@ fn balance_row(
 fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> {
     use mogwai_protocol::risk::info_keys;
     let risk = risk?;
-    let mut info = Params::new();
+    let mut info: Vec<(String, serde_json::Value)> = Vec::new();
     let mut put = |key: &str, value: Option<rust_decimal::Decimal>| {
         if let Some(value) = value {
-            info.insert(key.into(), serde_json::Value::String(value.to_string()));
+            info.push((key.into(), serde_json::Value::String(value.to_string())));
         }
     };
     put(info_keys::EQUITY, Some(risk.equity));
@@ -3828,7 +3835,7 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
     // zero - the two are not the same, since a `LockUntilReset` lifts at the
     // next boundary and a `Terminate` never does.
     if let Some(breach) = &risk.breached {
-        info.insert(
+        info.push((
             info_keys::BREACHED_RULE.into(),
             serde_json::Value::String(
                 serde_json::to_value(breach.rule)
@@ -3836,8 +3843,8 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
             ),
-        );
-        info.insert(
+        ));
+        info.push((
             info_keys::BREACHED_ACTION.into(),
             serde_json::Value::String(
                 serde_json::to_value(breach.action)
@@ -3845,10 +3852,10 @@ fn risk_info(risk: Option<&mogwai_protocol::risk::RiskState>) -> Option<Params> 
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
             ),
-        );
-        info.insert(info_keys::BREACHED_TS_EVENT.into(), breach.ts_event.into());
+        ));
+        info.push((info_keys::BREACHED_TS_EVENT.into(), breach.ts_event.into()));
     }
-    Some(info)
+    Some(Params::new(info.into_iter().collect()))
 }
 
 /// Converts a venue-sent `client_order_id` string into a nautilus

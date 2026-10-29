@@ -109,13 +109,15 @@ finishes, so the ceiling bounds resident response bytes as well as CPU - near
 
 **A fifth request waits for a slot rather than being refused**, for up to 30
 seconds. The cap bounds resident pages, and a waiter holds no page, so waiting
-costs the bound nothing - while refusing cost the consumer a great deal. This is
-not a preference about politeness: a nautilus host's historical-response types
-carry no error channel, so an adapter's only alternative to an unresolvable hang
-is to resolve the request empty and log why. A refused history request therefore
-reaches a strategy as a quiet window, indistinguishable from a tape that
-genuinely printed nothing, and the run reasons about a market it was never
-shown.
+costs the bound nothing - while refusing costs the consumer a great deal: a
+refused history request is a warmup that did not happen. The adapter answers a
+refusal as a failed request, nautilus's `DataRequestFailed` naming the venue's
+reason and carrying no payload, so a nautilus strategy sees it as a failure
+reason in `on_data_response` rather than as a window. When the gate was first
+built nautilus had no such channel, and a refusal reached a strategy as a quiet
+window, indistinguishable from a tape that genuinely printed nothing. Seeing the
+refusal is better than misreading it, but a run that cannot warm up still cannot
+trade, so the gate still waits.
 
 That mattered more than the headline suggested, because one history request is
 not one request: the venue serves no bars, so a consumer pages `/trades` and
@@ -131,7 +133,9 @@ slot (a request holding one has stopped waiting and no longer counts), which is
 the fail-fast bound that keeps the queue from becoming a way to accept
 everything and answer nothing. Both carry a `Retry-After` header derived from
 the wait bound. A consumer that sees either should treat it as real overload -
-stagger its boots - and never as an empty window.
+stagger its boots - and never as an empty window. Over the adapter's own socket
+the same two conditions arrive as a correlated history refusal rather than a
+`503`, and reach a nautilus host as the failed request described above.
 
 The three numbers are published as `mogwai_protocol::http`'s
 `MAX_CONCURRENT_HISTORY_SLOTS`, `HISTORY_SLOT_WAIT` and

@@ -411,9 +411,12 @@ stand unchanged - the concurrency, the per-page bytes and the ~41 MB ceiling are
 all properties of what is resident, and a caller waiting for a slot holds no
 page - but a fifth request now blocks for up to `HISTORY_SLOT_WAIT` rather
 than taking a `503`. The reason is consumer-side and not a performance one: a
-refusal reaches a nautilus host as an empty window, because its historical
-response types carry no error channel, so a refused history request was
-indistinguishable from a quiet tape. The gate's own overhead figure above is the
+refusal reached a nautilus host as an empty window, because its historical
+response types then carried no error channel, so a refused history request was
+indistinguishable from a quiet tape. Since nautilus 0.67 the adapter answers a
+refusal as a failed request instead, which a host can see, and the gate still
+waits, because a visibly failed warmup is still a warmup that did not happen.
+The gate's own overhead figure above is the
 uncontended path and is unaffected; what a contended caller now pays is queueing
 latency bounded by the deadline, and nothing has measured that under a real
 mass-attach boot storm because nobody has run one. `MAX_QUEUED_HISTORY_REQUESTS` is the

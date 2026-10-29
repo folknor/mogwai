@@ -1800,8 +1800,9 @@ pub async fn next_data_event(
     event.expect("sink open")
 }
 
-/// Like [`next_data_event`], but discards leading `DataEvent::Instrument`
-/// frames and returns the first event that is not one.
+/// Like [`next_data_event`], but discards leading instrument frames
+/// (`DataEvent::Data(Data::Instrument(..))`) and returns the first event that
+/// is not one.
 ///
 /// On connect the data client publishes its seeded instrument definitions to
 /// the sink before any trade or bar (`emit_seeded_instruments`), so nautilus
@@ -1815,7 +1816,7 @@ pub async fn next_non_instrument_data_event(
 ) -> DataEvent {
     loop {
         match next_data_event(rx, timeout).await {
-            DataEvent::Instrument(_) => continue,
+            DataEvent::Data(nautilus_model::data::Data::Instrument(_)) => continue,
             other => return other,
         }
     }

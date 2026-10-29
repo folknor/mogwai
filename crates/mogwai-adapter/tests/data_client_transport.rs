@@ -850,15 +850,35 @@ async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
     }
 }
 
-/// A failed history fetch must still resolve the nautilus request.
+/// The first `DataRequestFailed` on the sink, skipping everything else, with
+/// its typed payload and reason.
+async fn next_request_failure(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    timeout: Duration,
+) -> (Option<DataResponse>, String) {
+    loop {
+        match next_data_event(rx, timeout).await {
+            DataEvent::RequestFailed(failure) => break (failure.response, failure.reason),
+            DataEvent::Response(response) => {
+                panic!("a failed request must not resolve as a success: {response:?}")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A failed history fetch must still resolve the nautilus request, and resolve
+/// it as a failure.
 ///
 /// The failure arms of `request_trades`/`request_bars` used to log and return
 /// straight out of the spawned task, so no `DataResponse` was ever emitted and
 /// the request hung forever. From the consumer that is indistinguishable from a
 /// dead venue: the host burns its entire history timeout and fails the handoff
-/// with nothing to go on but a line in the worker log.
-/// An empty response is the truthful answer that at least completes the
-/// exchange.
+/// with nothing to go on but a line in the worker log. An empty success then
+/// closed the hang but still read as a quiet window; nautilus now has a failure
+/// channel, so the answer is a `DataRequestFailed` naming the reason and
+/// carrying no payload - an empty one would reach a strategy's typed history
+/// hook as a quiet window before the failure reached `on_data_response`.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn failed_history_fetch_still_answers_the_request() {
@@ -893,17 +913,12 @@ async fn failed_history_fetch_still_answers_the_request() {
             None,
         ))
         .expect("request trades dispatches");
-    loop {
-        if let DataEvent::Response(DataResponse::Trades(resp)) =
-            next_data_event(&mut sink_rx, timeout).await
-        {
-            assert!(
-                resp.data.is_empty(),
-                "a refused fetch answers empty, not with invented trades"
-            );
-            break;
-        }
-    }
+    let (response, reason) = next_request_failure(&mut sink_rx, timeout).await;
+    assert!(
+        response.is_none(),
+        "a fetch that retrieved nothing carries no payload, got {response:?}"
+    );
+    assert!(reason.contains("history failed"), "{reason}");
 
     let bar_type = bar_type();
     client
@@ -918,25 +933,22 @@ async fn failed_history_fetch_still_answers_the_request() {
             None,
         ))
         .expect("request bars dispatches");
-    loop {
-        if let DataEvent::Response(DataResponse::Bars(resp)) =
-            next_data_event(&mut sink_rx, timeout).await
-        {
-            assert!(
-                resp.data.is_empty(),
-                "a refused fetch answers empty, not with invented bars"
-            );
-            break;
-        }
-    }
+    let (response, reason) = next_request_failure(&mut sink_rx, timeout).await;
+    assert!(
+        response.is_none(),
+        "a fetch that retrieved nothing carries no payload, got {response:?}"
+    );
+    assert!(reason.contains("history failed"), "{reason}");
 }
 
 /// An off-river window must answer too, for the same reason.
 ///
 /// The adapter refuses a `start` below the venue's published `data_origin_ns`
-/// at the request boundary. Returning that refusal to nautilus does not reach
-/// the requester: `DataEngine::execute` logs a synchronous client error and
-/// emits no correlated response, so the loud refusal read downstream as a hang.
+/// at the request boundary, and answers in band with a `DataRequestFailed`
+/// naming the floor. That in-band answer dates from when a synchronous client
+/// error reached nobody; the engine now answers one with a terminal failure,
+/// but its reason is only the engine's own context line, while the in-band
+/// answer names the floor. It carries no payload, since nothing was retrieved.
 ///
 /// The clock envelope below is the literal `/clock` text, and it carries
 /// `warmup_ns` rather than the former `backfill_horizon_ns`: the rename is a
@@ -998,17 +1010,12 @@ async fn off_river_window_still_answers_the_request() {
             None,
         ))
         .expect("an off-river request must not error out of the handler");
-    loop {
-        if let DataEvent::Response(DataResponse::Trades(resp)) =
-            next_data_event(&mut sink_rx, timeout).await
-        {
-            assert!(
-                resp.data.is_empty(),
-                "an off-river window answers empty, though the river holds a row at the floor"
-            );
-            break;
-        }
-    }
+    let (response, reason) = next_request_failure(&mut sink_rx, timeout).await;
+    assert!(
+        response.is_none(),
+        "an off-river window carries no rows, though the river holds a row at the floor: {response:?}"
+    );
+    assert!(reason.contains("precedes data_origin_ns"), "{reason}");
     assert_eq!(
         state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -1027,14 +1034,12 @@ async fn off_river_window_still_answers_the_request() {
             None,
         ))
         .expect("an off-river request must not error out of the handler");
-    loop {
-        if let DataEvent::Response(DataResponse::Bars(resp)) =
-            next_data_event(&mut sink_rx, timeout).await
-        {
-            assert!(resp.data.is_empty(), "an off-river window answers empty");
-            break;
-        }
-    }
+    let (response, reason) = next_request_failure(&mut sink_rx, timeout).await;
+    assert!(
+        response.is_none(),
+        "an off-river window carries no bars: {response:?}"
+    );
+    assert!(reason.contains("precedes data_origin_ns"), "{reason}");
 
     // Proves the empty responses above came from the off-river guard and not
     // merely from a stub that happens to serve no trades: a refused window is
@@ -1044,6 +1049,93 @@ async fn off_river_window_still_answers_the_request() {
         state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "an off-river window must be refused before any /trades fetch"
+    );
+}
+
+/// A multi-instrument history request: one page session, rows partitioned by
+/// label, and a member that cannot be served failing the request without
+/// discarding what the others produced.
+///
+/// Three members over one `BTCUSDT` river. `BTCUSDT` is the river's own label
+/// and must get exactly its two rows. `ETHUSDT` is a defined instrument this
+/// river does not carry, and must get none: a client that stamped every row
+/// with each requested id would hand it the two `BTCUSDT` trades relabelled,
+/// and the payload would hold four. `XRPUSDT` is defined nowhere, so its lookup
+/// fails and the request resolves as failed, naming it, while still carrying
+/// the `BTCUSDT` rows.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_multi_instrument_trade_request_partitions_by_label_and_keeps_partial_rows() {
+    use nautilus_common::messages::data::RequestTrades;
+    use nautilus_model::identifiers::{InstrumentId, Symbol};
+
+    const AFTER_BIND: &str = r#"[{"symbol":"BTCUSDT","class":{"class":"spot","base":"BTC","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"},{"symbol":"ETHUSDT","class":{"class":"spot","base":"ETH","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
+
+    let state = Arc::new(StubState::default());
+    *state
+        .instruments_after_bind
+        .lock()
+        .expect("post-bind instruments mutex") = Some(AFTER_BIND.to_string());
+    *state.trades_tape.lock().expect("trades tape mutex") =
+        Some(serde_json::from_str(TRADES_JSON).expect("the trade fixture parses"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    common::connect_with_deadline(client.connect())
+        .await
+        .expect("connect opens the socket");
+
+    let eth = InstrumentId::new(Symbol::from("ETHUSDT"), *mogwai_adapter::MOGWAI_VENUE);
+    let xrp = InstrumentId::new(Symbol::from("XRPUSDT"), *mogwai_adapter::MOGWAI_VENUE);
+    client
+        .request_trades(RequestTrades::new(
+            vec![instrument_id(), eth, xrp],
+            None,
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("request trades dispatches");
+
+    let (response, reason) = next_request_failure(&mut sink_rx, Duration::from_secs(5)).await;
+    let Some(DataResponse::Trades(resp)) = response else {
+        panic!("a partly failed trade request carries its rows, got {response:?}");
+    };
+    assert_eq!(
+        resp.instrument_ids,
+        vec![instrument_id(), eth, xrp],
+        "the response names every requested member"
+    );
+    assert_eq!(
+        resp.data.len(),
+        2,
+        "only the river's own label gets rows; nothing is relabelled for ETHUSDT"
+    );
+    assert!(
+        resp.data
+            .iter()
+            .all(|trade| trade.instrument_id == instrument_id()),
+        "every row keeps the label it was printed under: {:?}",
+        resp.data
+    );
+    assert!(reason.contains("XRPUSDT"), "{reason}");
+    assert!(
+        !reason.contains("ETHUSDT"),
+        "a defined member with no rows is not a failure: {reason}"
+    );
+    assert_eq!(
+        state
+            .history_requests
+            .lock()
+            .expect("history requests mutex")
+            .len(),
+        1,
+        "one river, one page session, however many members"
     );
 }
 

@@ -44,9 +44,10 @@ next bump.
   error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
   reconcile-and-distrust-the-window signal.
 
-  Still open: `DataEvent` carries `Response`, `Data`, `Instrument`,
-  `FundingRate`, `InstrumentStatus`, `OptionGreeks` and two `defi`-gated
-  variants, and none of them means a hole in the stream - the enumeration in
+  Still open: `DataEvent` carries `Data`, `Response`, `RequestFailed`,
+  `ResponseEnvelope` and two `defi`-gated variants, and none of them means a
+  hole in the stream - the three correlated ones answer a request the host
+  made, and a live stream gap answers none. The enumeration in
   `client/data.rs`'s gap comment matches the pinned source.
   `SystemEvent::SocketState` and `SystemCommand::ReconnectSocket` are still the
   only system variants, and neither helps: both are about the socket itself,
@@ -163,6 +164,8 @@ each one names.
   correctly answers `200 []` - but it still costs the consumer a fatal halt, and
   one of the two fixes is blocked on the same gap as `FeedLagged`: an empty
   historical response carries no feed identity, so it cannot be attributed.
-  Still open: `TradesResponse` carries correlation id, client id, instrument
-  id, the window and `params`, and nothing naming the feed or why the window
-  is empty.
+  Narrowed at 0.67: a window the adapter failed to retrieve is now a
+  `DataRequestFailed` with a reason, so a failure no longer reads as sparsity.
+  Still open for the genuinely empty success: `TradesResponse` carries
+  correlation id, client id, its instrument ids, the window and `params`, and
+  nothing naming the feed or why the window is empty.

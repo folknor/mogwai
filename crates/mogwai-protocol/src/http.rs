@@ -309,12 +309,13 @@ pub const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
 /// The gate was fail-fast, and that was wrong for the topology this venue is
 /// for. The cap exists to bound resident memory - four multi-megabyte pages -
 /// and a request that is merely waiting holds no page, so refusing it bought
-/// the memory bound nothing and cost the consumer everything: nautilus's
-/// historical response types carry no error channel, so an adapter's only
-/// alternative to an unresolvable hang is to resolve the request empty and log
-/// why. A refused warmup therefore reaches the consumer as a quiet window,
-/// indistinguishable from a tape that genuinely printed nothing, and the run
-/// then reasons about a market it was never shown.
+/// the memory bound nothing and cost the consumer its warmup. When the gate was
+/// built, nautilus's historical responses had no error channel, so a refused
+/// warmup reached the consumer as a quiet window, indistinguishable from a tape
+/// that genuinely printed nothing, and the run reasoned about a market it was
+/// never shown. The adapter now answers a refusal as a failed request naming
+/// the reason, which a consumer can see, but a warmup that failed visibly is
+/// still a warmup that did not happen.
 ///
 /// That was survivable when one consumer owned one venue. It is not survivable in
 /// the attach topology, which exists to point tens of runs at one venue: one

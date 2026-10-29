@@ -523,14 +523,19 @@ pub(crate) fn instrument_any(
             // in the instrument's public metadata instead of erasing them at
             // the adapter seam. Decimal values stay strings so no precision is
             // lost through JSON's numeric representation.
-            let mut info = Params::new();
-            info.insert(
-                "mogwai_borrowable".into(),
-                borrowable.map_or(serde_json::Value::Null, |value| {
-                    serde_json::Value::String(value.to_string())
-                }),
+            let info = Params::new(
+                [
+                    (
+                        "mogwai_borrowable".to_string(),
+                        borrowable.map_or(serde_json::Value::Null, |value| {
+                            serde_json::Value::String(value.to_string())
+                        }),
+                    ),
+                    ("mogwai_settlement_ns".to_string(), (*settlement_ns).into()),
+                ]
+                .into_iter()
+                .collect(),
             );
-            info.insert("mogwai_settlement_ns".into(), (*settlement_ns).into());
             let equity = nautilus_model::instruments::Equity::builder()
                 .instrument_id(id)
                 .raw_symbol(symbol)
@@ -653,27 +658,31 @@ fn nautilus_asset_class(asset_class: WireAssetClass) -> AssetClass {
 /// constructors cannot drift on what survives the seam.
 fn funding_info(def: &InstrumentDef) -> Option<Params> {
     def.class.funding().map(|terms| {
-        let mut info = Params::new();
-        info.insert(
-            "mogwai_funding_interval_ns".into(),
-            terms.interval_ns.into(),
-        );
-        info.insert(
-            "mogwai_funding_rate".into(),
-            serde_json::Value::String(terms.interest.to_string()),
-        );
-        info.insert(
-            "mogwai_index_symbol".into(),
-            terms
-                .index_symbol
-                .as_ref()
-                .map_or(serde_json::Value::Null, |symbol| symbol.clone().into()),
-        );
-        info.insert(
-            "mogwai_funding_clamp".into(),
-            serde_json::Value::String(terms.clamp.to_string()),
-        );
-        info
+        Params::new(
+            [
+                (
+                    "mogwai_funding_interval_ns".to_string(),
+                    terms.interval_ns.into(),
+                ),
+                (
+                    "mogwai_funding_rate".to_string(),
+                    serde_json::Value::String(terms.interest.to_string()),
+                ),
+                (
+                    "mogwai_index_symbol".to_string(),
+                    terms
+                        .index_symbol
+                        .as_ref()
+                        .map_or(serde_json::Value::Null, |symbol| symbol.clone().into()),
+                ),
+                (
+                    "mogwai_funding_clamp".to_string(),
+                    serde_json::Value::String(terms.clamp.to_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
     })
 }
 

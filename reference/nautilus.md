@@ -14,7 +14,8 @@ this document came out of three read-only investigations of nautilus on
 2026-08-14, made against HEAD `409214a` rather than against the pin. The claims
 marked verified below were re-derived against the in-tree copy on 2026-08-29;
 every claim here was re-swept at the 0.63 pin on 2026-09-02, at the 0.64 pin on
-2026-09-15, at the 0.65 pin on 2026-10-05, and at the 0.66 pin on 2026-10-16.
+2026-09-15, at the 0.65 pin on 2026-10-05, at the 0.66 pin on 2026-10-16, and
+at the 0.67 pin on 2026-10-29.
 
 That first sweep was worth its cost, which is the argument for repeating it
 after any pin bump: four claims had moved or were wrong. The equity double count
@@ -65,9 +66,19 @@ reconciliation flag also rides fills built from venue fill reports and not only
 synthesized ones, and the trailing-stop denial depends on the order's trigger
 type.
 
+The 0.67 sweep moved no behavioural claim about money, margin or the account
+model; what the release changed there is precision and checking, which reaches
+mogwai through rule 7 only. It moved three things at the edges. The risk engine
+denies a whole order list when one member fails its checks, and re-checks an
+emulated order when the emulator releases it (rule 5). The data side of the
+inbound channel gained a correlated request failure, which the adapter now uses
+for every history request it cannot serve (see the inbound channel below). And
+`PositionStatusReport` gained an optional venue liquidation price, which the
+adapter leaves unset because the venue's position state carries none.
+
 ## The venue is the sole authority for money
 
-Verified at 0.66.
+Verified at 0.67.
 
 One boolean is the whole boundary of trust. `AccountBase` carries
 `calculate_account_state`, set false whenever an account is materialized from a
@@ -116,7 +127,7 @@ being wrong about money, anywhere.
 Each is a rule the venue enforces on itself or a defect nobody sees.
 
 1. **Report cash-only balances, never mark-to-market equity.** Verified at
-   0.66. `Portfolio::equity` starts from the account's reported balances total
+   0.67. `Portfolio::equity` starts from the account's reported balances total
    and adds a valuation of the open positions that nautilus computes itself, so
    a venue reporting an already-marked equity is double counted, and nothing
    detects it. Get this wrong and every forward test's equity curve is off by
@@ -176,7 +187,7 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    an unreported state leaves a stale lock table. On the live path that table
    is written only by the account manager, which never runs there, so the harm
    stays latent unless a host turns on `calculate_account_state`.
-4. **Route margin by `instrument_id`.** Verified at 0.66 in behaviour as well
+4. **Route margin by `instrument_id`.** Verified at 0.67 in behaviour as well
    as in the `MarginBalance` constructor signature: the margin account sends a
    `Some` row to its per-instrument map and a `None` row to its cross-margin
    map keyed by currency, and replaces both wholesale on every state that
@@ -205,7 +216,7 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    Audited 2026-08-29: `convert` sets neither field, so both take nautilus's
    zero default and its pre-trade check requires no margin on any mogwai
    instrument. The venue's own enforcement is unaffected and remains the only
-   gate. What to publish instead is open work. Re-checked at 0.66: a zero
+   gate. What to publish instead is open work. Re-checked at 0.67: a zero
    requirement still passes, but a missing balance row in the margin currency
    reads as zero free rather than skipping the check, which stops being
    harmless the moment a rate is published.
@@ -241,13 +252,26 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    Cash accounts reserve for buys and for sells of the base asset; a margin
    account reserves only a positive initial margin, and `convert` publishes no
    margin rate, so on a margin account the reservation is zero today.
+
+   0.67 widened two refusals, both host-side. When one member of an order list
+   fails its risk checks, every other member is now denied with it, where 0.66
+   denied that member and left its siblings unsent; for mogwai that means a
+   bracket is refused whole before any leg reaches the venue, which never sees
+   the list. And an order the host's emulator holds is risk-checked again at
+   release, so an emulated stop can be denied at the moment it would have been
+   sent, by the same funding and reservation checks as above.
 6. **The margin model default is leveraged**, dividing by leverage. Verified:
    `MarginModelAny::default` is the leveraged model, and a margin account takes
    it unless a host calls `set_margin_model`. A venue expecting
    fixed-percentage margin needs the standard model, the choice is the host's
    rather than ours, and getting it wrong is silent.
-7. **Commission is venue-absolute.** Verified at 0.66: a position accumulates
-   `fill.commission` into its per-currency commission map directly. Since 0.65
+7. **Commission is venue-absolute.** Verified at 0.67: a position accumulates
+   `fill.commission` into its per-currency commission map directly. Since 0.67
+   that sum is kept at `Money`'s native precision rather than rounded to the
+   currency's, and a fill whose cumulative commission would leave `Money`'s
+   bounds is refused before it changes the position. Neither reaches mogwai
+   today: `convert::money` builds every commission at the currency's precision,
+   so there is nothing finer to accumulate. Since 0.65
    instruments carry no maker or taker fee at all; the rates moved to the venue
    `fee_model`, which only the simulated matching engine reads, so the live
    path has no fee schedule to compare a reported commission against. That is
@@ -264,8 +288,8 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    path through the commission-void logic. Audited 2026-08-29: no consumer in
    the execution or portfolio crates branched on the flag at all, and the
    commission-void path keys on voided quantity rather than on it, and still
-   does at 0.66. The use of the flag changed at 0.64, moved again at 0.65 and
-   held at 0.66: `has_active_inferred_fill` in the live crate
+   does at 0.67. The use of the flag changed at 0.64, moved again at 0.65 and
+   held at 0.66 and 0.67: `has_active_inferred_fill` in the live crate
    now delegates to `inferred_reconciliation_trade_ids` in the execution crate,
    which counts a fill as inferred only when the flag is true and its trade id
    equals the deterministic reconciliation id recomputed from the replayed
@@ -278,12 +302,14 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
 
 ## The live inbound channel is closed
 
-Verified at 0.66. `ExecutionEvent` carries `Order`, three order-event batch
-variants, `Report` and `Account`, and the data side carries market data. So a
-live venue can push order events, execution reports, an `AccountState` (whose
-balance rows are upserted per currency and whose margin rows replace the
-previous set), or market data, and nothing else. None of them means a payment,
-so every venue-initiated account movement is laundered into one of those.
+Verified at 0.67. `ExecutionEvent` carries `Order`, three order-event batch
+variants, `Report` and `Account`, and the data side carries market data plus the
+answers to the host's own correlated requests: a response, a response envelope,
+or, since 0.67, a request failure naming its reason. So a live venue can push
+order events, execution reports, an `AccountState` (whose balance rows are
+upserted per currency and whose margin rows replace the previous set), or
+market data, and nothing else unbidden. None of them means a payment, so every
+venue-initiated account movement is laundered into one of those.
 
 - **Liquidation works, and is the pattern to copy.** Verified: the engine's
   venue-initiated fill path names liquidation, auto-deleveraging and settlement
@@ -317,7 +343,7 @@ so every venue-initiated account movement is laundered into one of those.
   for an order its own mirror does not know, with a warning, and emits no fill
   report on the live stream, so a venue liquidation or risk flatten reaches a
   nautilus host only as the `AccountState` change it causes.
-- **Funding is built and unreachable.** Verified at 0.66:
+- **Funding is built and unreachable.** Verified at 0.67:
   `FundingSettlement` appears only in the model's event definitions and in the
   backtest crate, nowhere in live, execution or common, and `ExecutionEvent`
   has no variant that could carry it. `FundingSettlement` and the funding
@@ -333,7 +359,7 @@ so every venue-initiated account movement is laundered into one of those.
   funding moves cash without moving quantity and the fill shape cannot express
   that.
 - **Expiry and halts are deliverable and almost entirely inert.** Verified at
-  0.66: `InstrumentClose` is carried widely through the data, serialization and
+  0.67: `InstrumentClose` is carried widely through the data, serialization and
   persistence layers, and the only place that acts on it in full - cancelling
   orders, closing positions, setting market status - is the matching engine,
   which only the backtest exchange and the sandbox adapter instantiate. Since
@@ -388,7 +414,7 @@ identity, not a currency, and the costing path reads the base only for an
 inverse - while a non-crypto inverse states its settlement currency as the
 base, which the checked constructor requires.
 
-Mandatory fields beyond the common spine, re-derived at the 0.66 pin rather than
+Mandatory fields beyond the common spine, re-derived at the 0.67 pin rather than
 carried: a spot pair owes base and quote currency; an equity owes its currency;
 a `CryptoPerpetual` owes base, quote and settlement currency and the inverse
 flag; a `PerpetualContract` owes underlying, asset class, quote and settlement
@@ -447,9 +473,10 @@ covers dated futures, and rule 8's audit sentence gained a consumer of the flag.
 The 0.65 sweep moved no claim in this section; what it corrected here had been
 wrong since before 0.64. The 0.66 sweep moved none either: every instrument
 type gained only a check that a named tick scheme is registered, and `convert`
-names none.
+names none. Nor did the 0.67 sweep: no instrument type's
+fields or checks changed.
 
-One guard is backtest-only. Verified 2026-10-16 at the 0.66 pin:
+One guard is backtest-only. Verified 2026-10-29 at the 0.67 pin:
 `SimulatedExchange::add_instrument` refuses a cash account trading
 `CryptoPerpetual`, `CryptoFuture`, `FuturesContract` or `PerpetualContract`. At
 0.63 the match left out both dated types, so a cash account held a dated future

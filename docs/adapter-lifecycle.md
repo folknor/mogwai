@@ -263,6 +263,31 @@ The fold is public as `mogwai_adapter::bars` - `BarAggregator::push` is the
 live path and `aggregate_bars` the history path - so a consumer can witness the
 stamp by driving the code the client drives.
 
+Subscriptions and history requests take nautilus's member lists. A subscribe or
+unsubscribe batch applies each member on its own: a refused member - one outside
+the river the connection is bound to - does not stop the others or undo them,
+and the error lists exactly the members that were applied, which is what keeps
+the engine's subscription set and the client's in step. A release cannot be
+refused. A history request naming several instruments pages its window once,
+because a socket reads one river, and gives each member only the rows printed
+under its own label; a member outside the bound river is a member failure, not
+an empty answer. A connection with no configured `symbol` applies no bound
+check, so there a member whose label the river does not carry gets no rows.
+
+Every data request is answered exactly once. A success is an ordinary response.
+A failure to retrieve - a venue history refusal, a dropped socket, an off-river
+window, an instrument that cannot be resolved, or the client stopping or
+reconnecting while the request is in flight - is nautilus's
+`DataRequestFailed`, whose reason a `DataActor` receives in `on_data_response`.
+It carries a payload only when history was actually retrieved for at least one
+member, and then exactly those members' rows; a failure that retrieved nothing
+carries none, so a strategy's typed history hook never sees a failure as an
+empty window. A history success is sent as the payload-only response, which
+nautilus does not write back to a catalog: a window is one run's realization
+under an instrument id every run shares. A host whose runs share a catalog
+isolates them itself, since stored data is read before a request reaches the
+adapter.
+
 `MogwaiDataClient`'s sink is resolved the same way, from the same kind of
 thread-local, and it is unguarded today - a data client connected without
 starting goes quiet rather than refusing. The ordering requirement is therefore

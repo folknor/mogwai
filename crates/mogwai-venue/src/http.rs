@@ -2423,11 +2423,11 @@ mod history_slot_tests {
 
     /// The fifth request waits, and this is the whole point of the change.
     ///
-    /// It used to be refused, and a refusal reaches the consumer as an empty
-    /// window rather than as an error - nautilus's historical response types
-    /// carry no error channel - so a run read a refused warmup as a market that
-    /// printed nothing. The cap bounds resident pages, and a waiter holds no
-    /// page, so waiting costs the bound nothing.
+    /// It used to be refused, and a refusal cost the consumer its warmup - at
+    /// the time as an empty window, since nautilus's historical responses then
+    /// had no error channel, and today as a failed request. The cap bounds
+    /// resident pages, and a waiter holds no page, so waiting costs the bound
+    /// nothing.
     ///
     /// Drives the endpoints' own slot decision rather than a semaphore of its
     /// own: `acquire_history_slot` is what both handlers call. Disclosed
@@ -2457,7 +2457,7 @@ mod history_slot_tests {
         );
 
         // And it is served when a slot returns, which is what the consumer gets
-        // instead of a silently empty window.
+        // instead of a refused warmup.
         drop(held);
         assert!(fifth.await.is_ok(), "a returned slot wakes the waiter");
     }

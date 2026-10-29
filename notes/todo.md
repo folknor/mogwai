@@ -48,6 +48,21 @@ headings step is filler between slates.
 
 ## The gate that blocks other work
 
+- **`brokkr check --gate` is red at `68c0d4b`, in two `mogwai-cli` serving
+  tests.** Found 2026-10-29 while landing the nautilus 0.67 port, and
+  reproduced with that work stashed, so it is not the port: both fail 3 of 3
+  at HEAD, and the window test also fails with the pre-`68c0d4b` lockfile, so
+  it is not the dependency bump either. `serving::a_banded_limit_fills_from_the_run_sweep`
+  fills its 2.01-below-the-last-print limit as a Taker (the market fell through
+  the headroom before the submit landed), and
+  `serving::no_market_frame_at_or_past_the_window_end_crosses_the_socket` sees
+  zero market frames in a 3 s named window at the NVDA run start. Both rest on
+  what the seed-42 dev-build tape does in the first seconds of the run, and the
+  tape moved several times on 2026-10-17 (38 to 45); a bisect over those
+  commits is the next step. Plain `brokkr check` does not run either test, and
+  the 0.67 port landed on it by owner ruling, with the four adapter socket
+  modules run separately and green.
+
 - **Segment-sampler gate: failed 2026-08-18, still failing.** The owner viewed
   the two Asia charts and rejected both as unusable - 300-point moves inside the
   session body over one-to-twenty-minute spans, which happen at an open and never
@@ -857,7 +872,10 @@ classes.
   reason.** `nautilus_common::clients::execution::generate_mass_status` is a
   free function that composes mass status on a caller-supplied clock; the
   adapter's own override could call it on the simulated clock instead of
-  composing the reports itself. `EventEmitter::try_send_account_state` and
+  composing the reports itself - though not as a pure refactor: it asks for
+  every order report in the lookback and bounds fills by it, where the
+  override takes open orders only and every fill of an open order (re-read at
+  0.67; the override's doc comment carries why). `EventEmitter::try_send_account_state` and
   `try_send_order_event` report a failed send where the plain forms only warn,
   but the retained-sender witness already covers sender liveness. The report
   generators' `*_task` variants need nothing: when one returns `None` nautilus

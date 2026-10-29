@@ -24,7 +24,7 @@ use mogwai_protocol::{
 };
 use nautilus_common::{live::sender::EventSender, messages::DataEvent};
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::InstrumentId;
+use nautilus_model::{data::Data, identifiers::InstrumentId};
 use nautilus_network::http::HttpClient;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -212,7 +212,7 @@ pub(crate) async fn seed_instruments(
 ///
 /// Seeding only fills the adapter's local `InstrumentDef` map, which the
 /// adapter consults for price/precision conversion. Nautilus's own cache is a
-/// separate store fed exclusively by `DataEvent::Instrument`, and a host's
+/// separate store fed by instrument data events (`Data::Instrument`), and a host's
 /// executor refuses to process a bar whose instrument is absent from that cache
 /// (a desync guard against advancing the shadow with no real order). A forward
 /// run that subscribes to bars but never to the instrument itself would
@@ -231,7 +231,7 @@ pub(crate) fn emit_seeded_instruments(
         .collect();
     for def in defs {
         if let Some(instrument) = instrument_any_or_warn(&def, ts_init) {
-            drop(sink.send(DataEvent::Instrument(instrument)));
+            drop(sink.send(DataEvent::Data(Data::Instrument(Box::new(instrument)))));
         }
     }
 }
