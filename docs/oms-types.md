@@ -203,3 +203,17 @@ account is valued at its cash after purchase plus only its unrealized PnL,
 understating it by the whole cost basis. `reference/nautilus.md` rule 1 has
 the mechanism. mogwai will not choose for you and will not refuse you if you
 choose wrongly.
+
+A margin account meets one more thing at startup. When a nautilus node
+starts against a venue already holding orders or positions for you, its
+portfolio recomputes margin itself after reconciling, and because mogwai
+instruments publish no margin rate it computes zero: the venue's margin rows
+are cleared and `locked` falls to the sum of whatever margin is left, usually
+nothing, so `free` reads high. The adapter
+forwards a fresh venue snapshot with the reconciliation, which the node
+queues behind it, so the account is venue truth again once that snapshot is
+applied. Until then anything reading the account sees the cleared margins: a
+strategy's `on_start` always does, and so can any order or data callback the
+node delivers ahead of the queued snapshot. Size against the account from
+the first account update after startup, not before it.
+`reference/nautilus.md`, in its money section, has the mechanism.

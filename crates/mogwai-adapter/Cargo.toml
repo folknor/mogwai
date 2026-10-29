@@ -47,6 +47,10 @@ nautilus-network = { version = "0.67.0", default-features = false }
 
 [dev-dependencies]
 serde_urlencoded = "0.7"
+# The portfolio a live node runs at startup, so a test can drive its account
+# initializers against what this adapter forwards rather than read them. Test
+# only: the adapter itself never constructs a portfolio.
+nautilus-portfolio = { version = "0.67.0", default-features = false }
 
 # Every integration test compiles into the one `all` target below, which
 # `autotests = false` in [package] makes the only one. Cargo's default links a

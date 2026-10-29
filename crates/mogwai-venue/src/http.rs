@@ -1400,10 +1400,13 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
 
 /// Pull route for the venue's current account snapshot.
 ///
-/// `AccountState` is execution-owned and is otherwise only pushed with an order
-/// event. An adapter pulls this once on connect so the bridge's account row
-/// exists before the first order is worked, rather than learning the account
-/// only when the first fill's `AccountState` arrives.
+/// `AccountState` is execution-owned and is otherwise only pushed when the
+/// ledger moves: with an order event, and from the sweep when a mark, funding,
+/// settlement or a cash release changes it. Nothing pushes on a timer, so a
+/// quiet ledger is silent. The adapter pulls this on connect, so the bridge's
+/// account row exists before the first order is worked rather than when the
+/// first fill's `AccountState` arrives, and again at the end of every mass
+/// status, to repair what a host's startup initializers clear.
 ///
 /// Whose account is named by `?account=`, defaulting to the venue's default
 /// account - the same resolution the socket does, so a consumer that named no

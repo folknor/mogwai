@@ -66,9 +66,11 @@ reconciliation flag also rides fills built from venue fill reports and not only
 synthesized ones, and the trailing-stop denial depends on the order's trigger
 type.
 
-The 0.67 sweep moved no behavioural claim about money, margin or the account
-model; what the release changed there is precision and checking, which reaches
-mogwai through rule 7 only. It moved three things at the edges. The risk engine
+The 0.67 release moved no behavioural claim about money, margin or the account
+model; what it changed there is precision and checking, which reaches mogwai
+through rule 7 only. One claim was wrong independently of the release and is
+corrected below: the accounts manager does run on live, at startup, on a
+margin account (see the money section). It moved three things at the edges. The risk engine
 denies a whole order list when one member fails its checks, and re-checks an
 emulated order when the emulator releases it (rule 5). The data side of the
 inbound channel gained a correlated request failure, which the adapter now uses
@@ -85,9 +87,34 @@ One boolean is the whole boundary of trust. `AccountBase` carries
 venue-reported `AccountState`, which is the live path always; the backtest sets
 it true. The portfolio's order handler early-returns on
 `!calculate_account_state && !is_wallet`, so `AccountsManager` - the entire
-balance, margin and PnL-to-balance arithmetic layer - never runs on live. The
-wallet half of that condition is an exception worth knowing: a wallet account
-takes the recompute path even on a venue-reported state.
+balance, margin and PnL-to-balance arithmetic layer - never runs on live order
+events. The wallet half of that condition is an exception worth knowing: a
+wallet account takes the recompute path even on a venue-reported state.
+
+Startup is the other exception, and it reaches mogwai. This document said
+until 2026-10-29 that the manager never runs on live at all, which was false
+at 0.66 and 0.67, the two pins whose source was compared for the correction;
+earlier pins were not checked.
+After reconciling each client's mass status, `LiveNode` calls
+`Portfolio::initialize_orders` and `initialize_positions`, and neither asks
+`calculate_account_state` of a margin account. They recompute each
+instrument's initial margin from its open orders and its maintenance margin
+from its open positions, at the instrument's published rates. `convert`
+publishes no rate (rule 5), so both compute zero: an open order clears its
+instrument's reported initial margin, an open position its maintenance
+margin, and a row with neither component left is removed. Each clear of an
+existing row rewrites that currency's `locked` to the sum of the margins
+left - dropping every hold the venue reports without a margin row, and
+raising `free` by all of it. A cash account is spared: 0.67 skips a venue-reported one in
+`initialize_orders`, and `initialize_positions` touches margin accounts only.
+The adapter repairs it by forwarding a fresh venue snapshot from
+`generate_mass_status`, which the node queues and applies after the
+initializers because nothing drains the exec channel in between; the
+mechanism and its limits are at that function. The repair is eventual: a
+strategy's `on_start` runs before the queue drains and reads the cleared
+margins, and any event the node delivers ahead of the queued snapshot can
+too. Verified against the published crates by the reconciliation test
+`mass_status_repairs_the_margin_the_startup_initializers_clear`.
 
 The split is absolute:
 
@@ -185,7 +212,8 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    upserts its balance rows regardless, but clears its local per-instrument
    lock table only under `event.is_reported && !event.balances.is_empty()`, so
    an unreported state leaves a stale lock table. On the live path that table
-   is written only by the account manager, which never runs there, so the harm
+   is written only by the account manager, which never runs on a
+   venue-reported cash account there (startup included, since 0.67), so the harm
    stays latent unless a host turns on `calculate_account_state`.
 4. **Route margin by `instrument_id`.** Verified at 0.67 in behaviour as well
    as in the `MarginBalance` constructor signature: the margin account sends a

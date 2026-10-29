@@ -2038,6 +2038,56 @@ impl ExecutionClient for MogwaiExecutionClient {
         mass_status.add_fill_reports(fill_reports);
         mass_status.add_position_reports(position_reports);
 
+        // Re-seed the account from venue truth, for the host's portfolio
+        // initializers rather than for reconciliation itself. Right after
+        // reconciling this mass status, `LiveNode::perform_startup_reconciliation`
+        // (nautilus 0.67) calls `Portfolio::initialize_orders` and
+        // `initialize_positions`, and on a margin account those run the
+        // accounts manager whatever `calculate_account_state` says. It
+        // recomputes each instrument's margin from the instrument's
+        // `margin_init` / `margin_maint` rates, which `convert` leaves at
+        // nautilus's zero default (see the rate fork in `reference/nautilus.md`
+        // rule 5), so an open order clears its instrument's reported initial
+        // margin and an open position its maintenance margin, a row left with
+        // neither is removed, and each clear rewrites that currency's `locked`
+        // to the sum of what remains - dropping holds the venue reports with
+        // no margin row at all. A cash account is spared:
+        // rc8 skips a venue-reported one in `initialize_orders`, and
+        // `initialize_positions` touches only margin accounts.
+        //
+        // This snapshot repairs that, and only because of where it lands. The
+        // node awaits this call and the initializers in one sequence with no
+        // drain of the exec event channel between them (in both `start()` and
+        // `run_with_mode()`), so the state forwarded here queues behind the
+        // reconciliation and is applied after the initializers, replacing the
+        // margin set wholesale. It is an eventual repair, not a prevention:
+        // `start_trader` runs before the queue drains, so a strategy's
+        // `on_start` still reads the cleared margins, as can any event the
+        // node delivers ahead of this one, and a nautilus that
+        // began draining mid-reconciliation would apply this before the
+        // clobber and leave things as they were without it. The real fix,
+        // gating the initializers' margin mutations on
+        // `calculate_account_state`, is nautilus's to make. The pull is taken
+        // fresh rather than reusing the position report's snapshot so the
+        // repair carries the newest state, and the watermark in
+        // `handle_account_state` orders it against concurrent pushes.
+        //
+        // Failure is fatal, as on every other venue-truth pull here. Like the
+        // connect pull it bypasses `HavocFilter`: it is a query, not a tape
+        // frame, so an armed `DropNextAccountUpdate` is not spent on it. A host
+        // calling this mid-run therefore also heals an account push lost to
+        // havoc, which is the honest outcome of asking the venue.
+        let account = fetch_account(
+            &self.http,
+            &self.http_quota,
+            &self.config.http_base_url(),
+            self.config.account_id,
+        )
+        .await
+        .context("mass status account venue truth")?;
+        note_account_label(&account, self.config.account_id);
+        handle_exec_message(VenueMessage::AccountState(account), &self.exec_context());
+
         Ok(Some(mass_status))
     }
 }
@@ -3778,7 +3828,19 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         .collect();
     drop(instruments);
 
-    {
+    // The guard is held through the emit below, not only through admission.
+    // Admission orders snapshots against the watermark, but nautilus applies
+    // them in channel order, so the two orders agree only if no other producer
+    // can admit and enqueue between this one's admission and its enqueue. There
+    // are two producers: the WS pump, and the venue-truth pull
+    // `generate_mass_status` forwards from the host's thread. With the guard
+    // released early, a pull admitted at one instant could be overtaken by a
+    // newer pushed snapshot that admits and enqueues first, and the older pull
+    // would then land last and stay applied. `ExecContext::emit` takes only
+    // the generation atomic and the sink witness, never this mutex, and the
+    // send is a non-blocking enqueue, so holding it across the emit adds no
+    // lock cycle.
+    let mirror = {
         let mut mirror = lock_recover(&ctx.state, "execution state");
         // Snapshots must forward in venue order, not arrival order: nautilus
         // applies account states in arrival order with no staleness guard of
@@ -3805,7 +3867,8 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
                  watermark, so a well-formed snapshot for an earlier instant can still supersede it"
             );
         }
-    }
+        mirror
+    };
     // The state is built here, with this venue's simulated `ts_init`, and
     // handed to the infallible send. The upstream `try_emit_account_state` is
     // public and fallible but generates the event itself off the emitter's
@@ -3824,6 +3887,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     )
     .with_info(risk_info(state.risk.as_ref()));
     ctx.emit(|e| e.send_account_state(account_state));
+    drop(mirror);
 }
 
 /// One wire balance row as a nautilus `AccountBalance`, or the reason it

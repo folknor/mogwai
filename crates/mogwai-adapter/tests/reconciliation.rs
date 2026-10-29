@@ -597,3 +597,365 @@ async fn a_stop_report_carries_its_trigger_price_and_status() {
     assert_eq!(targeted.ts_triggered, Some(UnixNanos::from(12)));
     assert_eq!(targeted.trigger_type, Some(TriggerType::LastPrice));
 }
+
+/// A `GET /account` body for a margin ledger holding one BTCUSDT position and
+/// posting one BTCUSDT margin row of initial 100 and maintenance 200. `locked`
+/// is set above that row's sum on purpose: the venue's locked is wider than its
+/// margin rows, and the extra is what a nautilus recalculation off margins
+/// alone would also lose.
+fn margin_account_json(ts_event: u64, locked: &str, free: &str) -> String {
+    let position = common::position_json("1", "100.00");
+    let body = format!(
+        r#"{{"clock":"venue","account":{{"account_id":"MOGWAI-001","balances":[{{"currency":"USDT","total":"10000","free":"{free}","locked":"{locked}"}}],"positions":[{position}],"margins":[{{"symbol":"BTCUSDT","currency":"USDT","initial":"100","maintenance":"200"}}],"risk":{{"equity":"10000","peak_equity":"10000","day_open_equity":"10000"}},"ts_event":{ts_event}}},"sweep_passes":[]}}"#
+    );
+    if let Err(err) = serde_json::from_str::<mogwai_protocol::http::AccountSnapshot>(&body) {
+        panic!("the margin account body is not an AccountSnapshot: {err}: {body}");
+    }
+    body
+}
+
+/// The BTCUSDT seed as a USDT-settled perpetual, the class a margin row is
+/// posted for.
+fn perpetual_instruments_json() -> String {
+    let def = mogwai_protocol::InstrumentDef {
+        symbol: "BTCUSDT".into(),
+        class: mogwai_protocol::InstrumentClass::Perpetual {
+            underlying: "BTC".into(),
+            settlement_currency: "USDT".into(),
+            multiplier: Decimal::ONE,
+            asset_class: mogwai_protocol::WireAssetClass::Cryptocurrency,
+            funding_interval_ns: 8 * 3_600 * 1_000_000_000,
+            funding_rate: Decimal::ZERO,
+            index_symbol: None,
+            funding_clamp: Decimal::ZERO,
+        },
+        price_precision: 2,
+        size_precision: 0,
+        price_increment: Decimal::new(1, 2),
+        size_increment: Decimal::ONE,
+    };
+    serde_json::to_string(&[def]).expect("the instrument seed serializes")
+}
+
+/// A BTCUSDT margin row as `(initial, maintenance)`.
+type MarginRow = Option<(Decimal, Decimal)>;
+
+/// A USDT balance as `(total, locked, free)`.
+type BalanceTriple = (Decimal, Decimal, Decimal);
+
+/// The margin account this test's cache holds, with its BTCUSDT margin row and
+/// its USDT balance.
+fn margin_view(
+    cache: &Rc<RefCell<Cache>>,
+) -> (
+    nautilus_model::accounts::AccountAny,
+    MarginRow,
+    BalanceTriple,
+) {
+    let account = cache
+        .borrow()
+        .account(&nautilus_model::identifiers::AccountId::from("MOGWAI-001"))
+        .expect("the account is cached")
+        .cloned();
+    let nautilus_model::accounts::AccountAny::Margin(margin) = &account else {
+        panic!("the host was configured for a margin account, got {account:?}");
+    };
+    let row = margin
+        .margin(&instrument_id())
+        .map(|row| (row.initial.as_decimal(), row.maintenance.as_decimal()));
+    let balance = account
+        .balance(Some(nautilus_model::types::Currency::USDT()))
+        .expect("the USDT balance row is cached");
+    let triple = (
+        balance.total.as_decimal(),
+        balance.locked.as_decimal(),
+        balance.free.as_decimal(),
+    );
+    (account, row, triple)
+}
+
+/// The startup clobber, and the adapter's repair of it, against the real
+/// published nautilus portfolio.
+///
+/// After reconciling a mass status, a live node runs
+/// `Portfolio::initialize_orders` and `initialize_positions`. On a margin
+/// account those recompute margin from the instrument's rates, which `convert`
+/// leaves at zero, and clear what the venue reported. The first half of this
+/// test pins that upstream behaviour at the pinned release, step by step, so a
+/// nautilus that stops doing it fails here and the repair can be reconsidered.
+/// The second half is the repair: `generate_mass_status` forwards a fresh venue
+/// snapshot, which the node applies after the initializers.
+///
+/// What this cannot show is the node's ordering - that nothing drains the exec
+/// channel between mass status and the initializers - nor that admission and
+/// enqueue stay ordered against a concurrent push. Both are argued from source
+/// at `generate_mass_status` and `handle_account_state`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn mass_status_repairs_the_margin_the_startup_initializers_clear() {
+    use nautilus_model::{accounts::Account, instruments::Instrument};
+
+    let state = Arc::new(StubState::default());
+    *state
+        .instruments_body
+        .lock()
+        .expect("instruments body mutex") = Some(perpetual_instruments_json());
+    *state.account_body.lock().expect("account body mutex") =
+        Some(margin_account_json(12, "350", "9650"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    // The instrument as the host caches it, off the adapter's own conversion:
+    // the data client publishes its seeded definitions on connect.
+    let (data_tx, mut data_rx) = unbounded_channel();
+    nautilus_common::live::runner::replace_data_event_sender(data_tx);
+    let mut data_client = mogwai_adapter::MogwaiDataClient::new(
+        ClientId::from("MOGWAI-DATA"),
+        mogwai_adapter::MogwaiDataClientConfig {
+            account_id: nautilus_model::identifiers::AccountId::from("MOGWAI-001"),
+            base_url: base_url.clone(),
+            ..mogwai_adapter::MogwaiDataClientConfig::default()
+        },
+    )
+    .expect("data client builds");
+    nautilus_common::clients::DataClient::start(&mut data_client).expect("data client starts");
+    common::connect_with_deadline(nautilus_common::clients::DataClient::connect(
+        &mut data_client,
+    ))
+    .await
+    .expect("data client connects");
+    let instrument = match common::next_data_event(&mut data_rx, Duration::from_secs(2)).await {
+        nautilus_common::messages::DataEvent::Data(nautilus_model::data::Data::Instrument(
+            instrument,
+        )) => *instrument,
+        other => panic!("expected the seeded instrument first, got {other:?}"),
+    };
+    assert_eq!(instrument.id(), instrument_id());
+    assert!(
+        instrument.margin_init().is_zero() && instrument.margin_maint().is_zero(),
+        "the premise is that convert publishes no margin rate; with one, the initializers \
+         compute a requirement instead of clearing, and this test no longer describes them"
+    );
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    cache
+        .borrow_mut()
+        .add_instrument(instrument.clone())
+        .expect("cache instrument");
+    let (sink_tx, mut sink_rx) = unbounded_channel();
+    replace_exec_event_sender(sink_tx);
+    let config = mogwai_adapter::MogwaiExecClientConfig {
+        account_id: nautilus_model::identifiers::AccountId::from("MOGWAI-001"),
+        account_type: nautilus_model::enums::AccountType::Margin,
+        base_url,
+        ..mogwai_adapter::MogwaiExecClientConfig::default()
+    };
+    let core = nautilus_live::ExecutionClientCore::new(
+        TraderId::from(mogwai_adapter::DEFAULT_TRADER_ID),
+        ClientId::from("MOGWAI-EXEC"),
+        *mogwai_adapter::MOGWAI_VENUE,
+        nautilus_model::enums::OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        Rc::clone(&cache),
+    );
+    let mut client =
+        mogwai_adapter::MogwaiExecutionClient::new(core, config).expect("exec client builds");
+    client.start().expect("exec client starts");
+    common::connect_seeding_account(&mut client, &cache, &mut sink_rx).await;
+
+    let (account, row, triple) = margin_view(&cache);
+    assert!(
+        !account.calculated_account_state(),
+        "a venue-reported account is the live shape; a calculated one takes the recompute \
+         path everywhere and is not what this test is about"
+    );
+    assert_eq!(row, Some((Decimal::from(100), Decimal::from(200))));
+    assert_eq!(
+        triple,
+        (
+            Decimal::from(10_000),
+            Decimal::from(350),
+            Decimal::from(9_650)
+        )
+    );
+
+    // What reconciliation leaves in the cache on a restart against this venue:
+    // the resting order and the open position the venue holds.
+    let trader_id = TraderId::from(mogwai_adapter::DEFAULT_TRADER_ID);
+    let strategy_id = StrategyId::from("S-001");
+    let account_id = nautilus_model::identifiers::AccountId::from("MOGWAI-001");
+    let mut factory = nautilus_common::factories::OrderFactory::new(
+        trader_id,
+        strategy_id,
+        None,
+        None,
+        Rc::new(RefCell::new(nautilus_common::clock::VirtualClock::new())),
+        false,
+        false,
+    );
+    let order = factory.limit(
+        instrument_id(),
+        nautilus_model::enums::OrderSide::Buy,
+        Quantity::from("1"),
+        Price::from("99.00"),
+        Some(nautilus_model::enums::TimeInForce::Gtc),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-REST")),
+    );
+    cache
+        .borrow_mut()
+        .add_order(order, None, Some(ClientId::from("MOGWAI-EXEC")), false)
+        .expect("cache order");
+    cache
+        .borrow_mut()
+        .update_order(&nautilus_model::events::OrderEventAny::Submitted(
+            nautilus_model::events::OrderSubmitted::new(
+                trader_id,
+                strategy_id,
+                instrument_id(),
+                ClientOrderId::from("O-REST"),
+                account_id,
+                UUID4::new(),
+                UnixNanos::from(5),
+                UnixNanos::from(5),
+            ),
+        ))
+        .expect("order submitted");
+    cache
+        .borrow_mut()
+        .update_order(&nautilus_model::events::OrderEventAny::Accepted(
+            nautilus_model::events::OrderAccepted::new(
+                trader_id,
+                strategy_id,
+                instrument_id(),
+                ClientOrderId::from("O-REST"),
+                VenueOrderId::from("V-REST"),
+                account_id,
+                UUID4::new(),
+                UnixNanos::from(6),
+                UnixNanos::from(6),
+                true,
+            ),
+        ))
+        .expect("order accepted");
+    let fill = nautilus_model::events::OrderFilled::new(
+        trader_id,
+        strategy_id,
+        instrument_id(),
+        ClientOrderId::from("O-OPEN"),
+        VenueOrderId::from("V-OPEN"),
+        account_id,
+        TradeId::from("T-OPEN"),
+        nautilus_model::enums::OrderSide::Buy,
+        OrderType::Market,
+        Quantity::from("1"),
+        Price::from("100.00"),
+        nautilus_model::types::Currency::USDT(),
+        LiquiditySide::Taker,
+        UUID4::new(),
+        UnixNanos::from(4),
+        UnixNanos::from(4),
+        true,
+        Some(PositionId::from("P-OPEN")),
+        None,
+        None,
+    );
+    let position = nautilus_model::position::Position::new(&instrument, fill);
+    cache
+        .borrow_mut()
+        .add_position(&position, nautilus_model::enums::OmsType::Netting)
+        .expect("cache position");
+    assert_eq!(
+        cache
+            .borrow()
+            .orders_open(None, Some(&instrument_id()), None, None, None)
+            .len(),
+        1,
+        "initialize_orders enumerates open orders only, so the resting order must be one"
+    );
+    assert_eq!(
+        cache
+            .borrow()
+            .positions_open(None, Some(&instrument_id()), None, None, None)
+            .len(),
+        1
+    );
+
+    // The node's startup sequence, from the portfolio's side.
+    let mut portfolio = nautilus_portfolio::portfolio::Portfolio::new(
+        Rc::new(RefCell::new(nautilus_common::clock::VirtualClock::new())),
+        Rc::clone(&cache),
+        None,
+    );
+    portfolio.initialize_orders();
+    let (_, row, triple) = margin_view(&cache);
+    assert_eq!(
+        row,
+        Some((Decimal::ZERO, Decimal::from(200))),
+        "initialize_orders clears the venue's initial margin: a zero rate computes zero"
+    );
+    assert_eq!(
+        triple,
+        (
+            Decimal::from(10_000),
+            Decimal::from(200),
+            Decimal::from(9_800)
+        ),
+        "and rewrites locked from the margins that remain, dropping the venue's 150 of \
+         unmargined hold along with the 100 initial"
+    );
+    portfolio.initialize_positions();
+    let (_, row, triple) = margin_view(&cache);
+    assert_eq!(
+        row, None,
+        "initialize_positions clears the maintenance margin too, and the empty row goes"
+    );
+    assert_eq!(
+        triple,
+        (Decimal::from(10_000), Decimal::ZERO, Decimal::from(10_000)),
+        "leaving nothing locked"
+    );
+
+    // The repair. The venue's state has moved on since connect, so a replay of
+    // the connect snapshot cannot pass for the fresh pull.
+    *state.account_body.lock().expect("account body mutex") =
+        Some(margin_account_json(30, "360", "9640"));
+    assert!(
+        sink_rx.try_recv().is_err(),
+        "nothing may be queued before mass status, or the repair below is not its doing"
+    );
+    client
+        .generate_mass_status(None)
+        .await
+        .expect("mass status generates")
+        .expect("mass status is served");
+    let event = sink_rx.try_recv().expect(
+        "generate_mass_status forwards a venue account snapshot before returning, so it is \
+         already queued; without it the initializers' clobber stands until the next push",
+    );
+    let ExecutionEvent::Account(account_state) = event else {
+        panic!("expected the re-seeded AccountState, got {event:?}");
+    };
+    assert_eq!(account_state.ts_event, UnixNanos::from(30));
+    portfolio.update_account(&account_state);
+    let (_, row, triple) = margin_view(&cache);
+    assert_eq!(row, Some((Decimal::from(100), Decimal::from(200))));
+    assert_eq!(
+        triple,
+        (
+            Decimal::from(10_000),
+            Decimal::from(360),
+            Decimal::from(9_640)
+        )
+    );
+}

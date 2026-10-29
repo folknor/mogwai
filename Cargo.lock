@@ -1669,6 +1669,7 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
+ "nautilus-portfolio",
  "rand 0.10.3",
  "rust_decimal",
  "serde",
@@ -1783,6 +1784,21 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nautilus-analysis"
+version = "0.67.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "614c4d8b9497f6e761f10899a9e209b2c5825537dcc24876ab44c40c1080d103"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "indexmap",
+ "log",
+ "nautilus-core",
+ "nautilus-model",
+ "rust_decimal",
 ]
 
 [[package]]
@@ -2003,6 +2019,26 @@ dependencies = [
  "url",
  "ustr",
  "webpki-roots 1.0.11",
+]
+
+[[package]]
+name = "nautilus-portfolio"
+version = "0.67.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f288f18b79ead043fa385b5e98bf1c233b7601ce2cb586e263ed7c1327953101"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bon",
+ "indexmap",
+ "log",
+ "nautilus-analysis",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-model",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
 ]
 
 [[package]]
