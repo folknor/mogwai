@@ -83,7 +83,7 @@ pub fn stat_print_excess(hour: i64) -> StatFn {
         let qr = ctx
             .b1_support("quote", Some(hour), None, None)
             .quantile(0.99, mult)?;
-        (qr != 0.0).then(|| tr / (qr / 2.0))
+        (qr != 0.0).then_some(tr / (qr / 2.0))
     })
 }
 
@@ -153,7 +153,7 @@ pub fn stat_boundary_excess(labels: Labels) -> StatFn {
         let qr = ctx
             .b1_support("quote", None, Some(labels), None)
             .quantile(0.99, mult)?;
-        (qr != 0.0).then(|| tr / (qr / 2.0))
+        (qr != 0.0).then_some(tr / (qr / 2.0))
     })
 }
 

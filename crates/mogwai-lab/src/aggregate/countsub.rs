@@ -236,7 +236,7 @@ pub fn count_substitution(
                 .map(|(b, w)| w * g_per.get(*b).copied().unwrap_or(0) as f64),
         );
         #[expect(clippy::cast_precision_loss, reason = "see above")]
-        let scale = (wsum > 0.0).then(|| g_total as f64 / wsum);
+        let scale = (wsum > 0.0).then_some(g_total as f64 / wsum);
         for (b, w) in &raw {
             w_per.insert((*b).to_string(), scale.map(|s| w * s));
         }
@@ -336,7 +336,7 @@ pub fn count_substitution(
         "refused_hours": refused_hours,
         "support_refusals": support_refusals.iter().map(RefusalRec::to_json).collect::<Vec<_>>(),
         "counterfactual_p999": super::jint(cf_p999),
-        "counterfactual_exceed_968": jnum((total_w > 0.0).then(|| exceed_w / total_w)),
+        "counterfactual_exceed_968": jnum((total_w > 0.0).then_some(exceed_w / total_w)),
     })
 }
 

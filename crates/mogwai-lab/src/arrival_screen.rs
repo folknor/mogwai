@@ -1276,12 +1276,12 @@ fn amended_rate_and_zero_gates(
     let observed = &ctx.observed_projection;
     let (observed_parents, observed_exposure) = level_parents_and_exposure(observed);
     let observed_rate =
-        (observed_exposure > 0).then(|| observed_parents / observed_exposure as f64);
+        (observed_exposure > 0).then_some(observed_parents / observed_exposure as f64);
     let mut level = Vec::with_capacity(walks.len());
     for walk in walks {
         let (generated_parents, generated_exposure) = level_parents_and_exposure(&walk.projection);
         let generated_rate =
-            (generated_exposure > 0).then(|| generated_parents / generated_exposure as f64);
+            (generated_exposure > 0).then_some(generated_parents / generated_exposure as f64);
         let ratio = match (generated_rate, observed_rate) {
             (Some(generated), Some(obs)) if obs > 0.0 => generated / obs,
             _ => f64::INFINITY,
@@ -1920,7 +1920,7 @@ fn composition_loss(observed: &CountMarginal, generated: &CountMarginal) -> LabR
         weighted += distance * n as f64;
         weight += n;
     }
-    Ok((weight > 0).then(|| weighted / weight as f64))
+    Ok((weight > 0).then_some(weighted / weight as f64))
 }
 
 #[cfg(test)]

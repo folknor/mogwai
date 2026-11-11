@@ -416,7 +416,7 @@ fn finish_block2_cell(p: &Block2Pool) -> Value {
     let total: i64 = p.count_hist.values().sum();
     let ssum: i64 = p.count_hist.iter().map(|(&k, &v)| k * v).sum();
     let ssq: i64 = p.count_hist.iter().map(|(&k, &v)| k * k * v).sum();
-    let mean = (total != 0).then(|| ssum as f64 / total as f64);
+    let mean = (total != 0).then_some(ssum as f64 / total as f64);
     let var = mean.map(|m| ssq as f64 / total as f64 - m * m);
     // `fano = var / mean if mean else None`: a zero mean is falsey in the
     // Python, so an all-zero cell refuses rather than dividing.
