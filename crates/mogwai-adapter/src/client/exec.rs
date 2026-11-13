@@ -1815,24 +1815,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
         let snapshot = self.venue_query().fill_history(None).await?;
-        let ts_init = now_unix_nanos(self.sim);
-        let reports = snapshot
-            .fills
-            .iter()
-            .filter(|fill| {
-                cmd.instrument_id
-                    .is_none_or(|id| symbol_from_instrument(id) == fill.symbol)
-            })
-            .filter(|fill| {
-                cmd.venue_order_id
-                    .is_none_or(|id| fill.venue_order_id == id.as_str())
-            })
-            .filter(|fill| in_time_range(UnixNanos::from(fill.ts_event), cmd.start, cmd.end))
-            .filter_map(|fill| {
-                fill_report_from_wire(fill, &self.instruments, self.core.account_id, ts_init)
-            })
-            .collect();
-        Ok(reports)
+        Ok(self.fill_reports_from_snapshot(&snapshot, &cmd))
     }
 
     /// Position status reports from venue truth, completing the set alongside
@@ -1973,18 +1956,11 @@ impl ExecutionClient for MogwaiExecutionClient {
                     .saturating_sub(mins.saturating_mul(60 * crate::clock::NANOS_PER_SEC)),
             )
         });
-        let order_reports = self
-            .generate_order_status_reports(&GenerateOrderStatusReports::new(
-                UUID4::new(),
-                ts_init,
-                true,
-                None,
-                start,
-                None,
-                None,
-                None,
-            ))
-            .await?;
+        // Orders, fills and positions come from one fill-quiet bracket, not
+        // three independent reads: a skew between them is void evidence to
+        // nautilus 0.68. See `mass_status_bracket`.
+        let (order_reports, fill_history, position_reports) =
+            self.mass_status_bracket(start).await?;
         let open_venue_order_ids: std::collections::HashSet<_> = order_reports
             .iter()
             .map(|report| report.venue_order_id)
@@ -1998,34 +1974,25 @@ impl ExecutionClient for MogwaiExecutionClient {
         // order; appending the older ones after the recent ones would hand
         // nautilus a group it has to re-sort.
         let fill_reports: Vec<_> = self
-            .generate_fill_reports(GenerateFillReports::new(
-                UUID4::new(),
-                ts_init,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ))
-            .await?
+            .fill_reports_from_snapshot(
+                &fill_history,
+                &GenerateFillReports::new(
+                    UUID4::new(),
+                    ts_init,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
             .into_iter()
             .filter(|report| {
                 open_venue_order_ids.contains(&report.venue_order_id)
                     || in_time_range(report.ts_event, start, None)
             })
             .collect();
-        let position_reports = self
-            .generate_position_status_reports(&GeneratePositionStatusReports::new(
-                UUID4::new(),
-                ts_init,
-                None,
-                start,
-                None,
-                None,
-                None,
-            ))
-            .await?;
 
         let mut mass_status = ExecutionMassStatus::new(
             self.core.client_id,
@@ -2048,6 +2015,128 @@ impl ExecutionClient for MogwaiExecutionClient {
         // `startup_initializers_keep_the_venue_reported_margin` pins that
         // upstream behaviour; a pin that brings the clobber back fails there.
         Ok(Some(mass_status))
+    }
+}
+
+impl MogwaiExecutionClient {
+    /// Number of attempts `generate_mass_status` makes at a fill-quiet
+    /// bracket before failing the mass status rather than publishing a skewed
+    /// one. See `mass_status_bracket` for why the bracket exists.
+    const MASS_STATUS_BRACKET_ATTEMPTS: usize = 8;
+
+    /// The conversion half of `generate_fill_reports`, split out so mass status
+    /// can convert the fill history its bracket already holds rather than
+    /// asking the venue a fifth time.
+    fn fill_reports_from_snapshot(
+        &self,
+        snapshot: &FillSnapshot,
+        cmd: &GenerateFillReports,
+    ) -> Vec<FillReport> {
+        let ts_init = now_unix_nanos(self.sim);
+        snapshot
+            .fills
+            .iter()
+            .filter(|fill| {
+                cmd.instrument_id
+                    .is_none_or(|id| symbol_from_instrument(id) == fill.symbol)
+            })
+            .filter(|fill| {
+                cmd.venue_order_id
+                    .is_none_or(|id| fill.venue_order_id == id.as_str())
+            })
+            .filter(|fill| in_time_range(UnixNanos::from(fill.ts_event), cmd.start, cmd.end))
+            .filter_map(|fill| {
+                fill_report_from_wire(fill, &self.instruments, self.core.account_id, ts_init)
+            })
+            .collect()
+    }
+
+    /// One fill-quiet read of open orders, positions and the full fill
+    /// history, for mass status.
+    ///
+    /// Mass status is reconciled by nautilus as an authoritative snapshot, and
+    /// since 0.68 a snapshot whose order report states less cumulative
+    /// quantity than its companion fills project is read as void evidence:
+    /// the live manager emits an `OrderFillVoided` that reverses the excess
+    /// out of the order and the position. The three venue reads are separate
+    /// requests, so a fill booking between the order read and the fill read
+    /// would hand nautilus exactly that shape for a fill that is genuine, and
+    /// it would void it at startup. A fill between the fill read and the
+    /// position read skews the other way, toward exposure nautilus explains
+    /// with synthetic history. The venue never takes a fill back, so every
+    /// void nautilus derived from such a skew would be false.
+    ///
+    /// The bracket reads fills, then orders, then positions, then fills again,
+    /// and accepts only when the two fill reads name the same trades in the
+    /// same order. The venue's fill store is append-only and unbounded, its
+    /// query rows are scoped to the account (so a co-tenant connection's fills
+    /// are inside the comparison), and a position quantity moves only through
+    /// a booked fill - a liquidation is a venue order that books one; funding,
+    /// expiry and settlement move cash, marks or the average, never the
+    /// quantity. Equal reads therefore mean no cumulative filled quantity and
+    /// no position quantity moved inside the window. A moved read retries,
+    /// and a bracket that never goes quiet fails the mass status loudly
+    /// rather than publishing evidence nautilus would void a real fill from.
+    /// It does not freeze the other fields: a cancel, an amend, a mark or a
+    /// settlement inside the window still lands, and none of them is void
+    /// evidence.
+    async fn mass_status_bracket(
+        &self,
+        start: Option<UnixNanos>,
+    ) -> anyhow::Result<(
+        Vec<OrderStatusReport>,
+        FillSnapshot,
+        Vec<PositionStatusReport>,
+    )> {
+        let query = self.venue_query();
+        let trades = |snapshot: &FillSnapshot| {
+            snapshot
+                .fills
+                .iter()
+                .map(|fill| fill.trade_id.clone())
+                .collect::<Vec<_>>()
+        };
+        for attempt in 1..=Self::MASS_STATUS_BRACKET_ATTEMPTS {
+            let before = query.fill_history(None).await?;
+            let order_reports = self
+                .generate_order_status_reports(&GenerateOrderStatusReports::new(
+                    UUID4::new(),
+                    now_unix_nanos(self.sim),
+                    true,
+                    None,
+                    start,
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+            let position_reports = self
+                .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                    UUID4::new(),
+                    now_unix_nanos(self.sim),
+                    None,
+                    start,
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+            let after = query.fill_history(None).await?;
+            if trades(&before) == trades(&after) {
+                return Ok((order_reports, after, position_reports));
+            }
+            tracing::warn!(
+                attempt,
+                before = before.fills.len(),
+                after = after.fills.len(),
+                "mass status bracket saw fills book mid-read; retrying"
+            );
+        }
+        anyhow::bail!(
+            "mass status: fills kept booking across {} bracket attempts; refusing a \
+             skewed snapshot nautilus would read as void evidence",
+            Self::MASS_STATUS_BRACKET_ATTEMPTS
+        )
     }
 }
 

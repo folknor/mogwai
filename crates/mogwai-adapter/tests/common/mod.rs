@@ -390,6 +390,12 @@ pub struct StubState {
     pub venue_orders: Mutex<Vec<OrderStatusInfo>>,
     /// Venue-truth fill rows returned to reconciliation queries.
     pub venue_fills: Mutex<Vec<OrderFilled>>,
+    /// Fills that book just after the next order queries are answered, one per
+    /// query, front first: each is appended to `venue_fills` and its
+    /// `last_qty` added to the matching row's `filled_qty`. Models a resting
+    /// order filling between two reads of one reconciliation, which is the
+    /// skew the adapter's mass-status bracket exists to refuse.
+    pub fills_booking_after_order_query: Mutex<std::collections::VecDeque<OrderFilled>>,
     /// Number of venue-truth order queries served over either transport.
     pub order_queries: AtomicUsize,
     /// Number of venue-truth fill queries served over either transport.
@@ -1327,6 +1333,27 @@ pub fn venue_query_reply(message: &Command, state: &StubState) -> Option<VenueMe
                 })
                 .cloned()
                 .collect();
+            let booked = state
+                .fills_booking_after_order_query
+                .lock()
+                .expect("booking fills mutex")
+                .pop_front();
+            if let Some(fill) = booked {
+                if let Some(row) = state
+                    .venue_orders
+                    .lock()
+                    .expect("venue orders mutex")
+                    .iter_mut()
+                    .find(|row| row.venue_order_id == fill.venue_order_id)
+                {
+                    row.filled_qty += fill.last_qty;
+                }
+                state
+                    .venue_fills
+                    .lock()
+                    .expect("venue fills mutex")
+                    .push(fill);
+            }
             Some(VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
                 request_id: request_id.clone(),
                 orders,

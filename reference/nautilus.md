@@ -322,6 +322,26 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    It is pushed onto a path built only for synthesized fills all the same. The
    rule stands because a truthful label costs nothing and a false one is
    unrecoverable downstream; the adapter sets it false on every venue fill.
+9. **The adapter never voids a fill, and mass status must not imply one.**
+   Verified at 0.68. Nautilus can take back an applied fill with
+   `OrderFillVoided`, ending a fully filled order in `OrderStatus::Voided`. The
+   mogwai venue never takes a fill back - the wire has no void, bust or
+   correction, and `WireOrderStatus` maps one to one onto non-void statuses -
+   so the adapter neither emits the event nor maps any status to `Voided`.
+   A bust divergence that would exercise the path is unbuilt work.
+
+   The live manager also derives voids on its own. A snapshot reconciliation,
+   which is what startup mass status is, reads an order report stating less
+   cumulative quantity than its companion fills project as void evidence and
+   reverses the excess out of the order and the position. Continuous checks
+   (the targeted order query, the periodic open-order check) never reverse a
+   fill. So the mass status the adapter returns must be internally coherent:
+   it reads fills, open orders, positions and fills again, accepts only when
+   the two fill reads match, retries otherwise, and fails loudly when fills
+   never stop booking. Pinned by the reconciliation test
+   `mass_status_never_reports_an_order_behind_its_fills`. A wire
+   `DuplicateNextFill` repeats a trade id and is deduplicated by nautilus at
+   order level; it never reaches the void path.
 
 ## The live inbound channel is closed
 

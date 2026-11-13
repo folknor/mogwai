@@ -1921,10 +1921,13 @@ impl Run {
         }
     }
 
-    /// Drop the rows of a query reply that belong to another connection.
+    /// Drop the rows of a query reply that belong to another account.
     ///
     /// The engine answers `QueryOrders` and `QueryFills` from one book, because
-    /// there is one ledger; scoping happens here, where the connection is known.
+    /// there is one ledger; scoping happens here, where the asking account is
+    /// known. `owner` is an account id, not a connection: a second socket on
+    /// the same account sees every row the first booked, which the adapter's
+    /// mass-status bracket relies on to see a co-tenant's fills.
     /// A row for an unclaimed order stays, on the same rule the delivery filter
     /// uses - better a stray row than a missing one - and, like that filter's
     /// broadcast arm, it is a defensive fallback rather than a class of order:

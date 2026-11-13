@@ -160,6 +160,16 @@ spec is deleted.
   call site. Recorded here so the next reader meets it as a known state rather
   than as a venue that refuses to fill anything.
 
+- **`serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path` fails
+  intermittently under the parallel gate.** Seen 2026-11-14 in one
+  `brokkr check --gate` run: "a market sell filled above every bid it could
+  have crossed: 59888.16 > 59888.06". It passed five isolated runs straight
+  after, and the change under test touched only the adapter's mass status and
+  a venue comment. The ceiling is a bid set read back from
+  `/operator/quotes` around the acceptance instant, so the likely shape is the
+  reading and the bracket disagreeing on which quote stood when wall time
+  stretches under load; not diagnosed.
+
 ## Tape research v2
 
 Several parked items are waiting on one thing: what tape research v2 turns out
@@ -704,7 +714,14 @@ classes.
   what the engine's own book and ledger must do (a bust is a venue event, not
   a cancel, and must reverse the fill's cash and position effect). Needs the
   void's consequences on netting and hedging positions read in the execution
-  engine before the wire shape is chosen.
+  engine before the wire shape is chosen. Read at 0.68 for the wire shape:
+  an adapter-emitted `OrderFillVoided` must name a fill nautilus already
+  applied (trade id, side, price and quantity must match) and carries a
+  correction id plus cumulative voided quantity and commission, so the wire
+  void needs the original fill's economics or the adapter must keep them. The
+  other route, a mass-status order report with a lower `filled_qty` or a
+  `Voided` status, voids only at startup snapshot reconciliation, never on a
+  continuous check, so it cannot carry a mid-run bust.
 
 - A zero-price fill is still warned about and booked by `warn_zero_px`, so a
   position can carry `mark_px == 0` if the tape produces one.

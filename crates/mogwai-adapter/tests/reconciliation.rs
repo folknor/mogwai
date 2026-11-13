@@ -197,6 +197,50 @@ async fn mass_status_pairs_an_open_orders_fill_outside_the_lookback() {
     );
 }
 
+/// A fill booking between mass status's reads must not reach nautilus as an
+/// order report behind its own fills. Since nautilus 0.68 a snapshot whose
+/// order report states less cumulative quantity than its companion fills is
+/// void evidence, and startup reconciliation would emit an `OrderFillVoided`
+/// for a fill the venue never took back. The stub books T-2 on the open
+/// order right after the first order read; the old single pass paired the
+/// stale filled quantity of 1 with fills totalling 2.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn mass_status_never_reports_an_order_behind_its_fills() {
+    let fixture = fixture().await;
+    fixture
+        .state
+        .fills_booking_after_order_query
+        .lock()
+        .expect("booking fills mutex")
+        .push_back(venue_fill_row("O-1", "V-1", "T-2", Decimal::ONE, 13));
+    let mass = fixture
+        .client
+        .generate_mass_status(None)
+        .await
+        .expect("mass status generates")
+        .expect("mass status is served");
+    let orders = mass.order_reports();
+    let order = orders
+        .get(&VenueOrderId::from("V-1"))
+        .expect("the open order is reported");
+    let all_fills = mass.fill_reports();
+    let fills = all_fills
+        .get(&VenueOrderId::from("V-1"))
+        .expect("its fills are reported");
+    let fill_total: Decimal = fills.iter().map(|f| f.last_qty.as_decimal()).sum();
+    assert_eq!(
+        order.filled_qty.as_decimal(),
+        fill_total,
+        "order report filled_qty disagrees with its fills: nautilus would void the excess"
+    );
+    assert_eq!(
+        fill_total,
+        Decimal::from(2),
+        "the booked fill is kept, not trimmed"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn connecting_twice_replaces_the_execution_socket() {
