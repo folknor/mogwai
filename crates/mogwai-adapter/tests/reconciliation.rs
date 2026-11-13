@@ -674,25 +674,23 @@ fn margin_view(
     (account, row, triple)
 }
 
-/// The startup clobber, and the adapter's repair of it, against the real
-/// published nautilus portfolio.
+/// The node's startup initializers leave a venue-reported margin account as
+/// the venue reported it, against the real published nautilus portfolio.
 ///
 /// After reconciling a mass status, a live node runs
-/// `Portfolio::initialize_orders` and `initialize_positions`. On a margin
-/// account those recompute margin from the instrument's rates, which `convert`
-/// leaves at zero, and clear what the venue reported. The first half of this
-/// test pins that upstream behaviour at the pinned release, step by step, so a
-/// nautilus that stops doing it fails here and the repair can be reconsidered.
-/// The second half is the repair: `generate_mass_status` forwards a fresh venue
-/// snapshot, which the node applies after the initializers.
-///
-/// What this cannot show is the node's ordering - that nothing drains the exec
-/// channel between mass status and the initializers - nor that admission and
-/// enqueue stay ordered against a concurrent push. Both are argued from source
-/// at `generate_mass_status` and `handle_account_state`.
+/// `Portfolio::initialize_orders` and `initialize_positions`. Through nautilus
+/// 0.67 those recomputed a margin account's margin from the instrument's
+/// rates, which `convert` leaves at zero, clearing the venue's rows and
+/// rewriting `locked`, and `generate_mass_status` forwarded a fresh snapshot
+/// to repair it. Since 0.68 both skip a cash or margin account whose
+/// `calculate_account_state` is false, and the repair is gone. This pins that
+/// upstream behaviour for a margin account, with an open order and an open
+/// position, so a pin that brings the clobber back fails here and the repair
+/// is owed again. Wallet and betting accounts still recompute at startup and
+/// are not covered.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn mass_status_repairs_the_margin_the_startup_initializers_clear() {
+async fn startup_initializers_keep_the_venue_reported_margin() {
     use nautilus_model::{accounts::Account, instruments::Instrument};
 
     let state = Arc::new(StubState::default());
@@ -897,65 +895,35 @@ async fn mass_status_repairs_the_margin_the_startup_initializers_clear() {
         Rc::clone(&cache),
         None,
     );
+    // The venue's 350 locked is 100 initial plus 200 maintenance plus 150 of
+    // hold with no margin row, so a recompute from zero rates would move both
+    // the row and the triple.
+    let reported_row = Some((Decimal::from(100), Decimal::from(200)));
+    let reported_triple = (
+        Decimal::from(10_000),
+        Decimal::from(350),
+        Decimal::from(9_650),
+    );
     portfolio.initialize_orders();
     let (_, row, triple) = margin_view(&cache);
     assert_eq!(
-        row,
-        Some((Decimal::ZERO, Decimal::from(200))),
-        "initialize_orders clears the venue's initial margin: a zero rate computes zero"
+        row, reported_row,
+        "initialize_orders left the venue's margin row alone; a recompute at zero rates \
+         would clear the initial margin, and the mass-status repair would be owed again"
     );
     assert_eq!(
-        triple,
-        (
-            Decimal::from(10_000),
-            Decimal::from(200),
-            Decimal::from(9_800)
-        ),
-        "and rewrites locked from the margins that remain, dropping the venue's 150 of \
-         unmargined hold along with the 100 initial"
+        triple, reported_triple,
+        "initialize_orders left the venue's locked alone, unmargined hold included"
     );
     portfolio.initialize_positions();
     let (_, row, triple) = margin_view(&cache);
     assert_eq!(
-        row, None,
-        "initialize_positions clears the maintenance margin too, and the empty row goes"
+        row, reported_row,
+        "initialize_positions left the venue's margin row alone; a recompute at zero rates \
+         would clear the maintenance margin, and the mass-status repair would be owed again"
     );
     assert_eq!(
-        triple,
-        (Decimal::from(10_000), Decimal::ZERO, Decimal::from(10_000)),
-        "leaving nothing locked"
-    );
-
-    // The repair. The venue's state has moved on since connect, so a replay of
-    // the connect snapshot cannot pass for the fresh pull.
-    *state.account_body.lock().expect("account body mutex") =
-        Some(margin_account_json(30, "360", "9640"));
-    assert!(
-        sink_rx.try_recv().is_err(),
-        "nothing may be queued before mass status, or the repair below is not its doing"
-    );
-    client
-        .generate_mass_status(None)
-        .await
-        .expect("mass status generates")
-        .expect("mass status is served");
-    let event = sink_rx.try_recv().expect(
-        "generate_mass_status forwards a venue account snapshot before returning, so it is \
-         already queued; without it the initializers' clobber stands until the next push",
-    );
-    let ExecutionEvent::Account(account_state) = event else {
-        panic!("expected the re-seeded AccountState, got {event:?}");
-    };
-    assert_eq!(account_state.ts_event, UnixNanos::from(30));
-    portfolio.update_account(&account_state);
-    let (_, row, triple) = margin_view(&cache);
-    assert_eq!(row, Some((Decimal::from(100), Decimal::from(200))));
-    assert_eq!(
-        triple,
-        (
-            Decimal::from(10_000),
-            Decimal::from(360),
-            Decimal::from(9_640)
-        )
+        triple, reported_triple,
+        "initialize_positions left the venue's locked alone, unmargined hold included"
     );
 }

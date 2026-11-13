@@ -311,9 +311,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.20.3"
+version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 
 [[package]]
 name = "bytecount"
@@ -344,9 +344,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -848,9 +848,9 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1414,9 +1414,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fefca06093eeaed707a905795e68206da0edca4edef23d2a3997a3ddbee462aa"
+checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -1429,18 +1429,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a24020db0ee88d1c681d677681bd31f9f4ea189a455425223d52ce4f1508aa"
+checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d3213549742662eea1a18e6c5af9be5dfbabeb7611ab71356a54928ec398f0"
+checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -1615,9 +1615,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+checksum = "20521a903f02b0a573cd6840e9d0a5a0cc043d361fe924092cd70f8556cc9c4a"
 dependencies = [
  "libc",
  "wasi",
@@ -1758,9 +1758,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-analysis"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "614c4d8b9497f6e761f10899a9e209b2c5825537dcc24876ab44c40c1080d103"
+checksum = "bc1db58e80245694ad5e785cfae674eb7fcb96617e1e3530fc043b08c3818fa4"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1773,9 +1773,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-common"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dda666fb366242b24c157935e971d88f89fae8d697d8ad4072e3102d1a377758"
+checksum = "196149e6ed7e561f737e0e1be006849ce883d4ef0ba9d2a687660a8a4950552b"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1807,9 +1807,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-core"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "775708553c018c387db6732dac8420daf35dee452aef51e1a58dc68d7eba4e3d"
+checksum = "bdcacefc1487a9ad39e18c6338d50c587129883fa455d312ee2c9878379683ec"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1832,9 +1832,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-cryptography"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6350d121f7a45929f43f77aae45f2677b49ff6a0dd35b1b356240f69df0b917f"
+checksum = "3d85d1efaed3259a2adb0efb90c6099c08791b33d1a29fe8cd9f88fce9e7162f"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -1849,9 +1849,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-execution"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4540fdc0290e044cc750908cf8ec2dae7ea2d02fed8b0ea7ea1e48cafdb3cc63"
+checksum = "7ea5c4f65f4752b5ecad5edf5acebf79242cb3b362bbb2a3a740b40ef64db91d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1869,15 +1869,16 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "smallvec",
+ "thiserror",
  "ustr",
  "uuid",
 ]
 
 [[package]]
 name = "nautilus-live"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9e8e0d9d4ae4454f36c77b7e520da949a348a1c33c4c5b452332579c13d5fc9"
+checksum = "13813072a5df1cbe21f4f3c52aefc117dba145a98a3e00fd7caf929099547cc0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1904,9 +1905,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-macros"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f412be5e34aa7a8f6552e38504e32dcfaea6666049db399e48da72ff4894b7b"
+checksum = "eab3d315de2ecac2dfd4668ae2efcdb18adc34427be1a9efd7d1d11aba042b23"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1915,9 +1916,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-model"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7913dea63c571134f82fad4c9ef92f4f543d2d025c98ad7f611de232a5c5c7a5"
+checksum = "19a9297c57e5de4aa1713c1b7144921bec5c60708a8de822db6a69b2ed1bfec6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1946,9 +1947,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-network"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "123533a2b057315b497a4f61d3ef8260de4aea9bed6cd30dc88eddce095f922a"
+checksum = "ff23971f90c19711b1b689ab236e39251a632b4f26ac2d3337e813392d9bb63b"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1993,9 +1994,9 @@ dependencies = [
 
 [[package]]
 name = "nautilus-portfolio"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f288f18b79ead043fa385b5e98bf1c233b7601ce2cb586e263ed7c1327953101"
+checksum = "fb235e388cf67d0a3d756ecb12aea73aa1c3555ea6b575a2ac3f5451a3870917"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2629,9 +2630,9 @@ checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -2970,9 +2971,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.39.6"
+version = "0.40.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+checksum = "a86bac2f7d06e6384984118ad727f5694110f0ec44d924d05c8fdec3d030bee6"
 dependencies = [
  "libc",
  "memchr",
@@ -3995,9 +3996,9 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zrip"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7c1117cf6f78d4fbb2078222ba36e6ebd436cf8854f4863ad84c4446518b6c"
+checksum = "415dbf772f67454d879e807d0b60a6eee55df91dd8ba66132317e764aa03569e"
 dependencies = [
  "zrip-core",
  "zrip-decode",
@@ -4022,9 +4023,9 @@ dependencies = [
 
 [[package]]
 name = "zrip-encode"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee3a9230911c8b514240431526790abf93116443e359fe52d2907640e486dd3d"
+checksum = "cdff0f7a354653eb02a84564a373db124c14e73c86ebba8ad601290a17d25f23"
 dependencies = [
  "fearless_simd",
  "zrip-core",
