@@ -1190,9 +1190,14 @@ async fn run_writer(
                 // its market intake outright, mirroring the wound-down-boat arm
                 // below: the socket may still owe execution output and its
                 // terminal frame, but no market frame outside the window may
-                // cross - a named run is a pure function of seed, config,
-                // symbol, start and end, and a frame past the end would put
-                // the timer's wakeup latency into that observable.
+                // cross - which frames a named run is eligible to deliver is a
+                // pure function of seed, config, symbol, start and end, and a
+                // frame past the end would put the timer's wakeup latency into
+                // that set. Delivery of the eligible frames is not promised
+                // complete: the tape's start gate attaches the boat's first
+                // subscriber before its first pull, a joiner rides from where
+                // it boards, and broadcast lag this writer observes is
+                // declared as `FeedLagged`.
                 if past_end(&frame) {
                     tape_open = false;
                     if writer.settle_pending(&mut sink).await.is_err() {

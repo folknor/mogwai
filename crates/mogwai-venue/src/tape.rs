@@ -9,7 +9,7 @@ use mogwai_protocol::{FundingTerms, SimClock, Symbol, VenueMessage};
 use rust_decimal::Decimal;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -30,6 +30,58 @@ pub(crate) struct Tape {
     cancel: Arc<AtomicBool>,
     alive: AtomicBool,
     fault: Mutex<Option<TickFault>>,
+    start: StartGate,
+}
+
+/// The one-shot gate the tape thread waits on before it pulls its first
+/// record, opened by the first `subscribe_with_snapshot`.
+///
+/// A broadcast receiver never sees what was sent before it existed, and a
+/// boat is placed by the upgrade handler a wall round trip before its socket
+/// subscribes. Without the gate an unpaced boat consumed and published into an
+/// empty channel for that whole gap, so a named window at speed zero lost its
+/// opening frames - typically all of them - to wall-clock latency, which is
+/// exactly the input a named window exists to remove. What the gate promises
+/// is narrow: the boat's first subscriber is attached before the worker pulls
+/// anything. A joiner subscribing after that joins mid-stream, which is what
+/// sharing a hull means, and a paced boat keeps its placement clock, so a late
+/// first subscriber receives the overdue span as a catch-up burst rather than
+/// a re-anchored clock. Loss after subscription is the ring's to declare.
+///
+/// One-shot on purpose: re-arming it whenever the receiver count fell to zero
+/// would let subscriber churn decide when a shared boat advances.
+#[derive(Default)]
+struct StartGate {
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl StartGate {
+    fn open(&self) {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*open {
+            *open = true;
+            self.opened.notify_all();
+        }
+    }
+
+    /// Block until opened, returning false if `cancel` was raised first. Polled
+    /// on the tape's cancel slice, so a boat whose passengers all left before
+    /// any of them subscribed still winds down when its last ticket drops.
+    fn wait(&self, cancel: &AtomicBool) -> bool {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*open {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            open = self
+                .opened
+                .wait_timeout(open, TAPE_SLEEP_POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
 }
 pub(crate) struct TapeSpawn {
     pub(crate) sim: SimClock,
@@ -74,9 +126,14 @@ impl Tape {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             fault: Mutex::new(None),
+            start: StartGate::default(),
         });
         let worker = Arc::clone(&tape);
         let handle = thread::spawn(move || {
+            if !worker.start.wait(&worker.cancel) {
+                worker.alive.store(false, Ordering::Release);
+                return;
+            }
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
             // This thread's own running extremes. Stack-local on purpose: the
@@ -200,6 +257,9 @@ impl Tape {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let receiver = self.tx.subscribe();
+        // Opened only once the receiver exists, so the first subscriber is
+        // attached before the worker's first pull. See `StartGate`.
+        self.start.open();
         after_subscribe();
         let mut snapshots: Vec<_> = [quote.clone(), funding.clone()]
             .into_iter()
@@ -406,6 +466,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             fault: Mutex::new(None),
+            start: StartGate::default(),
         });
         tape.publish(
             TapeFrame {
@@ -459,6 +520,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             fault: Mutex::new(None),
+            start: StartGate::default(),
         };
         tape.publish(
             TapeFrame {
@@ -531,6 +593,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             fault: Mutex::new(None),
+            start: StartGate::default(),
         };
         tape.publish_funding(TapeFrame {
             payload: Arc::from("funding"),
@@ -561,6 +624,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             fault: Mutex::new(None),
+            start: StartGate::default(),
         };
         let (_, snapshots) = tape.subscribe_with_snapshot();
         assert!(snapshots.is_empty());
@@ -584,28 +648,6 @@ mod funding_emission_tests {
     const INDEX_INTERVAL: u64 = 60_000_000_000;
     const SYMBOL: &str = "BTCUSDT";
     const INDEX_SYMBOL: &str = "SECOND";
-
-    /// A source that will not yield its first tick until the test has attached
-    /// a receiver. Without it the tape thread can drain and exit before
-    /// `subscribe` runs, and a broadcast receiver never sees what was sent
-    /// before it existed - so the test would pass or fail on a race.
-    struct GatedSource {
-        gate: Option<std::sync::mpsc::Receiver<()>>,
-        inner: MemoryRiver,
-    }
-
-    impl RiverSource for GatedSource {
-        fn scale(&self) -> &RecordScale {
-            self.inner.scale()
-        }
-
-        fn next_record(&mut self) -> Option<Record> {
-            if let Some(gate) = self.gate.take() {
-                let _opened = gate.recv();
-            }
-            self.inner.next_record()
-        }
-    }
 
     /// Whole-unit prices and sizes, so `price` below is the decimal it reads as.
     fn scale() -> RecordScale {
@@ -697,13 +739,8 @@ mod funding_emission_tests {
         sim_now_ns: u64,
     ) -> Vec<VenueMessage> {
         let (fault_tx, _fault_rx) = mpsc::channel();
-        let (open, gate) = std::sync::mpsc::channel();
-        let cursor = GatedSource {
-            gate: Some(gate),
-            inner: MemoryRiver::new(scale(), ticks),
-        };
         let (tape, handle) = Tape::start(
-            Box::new(cursor),
+            Box::new(MemoryRiver::new(scale(), ticks)),
             TapeSpawn {
                 // Speed zero pins the clock at `sim_epoch_ns`, so the
                 // exhaustion flush reads exactly what the test asked for
@@ -721,8 +758,11 @@ mod funding_emission_tests {
                 funding,
             },
         );
-        let mut receiver = tape.tx.subscribe();
-        let _opened = open.send(());
+        // The production start gate is what makes this race-free: the worker
+        // pulls nothing until this subscription exists, so the thread cannot
+        // drain and exit into an empty channel first.
+        let (mut receiver, snapshots) = tape.subscribe_with_snapshot();
+        assert!(snapshots.is_empty(), "nothing is published before the gate");
         handle.join().expect("tape thread");
         let mut published = Vec::new();
         while let Ok(frame) = receiver.try_recv() {
@@ -740,6 +780,87 @@ mod funding_emission_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A source that reports each pull on a channel, so the tests below observe
+    /// the worker's consumption directly rather than inferring it from output.
+    struct ReportingSource {
+        pulled: mpsc::Sender<()>,
+        inner: MemoryRiver,
+    }
+
+    impl RiverSource for ReportingSource {
+        fn scale(&self) -> &RecordScale {
+            self.inner.scale()
+        }
+
+        fn next_record(&mut self) -> Option<Record> {
+            let _reported = self.pulled.send(());
+            self.inner.next_record()
+        }
+    }
+
+    fn unpaced_spawn() -> TapeSpawn {
+        let (fault_tx, _fault_rx) = mpsc::channel();
+        TapeSpawn {
+            sim: SimClock {
+                sim_epoch_ns: 0,
+                wall_anchor_ns: 0,
+                speed: 0.0,
+            },
+            speed: 0.0,
+            fanout_depth: 256,
+            fault_tx,
+            extremes: Arc::new(crate::extremes::PriceExtremes::default()),
+            vol_window: Arc::new(crate::vol_window::VolWindow::starting_at(0, scale())),
+            funding: None,
+        }
+    }
+
+    /// The start gate's contract: an unpaced worker pulls nothing until its
+    /// first subscriber exists, and that subscriber then sees the first frame.
+    /// The quarter second is a negative-observation window on an unpaced
+    /// thread that, ungated, pulls its first record in microseconds.
+    #[test]
+    fn an_unpaced_tape_pulls_nothing_before_its_first_subscriber() {
+        let (pulled_tx, pulled) = mpsc::channel();
+        let (tape, handle) = Tape::start(
+            Box::new(ReportingSource {
+                pulled: pulled_tx,
+                inner: MemoryRiver::new(scale(), vec![trade(100, 1), trade(101, 2)]),
+            }),
+            unpaced_spawn(),
+        );
+        assert!(
+            pulled.recv_timeout(Duration::from_millis(250)).is_err(),
+            "the worker consumed its source before anyone subscribed"
+        );
+        let (mut receiver, _) = tape.subscribe_with_snapshot();
+        handle.join().expect("tape thread");
+        let first = receiver
+            .try_recv()
+            .expect("the first frame reached the first subscriber");
+        assert_eq!(first.ts_event, 1);
+    }
+
+    /// A boat whose passengers all leave before any of them subscribes must
+    /// still wind down, or its parked worker would outlive every ticket.
+    #[test]
+    fn a_cancelled_tape_exits_without_ever_being_subscribed() {
+        let (pulled_tx, pulled) = mpsc::channel();
+        let (tape, handle) = Tape::start(
+            Box::new(ReportingSource {
+                pulled: pulled_tx,
+                inner: MemoryRiver::new(scale(), vec![trade(100, 1)]),
+            }),
+            unpaced_spawn(),
+        );
+        tape.cancel_flag().store(true, Ordering::Release);
+        handle.join().expect("the cancelled worker exits");
+        assert!(
+            pulled.try_recv().is_err(),
+            "a cancelled worker pulled a record"
+        );
     }
 
     #[test]

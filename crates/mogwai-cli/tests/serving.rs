@@ -2634,20 +2634,47 @@ async fn an_armed_divergence_reaches_every_connection() {
 /// span its trigger waits on, and the venue would be accepting orders it can
 /// never execute.
 ///
-/// Its premise is not enforced by construction and is asserted rather than
-/// assumed: the limit is placed 2.01 below the last historical print, and if
-/// the market falls that far between reading the anchor and the submit landing
-/// the order is marketable on arrival and never rests at all. That is a lost
-/// bet on sim-time drift, not a defect in the sweep, and the liquidity side on
-/// the fill is what tells the two apart.
+/// Its premise - that the order rests at all - cannot be enforced by
+/// construction: the limit is placed 2.01 below the last historical print, and
+/// at speed 100 the market routinely falls that far in the sim seconds between
+/// reading the anchor and the submit landing. So the order is post-only, and
+/// the venue itself names a lost bet by rejecting it as marketable before
+/// accepting anything. Only that rejection is retried, from a fresh anchor and
+/// under a fresh id; an accepted attempt then has to be swept as a Maker, and a
+/// Taker fill fails outright rather than being read as one more lost bet,
+/// which is what kept a mislabelled sweep fill from hiding behind the retry.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_banded_limit_fills_from_the_run_sweep() {
+    const ATTEMPTS: u32 = 20;
     let venue = spawn(&["--config", &band_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open the order socket");
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    for attempt in 1..=ATTEMPTS {
+        let client_order_id = format!("BAND-{attempt}");
+        if banded_attempt_rested_and_filled(&venue, &mut socket, &client_order_id, deadline).await {
+            return;
+        }
+    }
+    panic!(
+        "every one of {ATTEMPTS} post-only limits placed 2.01 under the anchor print was \
+         marketable on arrival, so none rested for the sweep to find"
+    );
+}
 
+/// One post-only attempt. False means the venue refused it as marketable - the
+/// lost bet, and the only outcome the caller retries. Anything else either
+/// proves the sweep property or panics.
+async fn banded_attempt_rested_and_filled(
+    venue: &common::Venue,
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    client_order_id: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
     let (_, clock_body) = http_get(&venue.http_base(), "/clock");
     let clock: serde_json::Value = serde_json::from_str(&clock_body).expect("clock");
     let sim_now = clock["venue_now_ns"].as_u64().expect("sim now");
@@ -2662,7 +2689,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     let trades: Vec<TradeTick> = serde_json::from_str(&trades_body).expect("anchor trades");
     let price = trades.last().expect("anchor print").price - rust_decimal::Decimal::new(201, 2);
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"{price}","time_in_force":"Gtc"}}"#,
+        r#"{{"type":"SubmitOrder","client_order_id":"{client_order_id}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"1","price":"{price}","time_in_force":"Gtc","post_only":true}}"#,
         venue.symbol,
     );
     socket
@@ -2670,7 +2697,6 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
         .await
         .expect("submit the gated limit");
 
-    let deadline = common::deadline(common::TEST_WALL_BUDGET);
     let mut accepted_ts = None;
     loop {
         let message = tokio::time::timeout_at(deadline, socket.next())
@@ -2682,36 +2708,42 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
             continue;
         };
         match serde_json::from_str::<VenueMessage>(&text) {
-            Ok(VenueMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
+            Ok(VenueMessage::OrderAccepted {
+                client_order_id: accepted,
+                ts_event,
+                ..
+            }) if accepted == client_order_id => accepted_ts = Some(ts_event),
             Ok(VenueMessage::OrderFilled(fill)) => {
-                assert_eq!(fill.client_order_id, "BAND-1");
-                // The liquidity side, not the timestamp, is what names the case.
-                // A swept fill is a Maker fill; a limit that was already
-                // marketable when the submit landed fills as a Taker in the
-                // accept's own engine batch. The premise this test rests on is
-                // that the 2.01 of headroom read off the anchor print survives
-                // the sim time between reading it and the submit landing, and at
-                // speed 100 a small wall shift is a large sim shift - so the
-                // premise really does lose sometimes. When it does, this says
-                // the order never rested, which is the truth, instead of blaming
-                // publication order and sending a reader hunting a serving
-                // defect that is not there.
+                assert_eq!(fill.client_order_id, client_order_id);
+                // Post-only means an accepted order was not marketable when it
+                // landed, so it rested, and only the sweep can fill it - as a
+                // Maker. A Taker here is a sweep or labelling defect, never a
+                // lost bet.
                 assert_eq!(
                     fill.liquidity_side,
                     LiquiditySide::Maker,
-                    "the limit was marketable on arrival and took liquidity, so \
-                     it never rested for the sweep to find - the market moved \
-                     more than the 2.01 of headroom between the anchor read and \
-                     the submit, not a sweep or ordering defect"
+                    "an accepted post-only limit was filled as a Taker"
                 );
                 assert!(
                     accepted_ts.is_some_and(|accepted| fill.ts_event > accepted),
                     "a banded limit must rest before the sweep fills it"
                 );
-                return;
+                return true;
             }
-            Ok(VenueMessage::OrderRejected { reason, .. }) => {
-                panic!("the banded limit was rejected: {reason}")
+            Ok(VenueMessage::OrderRejected {
+                client_order_id: rejected,
+                reason,
+                ..
+            }) if rejected == client_order_id => {
+                assert!(
+                    accepted_ts.is_none(),
+                    "an accepted banded limit was later rejected: {reason}"
+                );
+                assert_eq!(
+                    reason, "post-only order would take liquidity",
+                    "the banded limit was rejected for a reason other than the lost bet"
+                );
+                return false;
             }
             // Named rather than swallowed by a wildcard: each of these three
             // says the venue never got a chance to do what the test is asking

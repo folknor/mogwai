@@ -309,7 +309,12 @@ evidence covers spot. Displacement is not
 capped by width: the published BBO is only the top level, so an aggressive
 parent may print beyond the touch without making the book malformed. A connecting WebSocket
 receives the current BBO and funding-rate snapshots, when either exists, before
-later tape frames. The adapter retains each until its host activates the
+later tape frames. A boat's tape thread pulls nothing until its first socket
+has subscribed (a one-shot start gate in `Tape`), so that first subscriber
+sees the boat's water from its placement origin rather than losing the
+board-to-subscribe gap; a socket joining an already-subscribed boat rides from
+where it boards. A paced boat keeps the clock it was placed with, so a late
+first subscriber receives the overdue span as a catch-up burst. The adapter retains each until its host activates the
 corresponding quote or funding delivery.
 
 Those snapshots are conditional, and a consumer must not read them as a
