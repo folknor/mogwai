@@ -160,18 +160,16 @@ spec is deleted.
   call site. Recorded here so the next reader meets it as a known state rather
   than as a venue that refuses to fill anything.
 
-- **`serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path` fails
-  intermittently under the parallel gate.** Seen 2026-11-14 in one
-  `brokkr check --gate` run: "a market sell filled above every bid it could
-  have crossed: 59888.16 > 59888.06". It passed five isolated runs straight
-  after, and the change under test touched only the adapter's mass status and
-  a venue comment. Later the same day it failed two gate runs in a row with
-  the identical numbers, on a change confined to `mogwai-adapter` (which
-  `mogwai-cli` does not depend on), and passed three isolated runs after them:
-  it now fails the parallel gate repeatably rather than intermittently. The ceiling is a bid set read back from
-  `/operator/quotes` around the acceptance instant, so the likely shape is the
-  reading and the bracket disagreeing on which quote stood when wall time
-  stretches under load; not diagnosed.
+- **The priceless-wire-path serving test does not catch a swapped touch.**
+  `serving::a_market_submit_takes_a_reading_on_the_priceless_wire_path` says
+  its sell half "catches a sign error in the touch the venue stamps", but
+  swapping `bid_px` and `ask_px` in `MarketReadingCache::read`'s composed
+  reading, and separately swapping the sides in `market_reading`'s stamp, both
+  left it green (2026-11-14). A touch moved one unit inside the spread does
+  fail it. The likely shape is that a swapped reading makes the order
+  non-marketable on arrival so it rests and the sweep fills it off the real
+  book; not traced. Either the comment's claim goes or the test gains an
+  observable that the fill was the arrival crossing rather than a sweep.
 
 ## Tape research v2
 

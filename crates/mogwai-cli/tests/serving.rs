@@ -18,11 +18,8 @@
 //! parallel load. The premise was measured and is false. A `fast.toml` venue -
 //! process launch, bind, 300 s of warmup materialized, one HTTP round trip -
 //! costs about 10 ms in the profile these tests build under, and the binary's
-//! whole wall at `--test-threads=8` is 9.77 s against a single test,
-//! `a_market_submit_takes_a_reading_on_the_priceless_wire_path`, at
-//! 9.63 s. The floor is that one test's deliberate flake margin - eight scored
-//! attempts with a 500 ms gap, which section B of the report ruled may not be
-//! trimmed for wall time - and no amount of venue sharing moves it.
+//! whole wall at the time was set by one slow test rather than by boots, so no
+//! amount of venue sharing moves it.
 //!
 //! The split's own axis does not survive either. Only six tests here are
 //! get-only, and two of those cannot share a venue for reasons that have nothing
@@ -2773,12 +2770,13 @@ async fn banded_attempt_rested_and_filled(
 /// checkable against `/quotes` at all. Which quote it crossed is still not
 /// checkable: the reading instant is whenever the submit reached the handler, and
 /// no wire field carries it. It lies between the last market frame this socket
-/// was handed before sending and the acceptance timestamp, and at this venue's
-/// pacing that bracket holds many quotes.
+/// was handed before sending and the acceptance timestamp, so the book it read
+/// is the quote standing at that last frame or one printed after it up to
+/// acceptance, and at this venue's pacing that set holds many quotes.
 ///
-/// So the assertion is the strongest one that survives the bracket: a market
-/// buy crosses the ask at some instant inside it, so it must fill at or above
-/// the lowest ask in it, and a sell at or below the highest bid. That fails on
+/// So the assertion is the strongest one that survives the set: a market buy
+/// crosses one of those asks, so it must fill at or above the lowest of them,
+/// and a sell at or below the highest bid. That fails on
 /// a fill inside the spread by more than the market moved, which is the defect
 /// crossing exists to remove. Asserting against the last quote alone would read
 /// as an exact per-fill statement and would simply be flaky - the tape moves
@@ -2845,51 +2843,61 @@ async fn a_market_submit_takes_a_reading_on_the_priceless_wire_path() {
             }
         };
 
-        // The bracket, and no wider. It opens at the last market instant this
-        // socket had been handed before the submit went out - a true lower
-        // bound on the reading, since delivery is monotone and the handler
-        // reads a tape at or beyond what it has already published - and closes
-        // at acceptance. Quotes are dense enough that this window is never
-        // empty, so there is no reason to pad it: every extra second of
-        // lookback admits an ask the venue could not have crossed and weakens
-        // the floor toward vacuity.
-        let reading_ts = accepted_ts.unwrap_or(fill.ts_event);
+        // The candidate books, and no more. The reading instant R lies between
+        // B, the last market instant this socket had been handed before the
+        // submit went out, and A, the acceptance: B is a true lower bound
+        // because the tape paces every record, trade or quote, before
+        // publishing it, and A is sampled after the reading. The book read at
+        // R is the last quote at or before R, so it is either the quote
+        // standing at B or one printed in (B, A].
+        //
+        // The standing quote is the half that used to be missing. The bracket
+        // was the quotes printed in [B, A] alone, which drops the book the
+        // venue actually read whenever nothing printed between B and R but
+        // something printed between R and A: the bracket is then non-empty
+        // and every quote in it postdates the reading. Under a loaded
+        // parallel gate the wall stretch between the two clock samples is
+        // seconds of simulated time at this speed, and the sell side failed
+        // on exactly that, filled at the standing bid above every later one.
+        // Only the standing quote is kept from before B, not the lookback:
+        // every older quote admits a book no reading at R could be and
+        // weakens the bound toward vacuity.
+        let reading_ts = accepted_ts.expect("the market submit was accepted before it filled");
+        assert!(
+            before_ns <= reading_ts,
+            "the drained market instant {before_ns} postdates the acceptance {reading_ts}"
+        );
+        let lookback_start = before_ns.saturating_sub(600_000_000_000);
         let (status, body) = http_get(
             &venue.http_base(),
             &format!(
-                "/operator/quotes?symbol={}&start={before_ns}&end={reading_ts}&limit={}",
+                "/operator/quotes?symbol={}&start={lookback_start}&end={reading_ts}&limit={}",
                 venue.symbol,
                 mogwai_protocol::MAX_HISTORY_LIMIT,
             ),
         );
         assert_eq!(status, 200, "the quote history answers: {body}");
-        let mut quotes: Vec<QuoteTick> = serde_json::from_str(&body).expect("quote history");
-        if quotes.is_empty() {
-            // The bracket bet lost: no quote printed between the drain and the
-            // acceptance, which the fitted cadence legitimately produces - a
-            // parent event's book stands for whole seconds. The book the venue
-            // read is then the last quote at or before the acceptance, so
-            // fetch the standing quote and judge against it alone. This is the
-            // exact reading rather than a widened bracket: extending the
-            // bracket keeps every stale ask in the floor, where the standing
-            // quote is the one book a reading at this instant can be.
-            let (status, body) = http_get(
-                &venue.http_base(),
-                &format!(
-                    "/operator/quotes?symbol={}&start={}&end={reading_ts}&limit={}",
-                    venue.symbol,
-                    reading_ts.saturating_sub(600_000_000_000),
-                    mogwai_protocol::MAX_HISTORY_LIMIT,
-                ),
-            );
-            assert_eq!(status, 200, "the standing-quote fallback answers: {body}");
-            let standing: Vec<QuoteTick> = serde_json::from_str(&body).expect("standing quote");
-            let last = standing
-                .into_iter()
-                .next_back()
-                .expect("a quote at or before acceptance");
-            quotes = vec![last];
-        }
+        let history: Vec<QuoteTick> = serde_json::from_str(&body).expect("quote history");
+        // History answers the first `limit` records from the start, so a full
+        // page leaves the quotes nearest R unproven rather than absent.
+        assert!(
+            history.len() < mogwai_protocol::MAX_HISTORY_LIMIT,
+            "the lookback filled a whole history page, so its tail is unproven"
+        );
+        // No quote at or before B is only a candidate set when the lookback
+        // reached back to the start of history, where there is no earlier book
+        // to have stood; anywhere else it means the lookback was too short.
+        let standing = match history
+            .iter()
+            .rposition(|quote| quote.ts_event <= before_ns)
+        {
+            Some(index) => index,
+            None if lookback_start == 0 => 0,
+            None => panic!(
+                "no quote stood at the drained market instant {before_ns} within the lookback"
+            ),
+        };
+        let quotes = &history[standing..];
         match side {
             "Buy" => {
                 let floor = quotes
