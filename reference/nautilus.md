@@ -78,6 +78,19 @@ for every history request it cannot serve (see the inbound channel below). And
 `PositionStatusReport` gained an optional venue liquidation price, which the
 adapter leaves unset because the venue's position state carries none.
 
+The 0.68 release added fill `info` metadata to `OrderFilled` and carried a
+trailing order's `activation_price` through reconstruction. The adapter leaves
+fill `info` empty: every field of the wire fill already lands in a typed slot,
+nothing in nautilus's execution, portfolio or position code reads the bag, and
+`FillReport` has none, so a reconciled fill could not keep it anyway. It
+already sets `activation_price` on every order status report for a trailing
+order, dormant or armed, which is what lets nautilus rebuild an external
+trailing order from a report. No live order event has an activation field to
+fill. Nautilus 0.68 also activates a trailing order stating neither trigger nor
+activation at the first update; the venue does not serve that shape and refuses
+it by name at submit (see `docs/oms-types.md`), even though the risk engine
+admits it.
+
 ## The venue is the sole authority for money
 
 Verified at 0.67.

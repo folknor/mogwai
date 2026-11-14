@@ -1088,7 +1088,9 @@ fn fill_report_from_wire(
         }
     };
     // The wire's own liquidity side, mapped one to one (the fill event
-    // handler maps it the same way).
+    // handler maps it the same way). `FillReport` has no `info` bag in
+    // nautilus 0.68, so a reconciled fill reaches nautilus with empty info by
+    // nautilus's construction, not by a choice made here.
     Some(FillReport::new(
         account_id,
         instrument_id,
@@ -3788,6 +3790,15 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         false,
         position_id,
         commission,
+        // Fill `info` stays empty, checked against nautilus 0.68 where it
+        // became v2 venue metadata. Every field the wire fill carries is
+        // already mapped into a typed slot above, so nothing the venue sends
+        // is discarded; nautilus's own execution, portfolio and position code
+        // never reads the bag; and `FillReport` has no bag at all, so a
+        // reconciled fill would lose anything put here regardless. The one
+        // provenance worth carrying, a venue-initiated liquidation or risk
+        // flatten, does not reach this handler at all: that fill's delivery
+        // path is the gap, and a key here cannot close it.
         None,
     );
     ctx.emit(|e| e.send_order_event(OrderEventAny::Filled(event)));
@@ -4842,6 +4853,83 @@ mod tests {
         assert!(
             snapshot.orders.is_empty(),
             "the targeted query must not return O-OTHER as O-WANTED"
+        );
+    }
+
+    /// A venue trailing stop's activation level survives into the nautilus
+    /// report whether the trail is still dormant or already armed.
+    ///
+    /// Nautilus 0.68 materializes an external order from
+    /// `OrderStatusReport.activation_price` into its `OrderInitialized`, so
+    /// a reconstruction after a restart rebuilds the trail with the level it
+    /// was submitted with. An armed trail still states its activation: once
+    /// the venue has seeded the trigger, the activation is history, but the
+    /// rebuilt order must carry the same history.
+    #[test]
+    fn a_trailing_status_row_keeps_its_activation_dormant_and_armed() {
+        let instruments = Arc::new(Mutex::new(HashMap::from([(
+            Symbol::from("BTCUSDT"),
+            InstrumentDef {
+                symbol: "BTCUSDT".into(),
+                class: mogwai_protocol::InstrumentClass::Spot {
+                    base: "BTC".into(),
+                    quote: "USDT".into(),
+                },
+                price_precision: 2,
+                size_precision: 8,
+                price_increment: Decimal::new(1, 2),
+                size_increment: Decimal::new(1, 8),
+            },
+        )])));
+        let row = |trigger: Option<Decimal>| OrderStatusInfo {
+            client_order_id: mogwai_protocol::ClientOrderId::from("O-TRAIL"),
+            venue_order_id: mogwai_protocol::VenueOrderId::from("V-TRAIL"),
+            symbol: Symbol::from("BTCUSDT"),
+            position_id: None,
+            side: mogwai_protocol::Side::Sell,
+            order_type: mogwai_protocol::OrderType::TrailingStopMarket,
+            time_in_force: mogwai_protocol::TimeInForce::Gtc,
+            status: mogwai_protocol::WireOrderStatus::Accepted,
+            quantity: Decimal::ONE,
+            filled_qty: Decimal::ZERO,
+            price: None,
+            trigger_price: trigger,
+            ts_triggered: None,
+            trail_offset: Some(Decimal::from(5)),
+            limit_offset: None,
+            activation_price: Some(Decimal::from(105)),
+            reduce_only: false,
+            post_only: false,
+            ts_accepted: 1,
+            ts_last: 1,
+        };
+        let account_id = AccountId::from("MOGWAI-001");
+
+        let dormant = order_status_report_from_info(&row(None), &instruments, account_id, 1.into())
+            .expect("a dormant trailing row converts");
+        assert_eq!(
+            dormant.activation_price,
+            Some(nautilus_model::types::Price::from("105.00"))
+        );
+        assert_eq!(
+            dormant.trigger_price, None,
+            "a dormant trail has no trigger yet"
+        );
+
+        let armed = order_status_report_from_info(
+            &row(Some(Decimal::from(103))),
+            &instruments,
+            account_id,
+            1.into(),
+        )
+        .expect("an armed trailing row converts");
+        assert_eq!(
+            armed.activation_price,
+            Some(nautilus_model::types::Price::from("105.00"))
+        );
+        assert_eq!(
+            armed.trigger_price,
+            Some(nautilus_model::types::Price::from("103.00"))
         );
     }
 }
