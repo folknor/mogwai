@@ -25,34 +25,39 @@ use crate::{MOGWAI_VENUE, MOGWAI_VENUE_STR};
 /// Converts a wire `Decimal` price into a nautilus `Price` at `precision`,
 /// returning an error rather than panicking on a hostile wire value.
 ///
-/// `Price::new` (and the `Quantity`/`Money` twins) `assert!`-panic when the
-/// f64 is NaN/inf or outside `[PRICE_MIN, PRICE_MAX]`, or when `precision`
-/// exceeds nautilus `FIXED_PRECISION`. The whole point of mogwai is feeding
-/// ugly data, so the `decimal_to_f64` saturation alone is not enough: an
-/// over-precise `price_precision` advertised by a havoc'd instrument, or a
-/// magnitude past the fixed-point range, still trips the constructor. Routing
-/// through `new_checked` lets the call sites drop the offending tick with a
-/// warning instead of downing the spawned reader/exec task that has no
-/// supervisor.
+/// The conversion is integer-only: `Price::from_decimal_dp` scales the
+/// decimal's mantissa straight to the fixed-point raw, so a wire price never
+/// passes through `f64` and keeps every digit the fixed-point type can hold.
+/// The old `decimal_to_f64` then `new_checked` route lost digits past roughly
+/// sixteen significant (a nine-decimal price above ten million), which the
+/// wire's string-only decimal rule exists to prevent. Excess fractional digits
+/// round half to even, the same mode nautilus 0.68 uses for its own
+/// `Order.avg_px` and `make_price_from_decimal`; the range is checked on the
+/// rounded raw, so what is refused is what would not fit. An over-precise
+/// `price_precision` a havoc'd instrument advertises, or a magnitude past the
+/// fixed-point range, returns an error the call sites drop with a warning
+/// instead of downing the spawned reader/exec task that has no supervisor.
 pub(crate) fn price(d: Decimal, precision: u8) -> anyhow::Result<Price> {
-    Price::new_checked(mogwai_protocol::decimal_to_f64(d), precision).context("convert price")
+    Price::from_decimal_dp(d, precision).context("convert price")
 }
 
 /// Converts a wire `Decimal` size into a nautilus `Quantity` at `precision`.
-/// Fallible for the same reason as [`price`]: `Quantity::new` also rejects
-/// negatives, so any negative `size`/`leaves_qty`/`bid_sz` off the wire would
-/// otherwise panic the whole adapter task.
+/// Integer-only and fallible for the same reasons as [`price`]; a negative
+/// `size`/`leaves_qty`/`bid_sz` off the wire is refused before rounding, so
+/// even a tiny negative cannot round to zero and slip through.
 pub(crate) fn quantity(d: Decimal, precision: u8) -> anyhow::Result<Quantity> {
-    Quantity::new_checked(mogwai_protocol::decimal_to_f64(d), precision).context("convert quantity")
+    Quantity::from_decimal_dp(d, precision).context("convert quantity")
 }
 
 /// Converts a wire `Decimal` amount into a nautilus `Money` of `currency`.
-/// Fallible for the same reason as [`price`]: the `decimal_to_f64` saturation
-/// caps the magnitude, but `Money::new` still `assert!`-panics on a NaN/inf or
-/// out-of-range f64, so the exec task that books commissions and balances must
-/// be able to drop a pathological amount rather than crash.
+/// Integer-only and fallible for the same reasons as [`price`]. `from_decimal`
+/// rounds to the currency's own precision, half to even, deliberately: the
+/// commissions and balances this builds stay at currency precision, which is
+/// what `reference/nautilus.md` relies on when it says a position's commission
+/// map has nothing finer to accumulate. `from_decimal_native` or
+/// `from_decimal_exact` would change that.
 pub(crate) fn money(d: Decimal, currency: Currency) -> anyhow::Result<Money> {
-    Money::new_checked(mogwai_protocol::decimal_to_f64(d), currency).context("convert money")
+    Money::from_decimal(d, currency).context("convert money")
 }
 
 pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
@@ -1228,10 +1233,23 @@ mod tests {
     #[test]
     fn price_rejects_precision_beyond_fixed_precision() {
         // A havoc'd instrument advertising an over-fine precision would panic
-        // the bare `Price::new`; `new_checked` must surface it as an error so
-        // the call site can drop the offending tick instead.
+        // the bare `Price::new`; the checked conversion must surface it as an
+        // error so the call site can drop the offending tick instead.
         let err = price(Decimal::new(1, 0), 50);
         assert!(err.is_err(), "over-precise price must be rejected");
+    }
+
+    #[test]
+    fn wide_values_keep_every_digit_through_conversion() {
+        // Eighteen significant digits: more than an f64 carries, all of them
+        // inside the fixed-point range. A conversion routed through f64 books
+        // a neighbouring value instead.
+        let wide = Decimal::from_str("123456789.123456789").unwrap();
+        assert_eq!(price(wide, 9).unwrap().as_decimal(), wide);
+        assert_eq!(quantity(wide, 9).unwrap().as_decimal(), wide);
+        let usdt = Currency::USDT();
+        let wide_money = Decimal::from_str("123456789.12345678").unwrap();
+        assert_eq!(money(wide_money, usdt).unwrap().as_decimal(), wide_money);
     }
 
     #[test]

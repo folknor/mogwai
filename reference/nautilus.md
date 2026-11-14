@@ -91,6 +91,16 @@ activation at the first update; the venue does not serve that shape and refuses
 it by name at submit (see `docs/oms-types.md`), even though the risk engine
 admits it.
 
+0.68 also moved order average and slippage prices to `Decimal` and made
+`OrderStatusReport::with_avg_px` infallible. The adapter never sets an order
+report's average price (a partially filled order is paired from its own fills)
+and never reads slippage, so neither change reaches it. What it took from the
+same release is the integer path in: every wire price, quantity and money
+amount becomes a nautilus value through `Price::from_decimal_dp`,
+`Quantity::from_decimal_dp` and `Money::from_decimal`, never through `f64`, so
+a fill price keeps every digit the fixed-point type holds before nautilus
+averages it. Excess fractional digits round half to even.
+
 ## The venue is the sole authority for money
 
 Verified at 0.67.

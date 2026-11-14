@@ -11,10 +11,9 @@ use rust_decimal::Decimal;
 /// fill/balance path (a huge magnitude would silently read as zero rather
 /// than surface as an error), so if `Decimal`'s range or `f64`'s ever changed
 /// underneath this, this is the one place that assumption needs revisiting.
-/// The data crate carries a private reader with this exact contract; the
-/// adapter's `convert.rs` already calls this helper directly rather than the
-/// panicking `.to_f64().expect(...)` a pathological wire `Decimal` would
-/// otherwise take the runtime down with.
+/// The data crate carries a private reader with this exact contract. The
+/// adapter does not use it: it builds nautilus prices, quantities and money
+/// from the `Decimal` directly, so no wire value crosses `f64` on its way in.
 #[must_use]
 pub fn decimal_to_f64(d: Decimal) -> f64 {
     use rust_decimal::prelude::ToPrimitive;
