@@ -355,6 +355,32 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    `mass_status_never_reports_an_order_behind_its_fills`. A wire
    `DuplicateNextFill` repeats a trade id and is deduplicated by nautilus at
    order level; it never reaches the void path.
+10. **Command answers name their command only where the adapter holds it.**
+   Verified at 0.68. Nautilus retires a pending modify or cancel by the
+   answer's `causation_id`: the order FSM removes only the named pending
+   command, and the live execution manager clears only that command's inflight
+   tracking. An answer with no causation id clears every pending command of its
+   kind on the order and the order's whole inflight check. The adapter stamps
+   the refused command's own id on the modify and cancel refusals it
+   synthesizes for a transport failure. Venue answers - `OrderUpdated` and the
+   venue's or admission lane's modify and cancel refusals - carry none, because
+   the protocol's `Cancel` and `Modify` carry no command id for the venue to
+   echo. So an uncorrelated modify acknowledgement or modify or cancel
+   refusal clears the whole order's reconciliation tracking, and a sibling
+   command still awaiting its answer loses inflight recovery if that answer is
+   then lost. Guessing the id adapter-side was refused: the venue sends
+   `OrderUpdated` with no command behind it, and a wrong id can strand an order
+   in a pending status, which is worse than none. Exact attribution is owed and
+   needs the venue to echo a command id on the direct answer.
+
+   Duplicate live fills are unaffected by 0.68's fill-dedup changes: they
+   arrive as `OrderFilled` order events, which the execution engine drops by
+   trade id at order level, and the node's recent-fill gate keys on account,
+   instrument and trade id and only intercepts fill reports, which the live
+   adapter never sends. `batch_cancel_orders` fans out to `cancel_order` child
+   by child, each keeping its own command id. `cancel_all_orders` is not
+   implemented: nautilus logs it as unimplemented and nothing reaches the
+   venue, which has no cancel-all command for the adapter to send.
 
 ## The live inbound channel is closed
 

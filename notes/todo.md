@@ -641,6 +641,29 @@ classes.
   Binance spot serves it on market orders only and IB on buys only; the venue
   answers to the surface an exchange lists, not to either.
 
+- **Command correlation on the wire.** Nautilus 0.68 retires a pending modify
+  or cancel by the answer's `causation_id` (order FSM `command_refused`, live
+  manager `observe_order_event`); an answer without one clears every pending
+  command of its kind and the order's whole inflight check, so a sibling
+  command whose own answer is then lost to havoc loses inflight recovery. The
+  adapter can only stamp the id on its own transport refusals (landed, see
+  `reference/nautilus.md` rule 10). The fix: an optional command id on the
+  wire `Cancel` and `Modify`, echoed by the venue on the direct answer to that
+  command only (its `OrderUpdated`, `OrderModifyRejected`,
+  `OrderCancelRejected`, and the admission refusal subject), never on an
+  unsolicited update such as a contingent sibling shrink, a parent release or a
+  trailing activation, and never guessed by the adapter - a wrong id leaves an
+  order stranded in a pending status. The witnesses owed with it: a refusal
+  that preserves another pending command, and a late refusal that preserves a
+  newer command after its own pending entry was cleared.
+
+- **Cancel-all.** `cancel_all_orders` is unimplemented in the adapter; nautilus
+  logs it and nothing reaches the venue (`Strategy::cancel_all_orders` with
+  `strategy_only = false` hits it). Fanning out over the adapter's mirror was
+  refused: the mirror holds only this client's submissions, not venue truth.
+  Owed: a venue-side cancel-all command scoped by account, instrument and
+  side, with its selection point defined at venue processing.
+
 ## Engine
 
 - **Trailing-stop fidelity is pass-granular, by documented design - open only

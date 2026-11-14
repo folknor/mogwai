@@ -28,8 +28,9 @@ use nautilus_common::{
     live::{get_runtime, sender::EventSender, try_get_exec_event_sender},
     messages::ExecutionEvent,
     messages::execution::{
-        CancelOrder, GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
-        GeneratePositionStatusReports, ModifyOrder, QueryOrder, SubmitOrder,
+        BatchCancelOrders, CancelOrder, GenerateFillReports, GenerateOrderStatusReport,
+        GenerateOrderStatusReports, GeneratePositionStatusReports, ModifyOrder, QueryOrder,
+        SubmitOrder,
     },
 };
 use nautilus_core::{Params, UUID4, UnixNanos, time::get_atomic_clock_realtime};
@@ -1659,6 +1660,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
         self.dispatch_order(&ExecWsCommand::Modify {
             client_order_id: cmd.client_order_id.to_string(),
+            command_id: cmd.command_id,
             price: cmd.price.map(|p| p.as_decimal()),
             quantity: cmd.quantity.map(|q| q.as_decimal()),
             trigger_price: cmd.trigger_price.map(|p| p.as_decimal()),
@@ -1668,7 +1670,35 @@ impl ExecutionClient for MogwaiExecutionClient {
     fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
         self.dispatch_order(&ExecWsCommand::Cancel {
             client_order_id: cmd.client_order_id.to_string(),
+            command_id: cmd.command_id,
         })
+    }
+
+    /// Fans a batch out to `cancel_order`, child by child, so each child keeps
+    /// its own `command_id` - the id the strategy recorded on that order's
+    /// `PendingCancel` and the node registered for inflight tracking. The
+    /// nautilus trait default only logs "not implemented" and returns `Ok`,
+    /// which left every child sitting in `PendingCancel` with nothing sent to
+    /// the venue (`Strategy::cancel_orders` marks them before it sends).
+    ///
+    /// Every child is attempted even if one fails: each was already marked
+    /// pending, so stopping at the first error would strand the rest.
+    /// `cancel_order` answers a transport failure with a synthesized reject and
+    /// returns `Ok`, so in practice nothing here errs; the collection is for
+    /// whatever a future `cancel_order` might return.
+    fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+        for child in cmd.cancels {
+            let client_order_id = child.client_order_id;
+            if let Err(err) = self.cancel_order(child) {
+                errors.push(format!("{client_order_id}: {err}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("batch cancel failed for {}", errors.join("; "))
+        }
     }
 
     /// The execution manager's in-flight probe: query the venue's truth for
@@ -2153,11 +2183,18 @@ enum ExecWsCommand {
     /// linked bare `Submit` for exactly that reason, so this is not merely the
     /// preferred route, it is the route.
     SubmitGroup(Vec<mogwai_protocol::SubmitOrder>),
+    /// `command_id` is the nautilus command's own id. It never reaches the
+    /// wire - the venue protocol has no slot for it - and exists so a
+    /// transport failure, which this adapter answers locally while still
+    /// holding the command, can name the exact command it refuses (see
+    /// `synthesize_transport_reject`).
     Cancel {
         client_order_id: String,
+        command_id: UUID4,
     },
     Modify {
         client_order_id: String,
+        command_id: UUID4,
         price: Option<Decimal>,
         quantity: Option<Decimal>,
         trigger_price: Option<Decimal>,
@@ -2187,11 +2224,14 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> Command {
         ExecWsCommand::SubmitGroup(orders) => Command::SubmitOrderGroup {
             orders: orders.clone(),
         },
-        ExecWsCommand::Cancel { client_order_id } => Command::CancelOrder {
+        ExecWsCommand::Cancel {
+            client_order_id, ..
+        } => Command::CancelOrder {
             client_order_id: client_order_id.clone(),
         },
         ExecWsCommand::Modify {
             client_order_id,
+            command_id: _,
             price,
             quantity,
             trigger_price,
@@ -2223,10 +2263,11 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> Command {
 /// Maps a transport-level failure (the command's frame never reached the
 /// venue: the WS command channel was gone, or the writer was aborted before it
 /// sent) onto the `VenueMessage` shape `handle_exec_message` already knows how
-/// to turn into a nautilus event. Only valid for `Submit`/`Modify`: a failed
-/// `Cancel` is not a full order rejection (the order is still live, or its fate
-/// is simply unknown) and is handled by `emit_cancel_rejected` before the call
-/// site ever reaches this function - see `synthesize_transport_reject`.
+/// to turn into a nautilus event. Only valid for `Submit`: a failed `Cancel` or
+/// `Modify` is not an order rejection (the order is still live, or its fate is
+/// simply unknown), and its refusal must name the exact command it answers, which
+/// a `VenueMessage` has no slot for - both are emitted directly by
+/// `synthesize_transport_reject`.
 fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueMessage {
     let reason = err.to_string();
     let ts_event = now_unix_nanos(sim).as_u64();
@@ -2236,17 +2277,15 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueM
             reason,
             ts_event,
         },
-        ExecWsCommand::Modify {
+        ExecWsCommand::Cancel {
             client_order_id, ..
-        } => VenueMessage::OrderModifyRejected {
-            client_order_id: client_order_id.clone(),
-            venue_order_id: None,
-            reason,
-            ts_event,
-        },
-        ExecWsCommand::Cancel { client_order_id } => unreachable!(
-            "cancel transport failures are reported via emit_cancel_rejected, \
-             not reject_for (client_order_id={client_order_id})"
+        }
+        | ExecWsCommand::Modify {
+            client_order_id, ..
+        } => unreachable!(
+            "cancel and modify transport failures are emitted directly by \
+             synthesize_transport_reject, not reject_for \
+             (client_order_id={client_order_id})"
         ),
         ExecWsCommand::SubmitGroup(_) => unreachable!(
             "a group's transport failure rejects every leg and is handled in \
@@ -2408,15 +2447,27 @@ fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
 
 /// Synthesizes the nautilus reject for a command whose transport failed before
 /// the venue ever saw it - shared by `dispatch_order`'s send failure and the
-/// reader's undelivered-command report. A failed `Cancel` is reported as a `CancelRejected`
-/// (the order is still live, or its fate is simply unknown, not dead), leaving
-/// the mirrored status untouched; a failed `Submit`/`Modify` is reported as the
-/// matching `OrderRejected`/`OrderModifyRejected` so the order reaches a terminal
-/// state instead of wedging in `Submitted`/`PendingUpdate`. Both bypass the
+/// reader's undelivered-command report. A failed `Cancel` or `Modify` is
+/// reported as a `CancelRejected`/`ModifyRejected` (the order is still live, or
+/// its fate is simply unknown, not dead), leaving the mirrored status untouched,
+/// so nautilus restores the order out of `PendingCancel`/`PendingUpdate`; a
+/// failed `Submit` is reported as an `OrderRejected` so the order reaches a
+/// terminal state instead of wedging in `Submitted`. All of them bypass the
 /// per-dispatch `HavocFilter` by design: the failure is purely local and never
 /// traveled the wire, so there is nothing for the venue-havoc pipeline to model,
-/// and routing a terminal reject through a `drop_prob` draw could discard it
-/// entirely, leaving nautilus and the mirror stuck forever.
+/// and routing a reject through a `drop_prob` draw could discard it entirely,
+/// leaving nautilus and the mirror stuck forever.
+///
+/// The cancel and modify refusals carry the refused command's own id as
+/// `causation_id`, because here - unlike for a venue answer - the adapter holds
+/// the command. Under nautilus 0.68 that id is what lets the refusal retire
+/// exactly that command: the order FSM (`command_refused`) removes only the
+/// matching pending command, and the live execution manager
+/// (`observe_order_event`) clears only that command's inflight tracking. With
+/// `None` both fall back to clearing every pending command of the kind and the
+/// order's whole inflight check, so a still-pending sibling command would lose
+/// its recovery. A refusal whose id is no longer pending (an earlier
+/// uncorrelated answer already cleared it) correctly leaves the order alone.
 ///
 /// The submit rejection carries `RejectOrigin::LocalTransport`, which is what
 /// keeps "the frame never left" from overruling evidence that it did. The
@@ -2428,13 +2479,34 @@ fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
 /// that case is nothing: the order is live at the venue and its own events
 /// resolve it.
 fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &ExecContext) {
-    if let ExecWsCommand::Cancel { client_order_id } = cmd {
+    if let ExecWsCommand::Cancel {
+        client_order_id,
+        command_id,
+    } = cmd
+    {
         if let Some(client_order_id) = wire_client_order_id(client_order_id) {
             emit_cancel_rejected(
                 client_order_id,
                 None,
                 err.to_string(),
                 now_unix_nanos(ctx.sim),
+                Some(*command_id),
+                ctx,
+            );
+        }
+    } else if let ExecWsCommand::Modify {
+        client_order_id,
+        command_id,
+        ..
+    } = cmd
+    {
+        if let Some(client_order_id) = wire_client_order_id(client_order_id) {
+            emit_modify_rejected(
+                client_order_id,
+                None,
+                err.to_string(),
+                now_unix_nanos(ctx.sim),
+                Some(*command_id),
                 ctx,
             );
         }
@@ -2496,6 +2568,7 @@ fn emit_cancel_rejected(
     wire_venue_order_id: Option<VenueOrderId>,
     reason: String,
     ts_event: UnixNanos,
+    causation_id: Option<UUID4>,
     ctx: &ExecContext,
 ) {
     let Some(record) = order_record(&ctx.state, client_order_id) else {
@@ -2512,7 +2585,7 @@ fn emit_cancel_rejected(
         );
         return;
     };
-    let event = OrderCancelRejected::new(
+    let mut event = OrderCancelRejected::new(
         ctx.trader_id,
         record.strategy_id,
         record.instrument_id,
@@ -2525,7 +2598,63 @@ fn emit_cancel_rejected(
         wire_venue_order_id.or(record.venue_order_id),
         Some(ctx.account_id),
     );
+    event.causation_id = causation_id;
     ctx.emit(|e| e.send_order_event(OrderEventAny::CancelRejected(event)));
+}
+
+/// Reports a rejected `Modify` as a nautilus `OrderModifyRejected`, the
+/// `emit_cancel_rejected` twin, serving the venue's refusal and the local
+/// transport failure alike.
+///
+/// The emitted venue id prefers the wire value and falls back to the mirror's:
+/// the engine omits the venue id for an order that has gone terminal even
+/// though the id is known, so a known order's modify-reject would otherwise
+/// reach nautilus with no venue id where the equivalent cancel-reject carries
+/// one.
+///
+/// `causation_id` is `Some` only where the adapter holds the refused command,
+/// which is the transport failure; see `synthesize_transport_reject` for why a
+/// guessed id would be worse than none.
+fn emit_modify_rejected(
+    client_order_id: ClientOrderId,
+    wire_venue_order_id: Option<VenueOrderId>,
+    reason: String,
+    ts_event: UnixNanos,
+    causation_id: Option<UUID4>,
+    ctx: &ExecContext,
+) {
+    let Some(record) = order_record(&ctx.state, client_order_id) else {
+        // Same limitation as the OrderRejected arm: the mirror lacks the
+        // order, so we have no real strategy_id/instrument_id, and a
+        // placeholder would be silently dropped by nautilus `Order.apply`
+        // strategy-id validation. The `venue_order_id: None` case (protocol's
+        // explicit "id unknown to venue") is exactly when surfacing this
+        // matters most, but doing so correctly needs a non-mirror order source
+        // (a design change). Make the drop visible rather than silent.
+        tracing::warn!(
+            order = %client_order_id,
+            venue_order_id = ?wire_venue_order_id,
+            reason = %reason,
+            "modify rejected for an order the mirror does not know; \
+             reject not surfaced to nautilus"
+        );
+        return;
+    };
+    let mut event = OrderModifyRejected::new(
+        ctx.trader_id,
+        record.strategy_id,
+        record.instrument_id,
+        client_order_id,
+        reason.into(),
+        UUID4::new(),
+        ts_event,
+        now_unix_nanos(ctx.sim),
+        false,
+        wire_venue_order_id.or(record.venue_order_id),
+        Some(ctx.account_id),
+    );
+    event.causation_id = causation_id;
+    ctx.emit(|e| e.send_order_event(OrderEventAny::ModifyRejected(event)));
 }
 
 #[derive(Clone)]
@@ -3266,6 +3395,26 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                      terminal status (reordered or duplicated event)"
                 );
             }
+            // Venue answers - this update and the venue's modify and cancel
+            // refusals - carry no causation id, because the wire names no
+            // command: the protocol's Cancel and Modify have no command id for
+            // the venue to echo. Under nautilus 0.68 an uncorrelated update or
+            // refusal therefore clears every pending command of its kind on the
+            // order and the order's whole inflight check in the live execution
+            // manager, so a sibling command still awaiting its answer loses
+            // inflight recovery. Guessing the id adapter-side (a per-order
+            // queue of dispatched command ids) was weighed and refused: this
+            // venue also sends OrderUpdated with no command behind it (a
+            // contingent sibling's shrink, a parent's release, a trailing
+            // activation), admission refusals ride a priority lane that does
+            // not keep command order, and havoc reorders, drops and duplicates
+            // frames. A wrong `Some(id)` is worse than `None`, because the
+            // order FSM's `command_refused` returns without restoring the
+            // status when the named command is not pending, which can strand an
+            // order in PendingUpdate or PendingCancel. Exact attribution needs
+            // the venue to echo a command id on the direct answer; until then
+            // only the locally synthesized transport refusals, where the
+            // adapter holds the command, carry one.
             let event = OrderUpdated::new(
                 ctx.trader_id,
                 record.strategy_id,
@@ -3294,47 +3443,16 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
                 return;
             };
-            let Some(record) = order_record(&ctx.state, client_order_id) else {
-                // Same limitation as the OrderRejected arm: the mirror lacks the
-                // order, so we have no real strategy_id/instrument_id, and a
-                // placeholder would be silently dropped by nautilus
-                // `Order.apply` strategy-id validation. The `venue_order_id:
-                // None` case (protocol's explicit "id unknown to venue") is
-                // exactly when surfacing this matters most, but doing so
-                // correctly needs a non-mirror order source (a design change).
-                // Make the drop visible rather than silent.
-                tracing::warn!(
-                    order = %client_order_id,
-                    venue_order_id = ?venue_order_id,
-                    reason = %reason,
-                    "modify rejected for an order the mirror does not know; \
-                     reject not surfaced to nautilus"
-                );
-                return;
-            };
-            let event = OrderModifyRejected::new(
-                ctx.trader_id,
-                record.strategy_id,
-                record.instrument_id,
+            // No causation id: see the venue-answer note on the OrderUpdated
+            // arm above.
+            emit_modify_rejected(
                 client_order_id,
-                reason.into(),
-                UUID4::new(),
+                venue_order_id.as_deref().and_then(wire_venue_order_id),
+                reason,
                 UnixNanos::from(ts_event),
-                now_unix_nanos(ctx.sim),
-                false,
-                // Prefer the wire id and fall back to the mirror's, matching
-                // emit_cancel_rejected: the engine omits the venue id for an
-                // order that has gone terminal even though the id is known, so
-                // a known order's modify-reject would otherwise reach nautilus
-                // with no venue id where the equivalent cancel-reject carries
-                // one. The fallback also covers any future wire omission.
-                venue_order_id
-                    .as_deref()
-                    .and_then(wire_venue_order_id)
-                    .or(record.venue_order_id),
-                Some(ctx.account_id),
+                None,
+                ctx,
             );
-            ctx.emit(|e| e.send_order_event(OrderEventAny::ModifyRejected(event)));
         }
         VenueMessage::OrderCancelRejected {
             client_order_id,
@@ -3355,6 +3473,9 @@ fn handle_exec_message_from(msg: VenueMessage, ctx: &ExecContext, reject_origin:
                 venue_order_id.as_deref().and_then(wire_venue_order_id),
                 reason,
                 UnixNanos::from(ts_event),
+                // No causation id: see the venue-answer note on the
+                // OrderUpdated arm above.
+                None,
                 ctx,
             );
         }
@@ -4608,6 +4729,72 @@ mod tests {
             mirrored_status(&state),
             (OrderStatus::Accepted, UnixNanos::from(30)),
             "the group fan-out must carry the same origin as a bare submit"
+        );
+    }
+
+    /// A locally synthesized cancel or modify refusal names the exact command
+    /// it refuses, and a venue answer names none.
+    ///
+    /// Nautilus 0.68 retires only the named command on `Some(id)` - in the
+    /// order FSM and in the live manager's inflight tracking - and every
+    /// pending command of the kind on `None`. The transport path holds the
+    /// command, so anything but its own id would either strand a sibling
+    /// command's recovery (`None`) or misattribute the refusal (any other id).
+    /// The venue arm stays `None` because the wire names no command.
+    #[test]
+    fn a_transport_refusal_names_the_command_it_refuses() {
+        let (ctx, mut rx, _generation, _dead) = a_context_on_a_live_channel(Some(1), 1);
+        mirror_an_order_of(&ctx, OrderType::Limit, OrderStatus::Accepted);
+        let cancel_id = UUID4::new();
+        let modify_id = UUID4::new();
+
+        report_undelivered_command(
+            &ExecWsCommand::Cancel {
+                client_order_id: "O-1".to_owned(),
+                command_id: cancel_id,
+            },
+            &ctx,
+        );
+        report_undelivered_command(
+            &ExecWsCommand::Modify {
+                client_order_id: "O-1".to_owned(),
+                command_id: modify_id,
+                price: Some(Decimal::ONE),
+                quantity: None,
+                trigger_price: None,
+            },
+            &ctx,
+        );
+        handle_exec_message(
+            VenueMessage::OrderModifyRejected {
+                client_order_id: "O-1".to_owned(),
+                venue_order_id: None,
+                reason: "venue said no".to_owned(),
+                ts_event: 40,
+            },
+            &ctx,
+        );
+
+        let mut causations = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
+                    causations.push(("cancel", event.causation_id));
+                }
+                ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+                    causations.push(("modify", event.causation_id));
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(
+            causations,
+            [
+                ("cancel", Some(cancel_id)),
+                ("modify", Some(modify_id)),
+                ("modify", None),
+            ],
+            "transport refusals name their own command; venue refusals name none"
         );
     }
 
