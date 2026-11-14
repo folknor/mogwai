@@ -104,7 +104,7 @@ balance, margin and PnL-to-balance arithmetic layer - never runs on live order
 events. The wallet half of that condition is an exception worth knowing: a
 wallet account takes the recompute path even on a venue-reported state.
 
-Startup no longer reaches mogwai. After reconciling each client's mass
+Startup no longer touches the venue's money. After reconciling each client's mass
 status, `LiveNode` calls `Portfolio::initialize_orders` and
 `initialize_positions`. Through 0.67 those ran the manager on a
 venue-reported margin account whatever `calculate_account_state` said,
@@ -381,6 +381,21 @@ Each is a rule the venue enforces on itself or a defect nobody sees.
    by child, each keeping its own command id. `cancel_all_orders` is not
    implemented: nautilus logs it as unimplemented and nothing reaches the
    venue, which has no cancel-all command for the adapter to send.
+11. **A failed mass status fails node startup.** Verified at 0.68 by reading
+   `LiveNode`'s startup reconciliation; no test here drives a `LiveNode`. When
+   reconciliation is on, an `Err` from `generate_mass_status`, or the node's
+   `timeout_reconciliation` running out around it, aborts startup, tears the
+   components down and returns the error, and the trader is never started.
+   Earlier releases logged the failure and ran on. Only `Ok(None)` is still
+   logged past, and the adapter never returns it: every read failure
+   propagates, with the bracket attempt and stage named in its context. No
+   read is retried inside the adapter; a lost reply is the query-timeout path
+   havoc-able delivery exists to exercise. The causes are not all havoc - a
+   dead socket, a failed account pull and a bracket that never goes quiet
+   (rule 9) fail it the same way. What havoc can do to it is in
+   `docs/havoc.md`. The periodic reconciliation passes after startup are
+   unchanged: a failed collection there is a warning and the node keeps
+   running.
 
 ## The live inbound channel is closed
 

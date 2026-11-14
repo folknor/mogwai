@@ -165,7 +165,10 @@ spec is deleted.
   `brokkr check --gate` run: "a market sell filled above every bid it could
   have crossed: 59888.16 > 59888.06". It passed five isolated runs straight
   after, and the change under test touched only the adapter's mass status and
-  a venue comment. The ceiling is a bid set read back from
+  a venue comment. Later the same day it failed two gate runs in a row with
+  the identical numbers, on a change confined to `mogwai-adapter` (which
+  `mogwai-cli` does not depend on), and passed three isolated runs after them:
+  it now fails the parallel gate repeatably rather than intermittently. The ceiling is a bid set read back from
   `/operator/quotes` around the acceptance instant, so the likely shape is the
   reading and the bracket disagreeing on which quote stood when wall time
   stretches under load; not diagnosed.
@@ -755,6 +758,18 @@ classes.
   known-covered case.
 
 ## Adapter
+
+- **Mass status is acquired by bracketing, so it can starve.** Since nautilus
+  0.68 a failed mass status aborts `LiveNode` startup, and
+  `mass_status_bracket` fails after eight attempts in which fills kept
+  booking - resting orders filling at boot, or a co-tenant connection on the
+  same account trading through the window, can do that with no havoc armed.
+  The structural fix is one venue-side snapshot: a wire query whose single
+  answer carries open orders, the fill history and positions read under one
+  engine borrow, returned over the same havoc-able socket so delivery stays
+  perturbable. That needs a protocol message, an engine read and the adapter
+  swapping the bracket for it. Until then a starved bracket is a boot failure,
+  named in its error.
 
 - **Nautilus has no instrument type for mogwai's leveraged Forex class.** On
   this side the symptom was silent publication as `CurrencyPair`: that type is

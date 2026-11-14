@@ -2128,8 +2128,21 @@ impl MogwaiExecutionClient {
                 .map(|fill| fill.trade_id.clone())
                 .collect::<Vec<_>>()
         };
+        // Every read failure propagates, and since nautilus 0.68 an `Err` here
+        // aborts `LiveNode` startup rather than being logged past. No read is
+        // retried: a reply lost to an armed `GoDark`, or held past the request
+        // timeout by `DelayAcks`, is the query-timeout path that havoc-able
+        // delivery exists to exercise, and the host owns what happens next.
+        // The context names the stage only. It deliberately does not blame
+        // havoc: an arm in this client's config may have expired, another
+        // control-plane caller may have armed one this config never names, and
+        // a dead socket, a failed account pull or bracket starvation fail here
+        // just the same.
         for attempt in 1..=Self::MASS_STATUS_BRACKET_ATTEMPTS {
-            let before = query.fill_history(None).await?;
+            let before = query
+                .fill_history(None)
+                .await
+                .with_context(|| format!("mass status bracket {attempt}: opening fill read"))?;
             let order_reports = self
                 .generate_order_status_reports(&GenerateOrderStatusReports::new(
                     UUID4::new(),
@@ -2141,7 +2154,8 @@ impl MogwaiExecutionClient {
                     None,
                     None,
                 ))
-                .await?;
+                .await
+                .with_context(|| format!("mass status bracket {attempt}: open-order read"))?;
             let position_reports = self
                 .generate_position_status_reports(&GeneratePositionStatusReports::new(
                     UUID4::new(),
@@ -2152,8 +2166,12 @@ impl MogwaiExecutionClient {
                     None,
                     None,
                 ))
-                .await?;
-            let after = query.fill_history(None).await?;
+                .await
+                .with_context(|| format!("mass status bracket {attempt}: position read"))?;
+            let after = query
+                .fill_history(None)
+                .await
+                .with_context(|| format!("mass status bracket {attempt}: closing fill read"))?;
             if trades(&before) == trades(&after) {
                 return Ok((order_reports, after, position_reports));
             }

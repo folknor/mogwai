@@ -192,6 +192,23 @@ at the instant of the request while answering `202` either way, so arming a
 subagent before starting it did nothing and said nothing. An `account` the venue
 cannot parse as an id is now a `400` rather than a `202` that arms nothing.
 
+Startup reconciliation reads the venue over the same havoc-able socket, so a
+transport arm standing when a nautilus node starts can fail the start. Since
+nautilus 0.68 a failed mass status aborts `LiveNode` startup instead of being
+logged past (`reference/nautilus.md`, rule 11), and the adapter retries no
+read. The arms differ in how they reach it. `GoDark` fails startup when it
+drops any one of the mass-status replies, and a dropped reply stays lost after
+the blackout lifts; an arm that has already expired by the time the node
+reconciles costs nothing. `DelayAcks` holds every reply, and mass status makes
+at least three sequential socket reads, so the delays add up against the
+node's `timeout_reconciliation` even when each one beats the per-query request
+timeout. `CommandLatency` does not delay a query, which is classless, though
+an order command queued ahead of one on the same socket still can.
+`StallData` never touches the execution stream. A scenario that wants a
+blackout or delay during trading rather than at boot posts it to
+`/control/divergence` after the node is running, rather than in the adapter's
+connect-time `havoc.venue` list.
+
 Recording an arm does not open an account, deliberately: the consumer still
 states its own opening balances and policy on `POST /accounts`, and finds the
 arm standing on the ledger that call returns.
