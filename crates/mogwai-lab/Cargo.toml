@@ -41,7 +41,7 @@ zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2
 # thing from here: the `O_NONBLOCK` flag value, through the unconditional
 # `nix::libc`. Same pin mogwai-venue carries; venue's `fs`, `process` and
 # `signal` features unify into this build through that edge regardless.
-nix = { version = "0.31.3", default-features = false }
+nix = { version = "0.32.0", default-features = false }
 hotpath = { workspace = true, optional = true }
 
 # Examples only. `ring_sizing` allocates one shipped per-boat broadcast ring to

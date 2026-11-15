@@ -27,7 +27,7 @@ futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
-nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
+nix = { version = "0.32.0", features = ["fs", "process", "signal"] }
 
 [dev-dependencies]
 # `test-util` for the paused clock. The history slot gate now waits up to

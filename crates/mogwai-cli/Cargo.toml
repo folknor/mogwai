@@ -49,7 +49,7 @@ futures-util.workspace = true
 serde_json.workspace = true
 tungstenite = "0.30.0"
 tokio-tungstenite = "0.30.0"
-nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
+nix = { version = "0.32.0", features = ["fs", "process", "signal"] }
 
 # Every integration test compiles into the one `all` target below, which
 # `autotests = false` in [package] makes the only one. Cargo's default links a

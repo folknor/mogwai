@@ -31,7 +31,7 @@ tracing = { workspace = true, features = ["log"] }
 # `std::os::unix::fs::PermissionsExt` and the fixtures are `/bin/sh` scripts, all
 # ungated - so a test asserting cross-platform compilation would assert nothing.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["process", "signal"] }
+nix = { version = "0.32.0", features = ["process", "signal"] }
 
 [dev-dependencies]
 
