@@ -265,10 +265,6 @@ debug = true
 [test.profiles.dev]
 description = "The edit loop: both dev sweeps, no release build"
 sweeps = ["workspace", "instrumented"]
-# This lane never included the ignored socket and lifecycle tests where the old
-# 16-thread cliff lived, so 16 here is profile consistency rather than an
-# independent ceiling measurement.
-test_threads = 16
 
 # The wall-clock lane, run deliberately: `brokkr check --profile timing`. It is
 # not part of the gate and is not meant to be - `reference/performance.md` keeps
@@ -375,7 +371,10 @@ include_ignored = true
 # left the warm gate at 1m20.5s versus 1m20.4s before, so the fixture change was
 # reverted. One forced-redial test now passes a 20ms rung and fell from 1.413s
 # to about 0.65s without changing its 400ms negative-observation window.
-test_threads = 16
+#
+# Those thread counts predate the sweeps' `parallel` fan-out, whose budget now
+# sets the lane's concurrency; a profile `test_threads` is never consulted on a
+# parallel sweep, and brokkr rejects one there.
 skip = [
     # The declared-deadline family is gone from this list, and the note stays
     # because the shape recurs. Two entries sat here - the completion gates

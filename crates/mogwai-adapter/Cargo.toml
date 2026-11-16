@@ -21,8 +21,10 @@ anyhow.workspace = true
 async-trait = "0.1.91"
 futures-util.workspace = true
 # The request bounds nautilus hands the data client are `jiff::Timestamp` as of
-# 0.62, so mapping them onto the u64 nanosecond axis needs jiff by name.
-jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+# 0.62, so mapping them onto the u64 nanosecond axis needs jiff by name. The
+# major version follows the one the pinned nautilus crates depend on, not the
+# latest: a different major is a distinct `Timestamp` type and does not compile.
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }
 rand = "0.10.2"
 rust_decimal.workspace = true
 tokio.workspace = true
