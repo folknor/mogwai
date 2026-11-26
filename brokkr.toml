@@ -829,14 +829,6 @@ from = "*"
 except = ["mogwai-bench"]
 forbid = "mogwai-bench"
 
-# The installed brokkr still refuses to load a `project = "mogwai"` config
-# without this section, though nothing here is read through it any more:
-# every measurement is a script bench in `brokkr.d/benches.toml`. It names
-# the CLI package and its bin, and goes once brokkr stops requiring it.
-[mogwai]
-package = "mogwai-cli"
-bin = "mogwai"
-
 [[quarantine]]
 category = "doctests"
 issue = "n/a"
