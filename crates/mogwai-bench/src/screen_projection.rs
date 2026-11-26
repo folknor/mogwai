@@ -31,6 +31,7 @@
 use std::path::Path;
 
 use mogwai_lab::arrival_screen::{Family, ScreenContext, probe_cell, project_seed};
+use mogwai_venue::SourceStamp;
 
 /// The 12a measurement artifact the screen projects against.
 const MEASURE: &str = "analysis/mnq-measure-12a.json";
@@ -58,7 +59,8 @@ fn project(ctx: &ScreenContext, family: Family) -> (u64, u64) {
 }
 
 pub(crate) fn run() {
-    let context = ScreenContext::open(Path::new(MEASURE), None)
+    // Unstamped: `measured()` below bypasses the walk cache the stamp keys.
+    let context = ScreenContext::open(Path::new(MEASURE), None, &SourceStamp::unknown())
         .expect("the committed 12a artifact opens")
         // `measured()` is the screen's own cost-probe posture: bypass the walk
         // cache so the projection is actually run.

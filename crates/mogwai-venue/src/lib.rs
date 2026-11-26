@@ -35,16 +35,7 @@ mod ws;
 #[cfg(test)]
 mod fill_golden;
 
+mod source_stamp;
+
 pub use serve::serve;
-
-const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
-
-/// The `--version` string: semver, git hash and commit time from `build.rs`,
-/// composed with the tape protocol version the binary was built against.
-///
-/// Lives here rather than in the CLI because the readiness record carries it
-/// too, and one run must not be able to announce a different version than the
-/// one it prints.
-pub fn long_version() -> String {
-    format!("{LONG_VERSION} tape {}", mogwai_data::TAPE_PROTOCOL_VERSION)
-}
+pub use source_stamp::SourceStamp;

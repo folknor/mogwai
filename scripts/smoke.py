@@ -481,13 +481,13 @@ def check_common(venue: Venue) -> None:
     try:
         first = named.until(lambda candidate: candidate.get("type") in ("Trade", "Quote"))
         assert first and window_start <= first["ts_event"] < window_end, first
-        completed = named.until(
-            lambda candidate: candidate.get("type") == "PassengerDurationComplete"
-        )
-        if completed is not None:
-            assert completed["declared_duration_ns"] == window_end - window_start, completed
     finally:
         named.close()
+    # The window's completion is not waited for here. It used to be, for up to
+    # 30 s, against a 60 s window that at speed 1 never completes inside that
+    # budget, behind an `if completed is not None` - so the assertion never ran
+    # and every run idled 30 s. `check_named_window_completion` is the
+    # required form, on the one boot whose speed and bounds it controls.
 
     # And the two boundaries are refused by name rather than served short.
     for start, label in (
@@ -499,6 +499,40 @@ def check_common(venue: Venue) -> None:
             raise AssertionError(f"a window {label} was served instead of refused")
         except urllib.error.HTTPError as err:
             assert err.code == 400, f"a window {label} must be a 400, got {err.code}"
+
+
+NAMED_WINDOW_PROBE_NS = 2_000_000_000
+
+
+def check_named_window_completion(venue: Venue) -> None:
+    """A named window announces its completion with the span it declared.
+
+    Run only on the venue's built-in defaults - unbounded, speed 1 - where a
+    two-second sim window completes in about two wall seconds and cannot be
+    pre-empted by the run's own end. A fresh account, so no other socket's
+    placement is involved. `RunComplete`, a close or the deadline all fail: the
+    announcement is required, not opportunistic.
+    """
+    window_start = venue.record["run_start_ns"]
+    window_end = window_start + NAMED_WINDOW_PROBE_NS
+    ws = WsClient(
+        venue.addr,
+        venue.symbol,
+        extra_query=(
+            f"&account=SMOKE-WINDOW-COMPLETION&window_start_ns={window_start}"
+            f"&window_end_ns={window_end}"
+        ),
+    )
+    try:
+        terminal = ws.until(
+            lambda frame: frame.get("type") in ("PassengerDurationComplete", "RunComplete"),
+            timeout=30,
+        )
+    finally:
+        ws.close()
+    assert terminal is not None, "the named window closed or timed out without announcing completion"
+    assert terminal["type"] == "PassengerDurationComplete", terminal
+    assert terminal["declared_duration_ns"] == NAMED_WINDOW_PROBE_NS, terminal
 
 
 def check_seed_logs(venue: Venue) -> None:
@@ -1218,6 +1252,11 @@ def main() -> None:
 
     with Venue(config, parsed.duration) as venue:
         check_common(venue)
+        # Before the mode, because `control-shapes` ends its run by arming
+        # `FaultTape`; and only on the built-in-defaults boot the probe's
+        # timing assumes, never on a caller's config or declared duration.
+        if parsed.mode == "control-shapes" and config is None and not parsed.duration:
+            check_named_window_completion(venue)
         detail = MODES[parsed.mode](venue)
         if parsed.duration:
             detail = f"{detail}; {mode_duration(venue, parsed.duration)}"

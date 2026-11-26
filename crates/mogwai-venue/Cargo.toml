@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
-build = "build.rs"
 
 # A library crate. The `mogwai` binary lives in `mogwai-cli`, which depends on
 # this one for `serve`, config loading and the instrument profiles.

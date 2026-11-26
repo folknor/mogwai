@@ -165,7 +165,12 @@ fn evaluate(
     }))
 }
 
-pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
+/// `source` is the executable's source stamp, which keys the screen context's
+/// walk cache.
+pub fn run(
+    args: ArrivalEnvelopeDiagnosticArgs,
+    source: &mogwai_venue::SourceStamp,
+) -> anyhow::Result<Value> {
     if args.jobs == Some(0) {
         bail!("--jobs must be at least 1");
     }
@@ -184,8 +189,8 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
         bail!("arrival-envelope-diagnostic requires screen artifact schema version 2");
     }
     let selected = selected_cells(&screen)?;
-    let context =
-        ScreenContext::open(&measure_path, None).map_err(|error| anyhow!(error.to_string()))?;
+    let context = ScreenContext::open(&measure_path, None, source)
+        .map_err(|error| anyhow!(error.to_string()))?;
     let grid = context
         .envelope_grid()
         .map_err(|error| anyhow!(error.to_string()))?;
@@ -257,6 +262,11 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusal these tests drive comes before the screen context opens.
+    fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
+        super::run(args, &mogwai_venue::SourceStamp::unknown())
+    }
 
     #[test]
     fn diagnostic_refuses_the_official_screen_artifact_path() {

@@ -29,17 +29,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
-/// The git sha of the tree this crate was built from, folded in by
-/// `build.rs`. Empty for a `cargo install`/crates.io build with no `.git`.
-fn git_sha() -> &'static str {
-    env!("MOGWAI_LAB_GIT_SHA")
-}
-
 /// The inputs a provenance token binds: crate version, the tape protocol
-/// version (owned by `mogwai-data`; this crate does not depend on it, so the
-/// caller passes the number), the fingerprint hash, the full invoked
-/// command, and the measurement sub-contract hash. The git sha is folded in
-/// automatically from the build-time env var.
+/// version (the caller passes the number), the fingerprint hash, the full
+/// invoked command, the measurement sub-contract hash, and the `HEAD` sha of
+/// the executable's source stamp. The stamp is required rather than read here
+/// at compile time: a library reading the identity recompiles itself and every
+/// dependent on each commit. The sha carries no dirty flag, so a dirty tree
+/// shares its `HEAD`'s token, and an unknown stamp contributes an empty sha.
 #[derive(Clone, Copy, Debug)]
 pub struct ProvenanceInputs<'a> {
     pub crate_version: &'a str,
@@ -47,6 +43,7 @@ pub struct ProvenanceInputs<'a> {
     pub fingerprint_hash: &'a str,
     pub full_command: &'a str,
     pub subcontract_hash: &'a str,
+    pub source: &'a mogwai_venue::SourceStamp,
 }
 
 /// A cache key that changes whenever anything that could change a cached
@@ -64,7 +61,7 @@ impl ProvenanceToken {
             inputs.fingerprint_hash,
             inputs.full_command,
             inputs.subcontract_hash,
-            git_sha(),
+            inputs.source.provenance_sha(),
         );
         let mut hasher = Sha256::new();
         hasher.update(blob.as_bytes());
@@ -574,6 +571,8 @@ mod tests {
         assert_eq!(borrowed.home, ambient.home.as_deref());
     }
 
+    static UNSTAMPED: mogwai_venue::SourceStamp = mogwai_venue::SourceStamp::unknown();
+
     #[test]
     fn provenance_token_changes_when_any_input_changes() {
         let base = ProvenanceInputs {
@@ -582,6 +581,7 @@ mod tests {
             fingerprint_hash: "abc",
             full_command: "mogwai preflight",
             subcontract_hash: "def",
+            source: &UNSTAMPED,
         };
         let t1 = ProvenanceToken::compute(&base);
         let mut changed = base;
@@ -590,6 +590,53 @@ mod tests {
         assert_ne!(t1, t2);
         let t1_again = ProvenanceToken::compute(&base);
         assert_eq!(t1, t1_again);
+
+        let committed = mogwai_venue::SourceStamp::parse(Some(
+            "00c1401ba596cedd838d660a73f500f8499cd543 clean 2026-11-26 06:45:03 UTC",
+        ));
+        let dirty = mogwai_venue::SourceStamp::parse(Some(
+            "00c1401ba596cedd838d660a73f500f8499cd543 dirty 2026-11-26 06:45:03 UTC",
+        ));
+        let t_committed = ProvenanceToken::compute(&ProvenanceInputs {
+            source: &committed,
+            ..base
+        });
+        assert_ne!(t1, t_committed, "the source sha is a token input");
+        assert_eq!(
+            t_committed,
+            ProvenanceToken::compute(&ProvenanceInputs {
+                source: &dirty,
+                ..base
+            }),
+            "a dirty tree shares its HEAD's token"
+        );
+    }
+
+    /// The token bytes for a stamped source are pinned, so moving the stamp
+    /// from a build script to the executables cannot orphan a cache written
+    /// before the move: the blob is the one the build-script era hashed, with
+    /// `git_sha=` the twelve-character prefix.
+    #[test]
+    fn a_stamped_token_hashes_the_twelve_character_sha_line() {
+        let stamp = mogwai_venue::SourceStamp::parse(Some(
+            "00c1401ba596cedd838d660a73f500f8499cd543 clean 2026-11-26 06:45:03 UTC",
+        ));
+        let token = ProvenanceToken::compute(&ProvenanceInputs {
+            crate_version: "0.1.0",
+            tape_protocol_version: 11,
+            fingerprint_hash: "abc",
+            full_command: "mogwai preflight",
+            subcontract_hash: "def",
+            source: &stamp,
+        });
+        let blob = "crate_version=0.1.0\ntape_protocol_version=11\nfingerprint_hash=abc\n\
+                    full_command=mogwai preflight\nsubcontract_hash=def\ngit_sha=00c1401ba596\n";
+        let mut hasher = Sha256::new();
+        hasher.update(blob.as_bytes());
+        assert_eq!(
+            token.as_str(),
+            crate::delivery::hex_digest(&hasher.finalize())
+        );
     }
 
     #[test]
@@ -602,6 +649,7 @@ mod tests {
             fingerprint_hash: "old",
             full_command: "mogwai preflight",
             subcontract_hash: "def",
+            source: &UNSTAMPED,
         };
         let old_token = ProvenanceToken::compute(&inputs_old);
         let old_store = CacheStore::open(root.clone(), old_token.clone());
@@ -636,6 +684,7 @@ mod tests {
             fingerprint_hash: "parallel",
             full_command: "arrival-screen",
             subcontract_hash: "measure",
+            source: &UNSTAMPED,
         });
         let store = CacheStore::open(root.clone(), token);
         store.prepare_for_writes().expect("prepared cache");
@@ -674,6 +723,7 @@ mod tests {
             fingerprint_hash: "x",
             full_command: "mogwai preflight",
             subcontract_hash: "y",
+            source: &UNSTAMPED,
         });
         let store = CacheStore::open(root.clone(), token);
         store.write("k", b"v").unwrap();

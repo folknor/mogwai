@@ -117,7 +117,8 @@ fn report_work(peak_rss_bytes: u64) {
     );
 }
 
-pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
+/// `source` is the executable's source stamp, which keys the walk cache.
+pub fn run(args: ArrivalScreenArgs, source: &mogwai_venue::SourceStamp) -> anyhow::Result<Value> {
     if args.jobs == Some(0) {
         bail!("--jobs must be at least 1");
     }
@@ -145,8 +146,8 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     // here would relabel every one of those as a measurement-path failure.
     // The measurement read and parse name themselves inside `open` instead,
     // which is what the ordering pins below key on.
-    let context =
-        ScreenContext::open(&measure, args.cache.as_deref()).map_err(|e| anyhow!(e.to_string()))?;
+    let context = ScreenContext::open(&measure, args.cache.as_deref(), source)
+        .map_err(|e| anyhow!(e.to_string()))?;
     // The probe prices the walk itself; the grid run is allowed its cache.
     let context = if args.cost_probe {
         context.measured()
@@ -542,6 +543,12 @@ mod tests {
     use mogwai_lab::tree::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     use super::*;
+
+    /// Every path these tests drive stops before the walk cache is opened, so
+    /// the stamp is immaterial to them.
+    fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
+        super::run(args, &mogwai_venue::SourceStamp::unknown())
+    }
 
     fn args(measure: &str, out: &str, cost_probe: bool) -> ArrivalScreenArgs {
         ArrivalScreenArgs {

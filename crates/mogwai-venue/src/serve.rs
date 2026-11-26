@@ -15,9 +15,9 @@ use axum::{
 };
 
 use crate::{
+    SourceStamp,
     config::{Config, build_instrument_profiles, build_run_clock, now_ns},
     http::{self, AppState, account, arm_divergence, clock, instruments, quotes, trades},
-    long_version,
     ws::ws_upgrade,
     {run, source, sweeper},
 };
@@ -142,8 +142,10 @@ fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
 }
 
 /// Run one venue in the foreground until its declared duration elapses or a
-/// signal arrives.
+/// signal arrives. `stamp` is the executable's own source identity, rendered
+/// into the readiness record exactly as its `--version` renders it.
 pub fn serve(
+    stamp: &SourceStamp,
     config: Option<PathBuf>,
     duration: Option<Duration>,
     symbol: Option<String>,
@@ -161,10 +163,11 @@ pub fn serve(
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve_async(config, duration_ns, symbol))
+        .block_on(serve_async(stamp, config, duration_ns, symbol))
 }
 
 async fn serve_async(
+    stamp: &SourceStamp,
     config: Option<PathBuf>,
     duration_override_ns: Option<Option<u64>>,
     launch_symbol: Option<String>,
@@ -426,7 +429,7 @@ async fn serve_async(
         warmup_ns: cfg.warmup_ns,
         reset_account_on_reconnect: cfg.reset_account_on_reconnect,
         account_ttl_ms: cfg.account_ttl_ms,
-        version_string: long_version(),
+        version_string: stamp.long_version(),
     };
     {
         let mut stdout = std::io::stdout().lock();

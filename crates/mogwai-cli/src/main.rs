@@ -27,16 +27,30 @@ mod tick_composition_ratios;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use mogwai_cli::{
     arrival_control, arrival_envelope_diagnostic, arrival_screen, count_curve, fit, measure,
     minute_range_envelope, stage_m,
 };
-use mogwai_venue::{config, long_version};
+use mogwai_venue::{SourceStamp, config};
+
+/// The source identity the workspace's build runner exports for every cargo
+/// call. Read here, at the executable's entry point, and nowhere else: a
+/// library reading it would recompile itself and every dependent on each
+/// commit, where here an identity change rebuilds this binary alone. Configured
+/// out of the test build, so the unit-test target never depends on it either.
+#[cfg(not(test))]
+const SOURCE_IDENTITY: Option<&str> = option_env!("MOGWAI_SOURCE_IDENTITY");
+#[cfg(test)]
+const SOURCE_IDENTITY: Option<&str> = None;
 
 #[derive(Parser)]
-#[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives a nautilus live trading path", arg_required_else_help = true)]
+#[command(
+    name = "mogwai",
+    about = "Fake broker/exchange that drives a nautilus live trading path",
+    arg_required_else_help = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -166,8 +180,14 @@ fn main() -> anyhow::Result<()> {
     // from here, so anything ahead of this line is invisible to a phase
     // decomposition. A no-op outside a benchmark harness.
     mogwai_lab::sidecar::init();
-    match Cli::parse().command {
+    // One stamp renders `--version` and the readiness record, and keys the
+    // walk cache, so no two of them can disagree about the build.
+    let stamp = SourceStamp::parse(SOURCE_IDENTITY);
+    let matches = Cli::command().version(stamp.long_version()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    match cli.command {
         Command::Serve(args) => mogwai_venue::serve(
+            &stamp,
             args.config,
             args.duration.map(std::convert::Into::into),
             args.symbol,
@@ -205,11 +225,11 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::ArrivalScreen(args) => {
-            arrival_screen::run(args)?;
+            arrival_screen::run(args, &stamp)?;
             Ok(())
         }
         Command::ArrivalEnvelopeDiagnostic(args) => {
-            arrival_envelope_diagnostic::run(args)?;
+            arrival_envelope_diagnostic::run(args, &stamp)?;
             Ok(())
         }
         Command::Cache(args) => cache::run(args),

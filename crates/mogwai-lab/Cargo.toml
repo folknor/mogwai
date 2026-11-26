@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
-build = "build.rs"
 autotests = false
 
 # The offline corpus-to-fingerprint method library: the TBBO stream contract,

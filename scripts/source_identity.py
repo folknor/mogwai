@@ -2,22 +2,17 @@
 # SPDX-FileCopyrightText: 2026 folknor
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Print the source identity brokkr stamps into the venue and lab crates.
+"""Print the source identity brokkr stamps into the executables.
 
-brokkr's `[cargo_env]` runs this before every cargo that can run a build
-script and sets the one line it prints as `MOGWAI_SOURCE_IDENTITY`. The
-`mogwai-venue` and `mogwai-lab` build scripts rerun only when that value
-changes, rather than whenever `.git/index` moves, which reran the venue script
-and rebuilt `mogwai-venue` and `mogwai-cli` on every staging or status refresh.
-
-The line carries every value either script stamps, so a build script under
-brokkr shells out to nothing:
+brokkr's `[cargo_env]` runs this before every cargo call and sets the one line
+it prints as `MOGWAI_SOURCE_IDENTITY`. The executables' `main.rs` read it with
+`option_env!` and parse it into `mogwai_venue::SourceStamp`; no library reads
+it, so a change rebuilds the executables alone.
 
     <full HEAD sha> <clean|dirty> <commit time as YYYY-MM-DD HH:MM:SS UTC>
 
 The dirty flag is a non-empty `git status --porcelain` over the whole
-repository, untracked files included, exactly as the venue's own fallback
-computes it. Each build script parses what it needs and renders `unknown` for
+repository, untracked files included. `SourceStamp` renders `unknown` for
 anything it cannot read, so a checkout git cannot describe prints the single
 word `unknown` here rather than failing: brokkr treats a non-zero exit as
 fatal for the whole run, and a build outside a checkout degrades to `unknown`

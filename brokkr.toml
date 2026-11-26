@@ -7,13 +7,16 @@ include = [
     "brokkr.d/hosts/bygg.toml",
 ]
 
-# The source identity the venue and lab build scripts stamp, computed once
-# before every cargo call. With it set, neither script runs git or watches
-# `.git`; they rerun only when this value changes. Before, the venue script
-# watched `.git/index`, which moves on every stage and every index refresh, and
-# rebuilt venue and cli each time. Nothing builds this workspace without
-# brokkr, so the scripts carry no git fallback and stamp `unknown` without it.
-# Build input only: tests must not read it.
+# The source identity, computed once before every cargo call. Only the
+# executables' `main.rs` read it, with `option_env!` configured out of their
+# test builds, and pass a parsed `SourceStamp` down; see the
+# `source-identity-only-at-entry-points` textlint below. It changes on every
+# commit and on the first edit after one, and a library reading it - the
+# venue and lab build scripts once did - recompiled the library, every test
+# target of its package and everything above it each time, which measured
+# 2m49s against 1m08s for a warm check. Build input only: tests must not read
+# it. Script checks run cargo outside this injection, so a binary a script
+# builds itself is unstamped.
 [cargo_env]
 MOGWAI_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 
@@ -24,21 +27,20 @@ MOGWAI_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 # rather than merely inert.
 [[check]]
 name = "workspace"
-# `parallel = { budget = 8 }` fans the test binaries out concurrently -
-# prebuilt binaries executed directly, budget = tests in flight. Adopted
-# 2026-09-02 on the thread-scaling evidence recorded at the gate profile:
-# 8 and 16 threads measured identically (~1m20s), which is the floor-bound
-# signature - cargo ran the binaries sequentially, so no within-binary thread
-# count could compress further, and the fan-out removes exactly that
-# boundary. 8 is the measured saturation point, not a guess; retune only
-# after the timing store has two warm runs (the first run weights by test
-# count and is always the slow one), and if `claims` reads 1-1 the pole
-# binary needs a bigger budget (see brokkr man config parallel). The
-# socket-backed tests all bind 127.0.0.1:0 (checked 2026-09-02), so
-# concurrent tests cannot collide on a port. The budget was measured when each
-# integration test file was its own binary; each crate now has one, so it is
-# owed a re-measure.
-parallel = { budget = 8 }
+# `parallel` fans the test binaries out concurrently - prebuilt binaries
+# executed directly, budget = tests in flight. Re-measured 2026-11-26 after
+# each crate went to one test binary, on a 16-core, 32-thread host, two warm
+# runs each: at 8 the workspace lane's library poles got one or two slots
+# apiece (`claims 1-2`) because their share of the budget sat under the
+# arithmetic floor (see `brokkr man sweeps parallel`), and the dev test phase
+# took 28.7s; at 16 and 32 it took 13.4s and 13.0s, and the gate 38.9s at
+# both. The lane stops scaling at the core count, where the poles hit their
+# own slowest tests, so the budget follows the host's physical cores rather
+# than naming one machine's number. Retune only after two warm runs, since
+# the first weights by test count. The socket-backed tests all bind
+# 127.0.0.1:0 (checked 2026-09-02), so concurrent tests cannot collide on a
+# port.
+parallel = { budget = "cores" }
 
 # The instrumented shape. It exists because a feature nothing compiles is a
 # feature that is broken and nobody knows: with `hotpath` off, every
@@ -62,7 +64,7 @@ packages = ["mogwai-data", "mogwai-lab", "mogwai-bench"]
 features = ["hotpath-alloc"]
 # Same fan-out as the workspace sweep; direct execution works on every
 # selection shape, package-scoped included.
-parallel = { budget = 8 }
+parallel = { budget = "cores" }
 
 # The wall-clock contract, and the only sweep in this workspace that compiles
 # release. It asserts a latency budget, so the build profile is not an
@@ -174,9 +176,21 @@ stage = "pre-test"
 # the script because the script reaches for `brokkr run`, and a check running
 # inside brokkr cannot shell back out to it - so the gate builds and passes the
 # path in through `MOGWAI_VENUE_BINARY`.
+#
+# A dev build, in a target directory of its own. It used to be `--release`,
+# which on this workspace is fat LTO: every code edit re-paid that link here,
+# about 80 s of a check whose tests took 13 s. Nothing the mode asserts depends
+# on optimization. The separate directory is because this cargo call runs
+# outside brokkr's feature unification, so in the shared `target/` it would
+# resolve a different feature set and overwrite the `target/debug/mogwai` the
+# test phase's `CARGO_BIN_EXE_mogwai` names, forcing a relink on the next run.
+# Like every script-launched cargo, it is outside `[cargo_env]` and unstamped.
+#
+# The mode also runs the required named-window completion probe, which only
+# its built-in-defaults boot can time.
 [[script_check]]
 name = "control-plane-shapes"
-command = "cargo build --release --bin mogwai && MOGWAI_VENUE_BINARY=target/release/mogwai python3 scripts/smoke.py control-shapes"
+command = "cargo build --bin mogwai --target-dir target/smoke && MOGWAI_VENUE_BINARY=target/smoke/debug/mogwai python3 scripts/smoke.py control-shapes"
 expect = "PASS [control-shapes]"
 match = "contains"
 stream = "both"
@@ -749,6 +763,18 @@ name = "code-does-not-cite-agent-instructions"
 pattern = '\b(?:AGENTS|CLAUDE)\.md\b'
 paths = ["crates/**/*.rs", "crates/**/Cargo.toml", "Cargo.toml"]
 message = "code does not cite AGENTS.md or CLAUDE.md; state the reason in place or cite reference/ or docs/"
+
+# The source identity changes on every commit, and cargo has no early cutoff:
+# whatever compilation unit reads it recompiles, with everything depending on
+# it, each time it moves. Only an executable's entry point may read it, and a
+# build script may not export compile-time env to a package at all, since that
+# reaches every target of the package, its tests included.
+[[textlint]]
+name = "source-identity-only-at-entry-points"
+pattern = 'MOGWAI_SOURCE_IDENTITY|cargo:rustc-env'
+paths = ["crates/**/*.rs"]
+exclude = ["crates/*/src/main.rs"]
+message = "read the source identity only in an executable's main.rs, under cfg(not(test)), and pass a SourceStamp down"
 
 # The broker core never imports nautilus; `mogwai-adapter` is the one,
 # deliberate exception. A forbid list fails open for a nautilus crate not named

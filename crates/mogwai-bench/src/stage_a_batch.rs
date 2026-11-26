@@ -23,6 +23,7 @@ use mogwai_lab::stage_a_batch::{
     PilotArtifact, PilotReading, SampleKind, build_manifest, parse_manifest, pilot_plan,
     resolve_cell,
 };
+use mogwai_venue::SourceStamp;
 
 const MEASURE: &str = "analysis/mnq-measure-12a.json";
 const MANIFEST: &str = "analysis/stage-a-batch-manifest.json";
@@ -120,7 +121,8 @@ fn settings(args: &Args) -> Result<Settings, String> {
 
 fn run_pilot(args: &Settings) -> Result<(), String> {
     let measurement_sha256 = sha256_file(&args.measure).map_err(|error| error.to_string())?;
-    let context = ScreenContext::open(&args.measure, None)
+    // Unstamped: `measured()` below bypasses the walk cache the stamp keys.
+    let context = ScreenContext::open(&args.measure, None, &SourceStamp::unknown())
         .map_err(|error| error.to_string())?
         .measured();
     let plan = pilot_plan();
@@ -222,7 +224,8 @@ fn run_panel(args: &Settings, manifest: &BatchManifest) -> Result<Vec<CellRun>, 
     let jobs = args
         .jobs
         .min(panel.iter().map(|cell| cell.seeds.len()).sum());
-    let context = ScreenContext::open(&args.measure, None)
+    // Unstamped: `measured()` below bypasses the walk cache the stamp keys.
+    let context = ScreenContext::open(&args.measure, None, &SourceStamp::unknown())
         .map_err(|error| error.to_string())?
         .measured();
     let projection = context

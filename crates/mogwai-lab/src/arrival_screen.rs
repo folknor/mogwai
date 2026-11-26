@@ -681,7 +681,13 @@ pub struct ProjectionContext {
 }
 
 impl ScreenContext {
-    pub fn open(measure_path: &Path, cache: Option<&Path>) -> LabResult<Self> {
+    /// `source` is the executable's source stamp, which keys the walk cache;
+    /// see [`ProvenanceInputs`].
+    pub fn open(
+        measure_path: &Path,
+        cache: Option<&Path>,
+        source: &mogwai_venue::SourceStamp,
+    ) -> LabResult<Self> {
         // Attributed here, not around the whole call. A caller that
         // wrapped `open` as "opening the 12a measurement" would put that
         // sentence on every failure below it too - a broken MNQ preset, a
@@ -732,6 +738,7 @@ impl ScreenContext {
             fingerprint_hash: &fingerprint_hash,
             full_command: &command,
             subcontract_hash: &measure_hash,
+            source,
         });
         #[cfg(test)]
         let observed = ObsContext::new(sessions);
@@ -813,6 +820,7 @@ impl ScreenContext {
                     fingerprint_hash: "",
                     full_command: "arrival-screen:test",
                     subcontract_hash: "",
+                    source: &mogwai_venue::SourceStamp::unknown(),
                 }),
             ),
             bypass_cache: true,
@@ -4324,9 +4332,10 @@ mod tests {
         // and the code untested - which is the one thing a blocking gate must
         // never do.
         let cache = root.join("target/stage-a-layer1-cache");
-        let context = ScreenContext::open(&path, Some(&cache))
-            .expect("screen context")
-            .measured();
+        let context =
+            ScreenContext::open(&path, Some(&cache), &mogwai_venue::SourceStamp::unknown())
+                .expect("screen context")
+                .measured();
         let shipped = Cell::EventMarkov { switch_rate: 0.1 };
         for expected in artifact["generated"]["per_seed"]
             .as_array()

@@ -480,7 +480,7 @@ rather than a name lookup; the argv is evidence, not identity, so a value that
 defines the workload must be a bound param. The registry is
 `brokkr.d/benches.toml`, included from `brokkr.toml`: one `[bench.NAME]` table
 per bench with its build settings, params and annotations, its Lua under
-`benches/FAMILY/NAME.lua`, shared modules in `benches/lib`, and contract tests
+`benches/` in a directory named for its family, shared modules in `benches/lib`, and contract tests
 in `benches/tests` that `brokkr check` runs. The registry's header comment
 carries the layout rules.
 

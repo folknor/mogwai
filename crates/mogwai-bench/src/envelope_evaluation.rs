@@ -36,6 +36,7 @@ use mogwai_lab::arrival_envelope::{
     ExposureGrid, envelope_probe_cell, envelope_seed, simulate_month,
 };
 use mogwai_lab::arrival_screen::{CADENCE_STEP_NS, Family, ScreenContext};
+use mogwai_venue::SourceStamp;
 
 const MEASURE: &str = "analysis/mnq-measure-12a.json";
 
@@ -78,7 +79,10 @@ fn month(cell: &mogwai_lab::arrival_screen::Cell, grid: &ExposureGrid, replicate
 pub(crate) fn run(family: FamilyArg, months: usize) {
     let family = Family::from(family);
 
-    let context = ScreenContext::open(Path::new(MEASURE), None).expect("the 12a artifact opens");
+    // Unstamped: only the profile and binding are read, never the walk cache
+    // the stamp keys.
+    let context = ScreenContext::open(Path::new(MEASURE), None, &SourceStamp::unknown())
+        .expect("the 12a artifact opens");
     let grid = ExposureGrid::new(
         &context.profile,
         context.binding.window_start_ns,

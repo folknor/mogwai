@@ -13,9 +13,14 @@ autotests = false
 
 # The benchmark instruments, one subcommand each. A bin rather than examples
 # because `brokkr bench` builds only bin targets.
+#
+# `test = false` because the bin carries no tests: its test build was an
+# empty libtest harness that every check compiled, linked and ran in both
+# sweeps, certifying nothing. Clippy's `--all-targets` still checks the bin.
 [[bin]]
 name = "mogwai-bench"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 mogwai-protocol.workspace = true
