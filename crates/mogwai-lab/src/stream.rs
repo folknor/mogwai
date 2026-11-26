@@ -36,6 +36,9 @@ const REQUIRED_COLUMNS: [&str; 10] = [
 struct ZstLines<R> {
     reader: R,
     pending: Vec<u8>,
+    /// The read buffer, on the heap and reused: 1 MiB on the stack trips
+    /// `large_unopt_stack_frames` in a dev build.
+    chunk: Box<[u8]>,
     eof: bool,
 }
 
@@ -44,6 +47,7 @@ impl<R: Read> ZstLines<R> {
         Self {
             reader,
             pending: Vec::new(),
+            chunk: vec![0u8; 1 << 20].into_boxed_slice(),
             eof: false,
         }
     }
@@ -78,10 +82,9 @@ impl<R: Read> Iterator for ZstLines<R> {
                         .map_err(|e| LabError::refusal(format!("non-utf8 row bytes: {e}"))),
                 );
             }
-            let mut chunk = [0u8; 1 << 20];
-            match self.reader.read(&mut chunk) {
+            match self.reader.read(&mut self.chunk) {
                 Ok(0) => self.eof = true,
-                Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
+                Ok(n) => self.pending.extend_from_slice(&self.chunk[..n]),
                 Err(e) => return Some(Err(LabError::from(e))),
             }
         }
