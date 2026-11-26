@@ -1652,6 +1652,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mogwai-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures-util",
+ "hotpath",
+ "mogwai-data",
+ "mogwai-engine",
+ "mogwai-lab",
+ "mogwai-protocol",
+ "mogwai-venue",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "mogwai-cli"
 version = "0.1.0"
 dependencies = [
@@ -1718,7 +1737,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tokio",
  "zip",
  "zrip",
 ]

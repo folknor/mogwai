@@ -1,0 +1,341 @@
+# Script benches (`brokkr man bench`, `brokkr man bench-config`), run as
+# `brokkr bench NAME ...` and stored in brokkr's per-user bench store, which
+# `brokkr results` reads. They replace the retired `brokkr mogwai` registry.
+#
+# Layout. This file is the registry: one [bench.NAME] table per bench,
+# holding its annotations, build settings and params. The Lua lives in
+# `benches/<family>/NAME.lua` at the repository root, never inline, so the
+# registry stays a list a reader can scan. The family is the binary the bench
+# drives: mogwai for the shipped CLI, mogwai-bench for the instruments. NAME
+# is the bench's name and the file's stem both: unique across every family,
+# without a family prefix, lowercase words joined by '-', so
+# `brokkr bench NAME` names one file. Tables here are grouped by family, one
+# comment line naming each. script_file resolves against this file's
+# directory, hence the leading "../". Lua shared by several benches goes in
+# the bench_lib directory, benches/lib, loaded with require("counters") and
+# so on; no bench script goes there. A bench's description is one line saying
+# what it measures; what the script does and why belongs in its header
+# comment. version starts at 1 and goes up, with a changelog entry and a new
+# date, whenever a change makes its runs stop comparing with earlier ones.
+#
+# What is not here, still: a workload registry. Every mogwai surface takes a
+# config-shaped invocation - preset, window, seed, cell, probe mode - so the
+# set of things worth measuring is the product of surfaces, inputs and flag
+# axes, and a registry that must be edited before a new question can be asked
+# does not survive a decade of asking them. A bench is one surface. Its typed
+# params are the axes stable enough to pair on, and everything else rides in
+# `--args`, one JSON array of extra words (benches/lib/passthrough.lua), so
+# nothing the surface accepts becomes unrunnable. brokkr pairs runs on bound
+# params and input digests and stores every child's argv, so a passthrough
+# word distinguishes two runs in the record but not in the pairing key: pair
+# such rows by query, not by trust.
+#
+# A wall alone cannot tell "the code got faster" from "the code did less".
+# Every surface prints its work size as stderr `key=value` lines, which
+# benches/lib/counters.lua parses into record.counters; each bench names the
+# counters it requires, and a run missing one, or printing it twice, fails.
+#
+# Two kinds of bench.
+#
+# The shipped bin, `target = "mogwai"`: gen, tick-composition, preflight,
+# measure, fit, cache, synth, arrival-screen. Benching through the built
+# `mogwai` measures what ships, startup and argument parsing included, which
+# is the honest end-to-end number. Every artifact they write is pointed into
+# the iteration, never at analysis/ or target/.
+#
+# The instruments, `target = "mogwai-bench"`: the loops with no command line
+# of their own - the arrival draw, the screen's projection, and in time the
+# engine's matching loop, the serving path and the adapter. Each is one
+# subcommand of that bin. Adding a surface to the measurable set is adding a
+# subcommand and a bench here, which is the work you were going to do anyway
+# the moment you wanted to optimize it.
+#
+# Profiling. `hotpath_features` and `alloc_features` are added only under
+# `--hotpath` and `--alloc`, and a timing run whose build resolves either
+# fails its arm, so a timing row is never instrumented. A bench carries them
+# where the profiler can say something about it; the per-bench notes say why
+# the others do not.
+#
+# Every bench sets `profile = "release"`: `[bin] debug = true` in brokkr.toml
+# would otherwise build it dev.
+#
+# Not here: `fill_walk_bench` and `symbol_decode_probe`, still example
+# targets. The first is a criterion harness that parses `--bench` itself; run
+# it with `brokkr run --release fill_walk_bench -- --bench`. The second
+# answered one question - what an inline fixed-capacity `Symbol` would buy the
+# adapter's decode path - and the answer was a refusal, recorded in
+# `reference/performance.md`; a bench would invite re-benching a decision
+# already made. Run it with `brokkr run --release symbol_decode_probe --
+# 2000000`.
+#
+# bench_scripts makes `brokkr check` refuse any .lua under benches/ that is
+# neither a registered script_file, a bench_lib module nor a contract test.
+# bench_tests holds the contract tests (`brokkr man bench contract-tests`),
+# run by `brokkr check` and by `brokkr bench --test`.
+
+bench_lib = "../benches/lib"
+bench_scripts = "../benches"
+bench_tests = "../benches/tests"
+
+# -- mogwai
+
+[bench.arrival-screen]
+script_file = "../benches/mogwai/arrival-screen.lua"
+description = "The arrival model's necessary-condition screen: the grid run, its cost probe or its demand census"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; artifacts written into the iteration" },
+]
+target = "mogwai"
+profile = "release"
+iterations = 1
+params.mode = { choices = ["screen", "cost-probe", "demand-census"], default = "screen", help = "screen: the grid run; cost-probe: --cost-probe; demand-census: --demand-census" }
+params.jobs = { integer = "u64", min = 1, help = "concurrent projection workers; omitted keeps the binary's default" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.cache]
+script_file = "../benches/mogwai/cache.lua"
+description = "The on-disk cache controls: stats over a cache root, or clean over an empty one"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; clean always runs against an iteration-owned empty root" },
+]
+target = "mogwai"
+profile = "release"
+params.action = { choices = ["stats", "clean"], default = "stats", help = "the cache subcommand; clean never touches a real cache root" }
+params.entries = { choices = ["yes", "no"], default = "no", help = "yes: stats --entries" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last; --cache-dir here picks the stats root" }
+
+# The delivered corpus is a plain dataset, `path` plus `xxh128`, declared per
+# host under brokkr.d/hosts/. Binding it makes brokkr reserve the directory
+# and digest it with the run, so a cross-month comparison can tell two
+# corpora apart. That digest is about drift, the file under this path not
+# being the file it was last time; the commands' own SHA-256 checks against
+# the jobs manifest and the preflight artifact are about the contents being
+# the ones the method was fitted to.
+
+[bench.fit]
+script_file = "../benches/mogwai/fit.lua"
+description = "The session calibration fit over a bound corpus"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; corpus bound as a dataset" },
+]
+target = "mogwai"
+profile = "release"
+iterations = 1
+params.corpus = { from = "datasets", default = "mnq-tbbo-july", help = "the delivered corpus" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.gen]
+script_file = "../benches/mogwai/gen.lua"
+description = "One offline generator walk and its formatted output, end to end"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; output written into the iteration" },
+]
+target = "mogwai"
+profile = "release"
+params.type = { choices = ["trades", "quotes", "bars", "summary", "trace", "measure12a"], default = "trades", help = "what the walk emits" }
+params.length = { free = true, split = false, help = "sim-time span, as gen --length takes it; omitted keeps the binary's default" }
+params.interval = { free = true, split = false, help = "bar interval, required by --type bars" }
+params.symbol = { free = true, split = false, help = "the instrument; omitted keeps the binary's default, and leave it unbound when --args passes --config" }
+params.seed = { integer = "u64", help = "walk seed; omitted keeps the binary's default" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.measure]
+script_file = "../benches/mogwai/measure.lua"
+description = "The corpus measurement gate over a bound corpus: the observed pass and the eight attestation walks"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; corpus bound as a dataset" },
+]
+target = "mogwai"
+profile = "release"
+iterations = 1
+params.corpus = { from = "datasets", default = "mnq-tbbo-july", help = "the delivered corpus" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.preflight]
+script_file = "../benches/mogwai/preflight.lua"
+description = "The fail-closed TBBO corpus contract check over a bound corpus"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; corpus bound as a dataset" },
+]
+target = "mogwai"
+profile = "release"
+iterations = 1
+params.corpus = { from = "datasets", default = "mnq-tbbo-july", help = "the delivered corpus" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.synth]
+script_file = "../benches/mogwai/synth.lua"
+description = "Offline synthesis of the fingerprint or the cadence measurement"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; artifact written into the iteration" },
+]
+target = "mogwai"
+profile = "release"
+params.command = { choices = ["fingerprint", "cadence"], required = true, help = "the synth subcommand" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+[bench.tick-composition]
+script_file = "../benches/mogwai/tick-composition.lua"
+description = "The BBO protocol composition measurement behind the budget fixtures"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the brokkr mogwai bin surface; fixture written into the iteration" },
+]
+target = "mogwai"
+profile = "release"
+params.parents = { integer = "u64", min = 1, help = "parent events per combination; omitted keeps the binary's default" }
+params.jobs = { integer = "u64", min = 1, help = "traversal workers; omitted keeps the machine's parallelism" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+# -- mogwai-bench
+
+# The parent draw with no projection attached. Profilable: its one annotated
+# region is each family's whole walk, never the nanosecond draw.
+[bench.arrival-walk]
+script_file = "../benches/mogwai-bench/arrival-walk.lua"
+description = "The arrival parent draw alone, three kernel families at two million parents each"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the arrival_walk brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+
+# A deliberately ms-scale workload rather than a mode of the full screen,
+# which is a property of the profiler rather than an architectural layer: the
+# hotpath crate queues one event per instrumented call and drains at roughly
+# 1.3M events/s, so a seconds-scale run backlogs tens of gigabytes. dellingr
+# ships a second ms-scale file per workload for exactly this reason and
+# pbfhogg keeps its instrumentation sparse to avoid it.
+[bench.screen-projection]
+script_file = "../benches/mogwai-bench/screen-projection.lua"
+description = "One Stage A screen cell per family at one seed, projection attached, cache bypassed"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the screen_projection brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+
+# A gate that became a measurement. It was `tape_lateness_under_acceleration`,
+# asserting a 50 ms p99 - a statement about the host rather than about the
+# code, unjudgeable in the debug lane and unreliable in the release one, and
+# therefore excluded from both. The number is worth having on every run; the
+# threshold was never portable. No profiling features: its result is a
+# latency distribution, and an instrumented build would put the profiler's
+# per-call cost inside it.
+[bench.tape-lateness]
+script_file = "../benches/mogwai-bench/tape-lateness.lua"
+description = "How late a paced tape arrives at a consumer that keeps up, under acceleration"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the tape_lateness brokkr mogwai target, now a mogwai-bench subcommand; the venue binary is named by --venue" },
+]
+target = "mogwai-bench"
+profile = "release"
+params.config = { free = true, split = false, help = "venue config path; omitted means the accelerated fixture" }
+params.sample-seconds = { number = true, min = 0.001, max = 3600, help = "sample length in seconds; omitted keeps the harness default of 10" }
+params.venue = { free = true, split = false, help = "the mogwai venue binary to launch, as MOGWAI_VENUE_BINARY; not built or digested by brokkr" }
+
+[bench.ring-sizing]
+script_file = "../benches/mogwai-bench/ring-sizing.lua"
+description = "The eager resident and allocator cost of one shipped per-boat broadcast ring"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the ring_sizing brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+
+# Registered bare under `brokkr mogwai` so its canonical row was measured on
+# an uninstrumented build. Script benches guarantee that for every timing run,
+# so the profiling features are carried here; the script's header says which
+# mode is practical under them.
+[bench.stage-a-batch]
+script_file = "../benches/mogwai-bench/stage-a-batch.lua"
+description = "The frozen Stage A throughput panels, or the pilot and manifest that define them"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the stage_a_batch brokkr mogwai target, now a mogwai-bench subcommand; pilot and manifest output written into the iteration" },
+]
+target = "mogwai-bench"
+profile = "release"
+iterations = 1
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+params.mode = { choices = ["quick", "full", "pilot", "manifest"], required = true, help = "the panel to run, or the pilot or manifest to regenerate" }
+params.jobs = { integer = "u64", min = 1, help = "worker threads; omitted keeps the available parallelism" }
+params.args = { validated = true, split = false, help = "extra words as one JSON array, appended last" }
+
+# One predictive-envelope replicate month is the unit the envelope budgets are
+# derived from: an evaluation is 500 * (1 + K) months and nothing else, so a
+# per-month price multiplies out to every K tier. No profiling features: its
+# canonical output is a wall and a unit price.
+[bench.envelope-evaluation]
+script_file = "../benches/mogwai-bench/envelope-evaluation.lua"
+description = "Predictive-envelope replicate months for one family's probe cell, priced per month"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the envelope_evaluation brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+params.family = { choices = ["event_markov", "wall_mmpp", "log_ou_cox", "self_exciting", "shot_noise"], default = "shot_noise", help = "the arrival family, in the seam spelling" }
+params.months = { integer = "u64", min = 1, help = "replicate months; omitted keeps the harness default of 32" }
+
+# Keeps the tag-decode table in `reference/performance.md` re-runnable rather
+# than a number someone once printed. No profiling features: it counts
+# allocator calls through its own allocator, which `--alloc` would displace,
+# its per-frame cost is nanoseconds, which `--hotpath` would dominate, and the
+# harness refuses an instrumented build.
+[bench.tag-decode]
+script_file = "../benches/mogwai-bench/tag-decode.lua"
+description = "The per-frame cost and allocator calls of the wire decoder over one Trade"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the tag_decode_probe brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+params.iterations = { integer = "u64", min = 1, help = "iterations per arm; omitted keeps the harness default of 2,000,000" }
+
+[bench.order-path-refold]
+script_file = "../benches/mogwai-bench/order-path-refold.lua"
+description = "Submit, amend and cancel against the aggregate hold fold for a margin-equity account"
+version = 1
+date = 2026-11-26
+changelog = [
+  { version = 1, date = 2026-11-26, note = "Ported from the order_path_refold brokkr mogwai target, now a mogwai-bench subcommand" },
+]
+target = "mogwai-bench"
+profile = "release"
+params.resting = { integer = "u64", min = 2, default = "50", help = "resting orders; 50 is the canonical decision cell" }
+params.rounds = { integer = "u64", min = 1, help = "submit-amend-cancel rounds; omitted keeps the harness default of 2,000" }

@@ -8,50 +8,38 @@
 //! than a full generator walk and measured ~2x. This harness is the control for
 //! that finding: it runs the kernel draw and nothing else, so whatever it costs
 //! is the floor no measurement-side optimization can go below. Pair it with
-//! `mogwai-lab`'s `screen_projection_bench`, which runs the same walk with the
-//! projection attached; the difference between the two is the whole budget the
-//! Stage A round is spending against.
+//! `screen-projection`, which runs the same walk with the projection attached;
+//! the difference between the two is the whole budget the Stage A round is
+//! spending against.
 //!
-//! A designed workload, not the MNQ cell. This crate cannot see a preset - that
-//! resolution lives in `mogwai-venue` and depending on it here would invert
-//! the layering - so the walk runs on fingerprint medians, an all-ones session
-//! profile and no calendar. That makes the numbers a property of the kernel
-//! itself, and means they are never comparable with a screen cell's per-seed
-//! cost in absolute terms. What they are comparable in is cost per parent, which is how
-//! the subtraction against `screen_projection_bench` is read; see the reading
-//! rules in `reference/performance.md`.
+//! A designed workload, not the MNQ cell. It uses only `mogwai-data`, and
+//! preset resolution lives in `mogwai-venue`, so the walk runs on fingerprint
+//! medians, an all-ones session profile and no calendar. That makes the
+//! numbers a property of the kernel itself, and means they are never
+//! comparable with a screen cell's per-seed cost in absolute terms. What they
+//! are comparable in is cost per parent, which is how the subtraction against
+//! `screen-projection` is read; see the reading rules in
+//! `reference/performance.md`.
 //!
 //! Every family is walked for the same number of parents rather than for the
 //! same span: the four differ in realized rate by construction, so equal spans
 //! would compare four different amounts of work and read as a family cost
 //! difference.
 //!
-//! Run it as a release example with the `hotpath` feature on; the invocation
-//! is in `reference/performance.md`. `required-features` in `Cargo.toml` makes
-//! an uninstrumented build of this target impossible, which is the point - a
-//! profiling harness that silently measures nothing looks exactly like a
-//! profile with no hot spots.
+//! Profile it with the `hotpath` feature on. Built without it, the annotation
+//! below compiles away and the run reports only its scraped counters - a
+//! profiling run that silently measured nothing would look exactly like a
+//! profile with no hot spots, so read a profile only from an instrumented
+//! build.
 
 use mogwai_data::{ArrivalConfig, CadenceWalk, Fingerprint, GeneratorScalars, SessionProfile};
 
 /// A `key=value` scalar on stderr, the scrape surface a benchmark harness reads
-/// an end-of-run metric from.
-///
-/// Written out by hand rather than called from `mogwai_lab::sidecar` because
-/// the lab sits above this crate: a shared emitter reachable from here would
-/// mean mogwai-data depending on its own consumer. Three lines of `eprintln!`
-/// is the right price for keeping that arrow pointing one way.
+/// an end-of-run metric from. Written out by hand, as the original harness in
+/// `mogwai-data` had to; kept so this instrument's output stays the same.
 fn kv(key: &str, value: &str) {
     eprintln!("{key}={value}");
 }
-
-/// hotpath does not install its counting allocator itself - the crate exposes
-/// it and leaves the choice to the binary. Without this line an alloc-mode run
-/// completes, reports zero bytes for every frame, and looks like a program that
-/// does not allocate.
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 /// Parents drawn per family. Large enough that the per-run fixed cost is
 /// negligible and small enough that the whole harness is seconds, not minutes -
@@ -64,10 +52,9 @@ const ORIGIN_NS: u64 = 1_700_438_400_000_000_000;
 
 /// One representative cell per kernel family. These are the Stage A probe cells
 /// (`mogwai_lab::arrival_screen::probe_cell`), transcribed rather than imported
-/// because this crate sits below the lab and must not learn about the screen.
-/// A transcription can drift from its source; that is acceptable for an
-/// instrument whose job is relative cost, and would not be for anything a
-/// verdict reads.
+/// so the instrument stays a pure `mogwai-data` workload. A transcription can
+/// drift from its source; that is acceptable for an instrument whose job is
+/// relative cost, and would not be for anything a verdict reads.
 const CELLS: [(&str, ArrivalConfig); 3] = [
     (
         "wall_mmpp",
@@ -135,13 +122,7 @@ fn walk_family(config: ArrivalConfig, seed: u64) -> (u64, u64) {
     (parents, children)
 }
 
-fn main() {
-    // Bound to a named guard. `let _ = ...` drops it on the spot, which ends
-    // profiling before the first walk and writes an empty report; the report is
-    // written by the Drop impl, so the binding has to outlive the work.
-    #[cfg(feature = "hotpath")]
-    let _guard = hotpath::HotpathGuardBuilder::new("main").build();
-
+pub(crate) fn run() {
     let started = std::time::Instant::now();
     let mut parents = 0_u64;
     let mut children = 0_u64;

@@ -20,13 +20,15 @@
 //! arithmetic on a measured unit rather than an hour of waiting.
 //!
 //! Reads the committed `analysis/mnq-measure-12a.json` for the frozen exposure,
-//! so it runs anywhere the repository is checked out and needs no market data.
+//! relative to the working directory, so it runs from the repository root
+//! anywhere it is checked out and needs no market data.
 //!
-//! Argv: `<family> [months]`, family being one of the seam spellings
+//! Argv: `[family] [months]`, family being one of the seam spellings
 //! (`event_markov`, `wall_mmpp`, `log_ou_cox`, `self_exciting`, `shot_noise`)
-//! and `months` defaulting to 32. Emits `key=value` scalars on stderr per the
-//! output-channel convention, work size beside the timing: a simulator that got
-//! faster by simulating fewer grid cells is not a simulator that got faster.
+//! and defaulting to `shot_noise`, `months` defaulting to 32. Emits `key=value`
+//! scalars on stderr per the output-channel convention, work size beside the
+//! timing: a simulator that got faster by simulating fewer grid cells is not a
+//! simulator that got faster.
 
 use std::path::Path;
 
@@ -35,12 +37,31 @@ use mogwai_lab::arrival_envelope::{
 };
 use mogwai_lab::arrival_screen::{CADENCE_STEP_NS, Family, ScreenContext};
 
-/// hotpath leaves installing its counting allocator to the binary.
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 const MEASURE: &str = "analysis/mnq-measure-12a.json";
+
+/// The family on the command line, in the seam spellings `Family::as_str`
+/// prints.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum FamilyArg {
+    EventMarkov,
+    WallMmpp,
+    LogOuCox,
+    SelfExciting,
+    ShotNoise,
+}
+
+impl From<FamilyArg> for Family {
+    fn from(family: FamilyArg) -> Self {
+        match family {
+            FamilyArg::EventMarkov => Self::EventMarkov,
+            FamilyArg::WallMmpp => Self::WallMmpp,
+            FamilyArg::LogOuCox => Self::LogOuCox,
+            FamilyArg::SelfExciting => Self::SelfExciting,
+            FamilyArg::ShotNoise => Self::ShotNoise,
+        }
+    }
+}
 
 /// One replicate month at the family's frozen probe cell, through the same
 /// `simulate_month` the envelope calls. Annotated at this level and not inside
@@ -54,22 +75,8 @@ fn month(cell: &mogwai_lab::arrival_screen::Cell, grid: &ExposureGrid, replicate
     stats.hourly_rate.iter().sum()
 }
 
-fn main() {
-    #[cfg(feature = "hotpath")]
-    let _guard = hotpath::HotpathGuardBuilder::new("main").build();
-
-    let mut argv = std::env::args().skip(1);
-    let family = match argv.next().as_deref() {
-        Some("event_markov") => Family::EventMarkov,
-        Some("wall_mmpp") => Family::WallMmpp,
-        Some("log_ou_cox") => Family::LogOuCox,
-        Some("self_exciting") => Family::SelfExciting,
-        Some("shot_noise") | None => Family::ShotNoise,
-        Some(other) => panic!("unknown family {other}"),
-    };
-    let months: usize = argv
-        .next()
-        .map_or(32, |value| value.parse().expect("months parses"));
+pub(crate) fn run(family: FamilyArg, months: usize) {
+    let family = Family::from(family);
 
     let context = ScreenContext::open(Path::new(MEASURE), None).expect("the 12a artifact opens");
     let grid = ExposureGrid::new(

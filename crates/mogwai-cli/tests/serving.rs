@@ -514,8 +514,8 @@ async fn binary_command_frames_receive_a_protocol_error() {
 // from one that cannot. A gate nobody can evaluate is excluded from every lane
 // that would run it, and an excluded gate measures nothing at all.
 //
-// It is a benchmark instead - `examples/tape_lateness_bench.rs`, registered as a
-// measurable target - so the number is recorded on every run against the machine
+// It is a benchmark instead - `mogwai-bench tape-lateness`, in
+// `crates/mogwai-bench` - so the number is recorded on every run against the machine
 // and the commit that produced it, which is what makes a regression visible
 // without pretending a threshold is portable. `reference/performance.md` keeps
 // the readings.

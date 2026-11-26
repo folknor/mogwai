@@ -29,7 +29,7 @@
 //! comparable against another if both loops ended the same way, so the loop
 //! records whether it ran the whole sample or stopped early and why.
 
-use std::{ffi::OsString, time::Duration};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use futures_util::StreamExt;
 use mogwai_protocol::{
@@ -38,43 +38,75 @@ use mogwai_protocol::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-/// The venue binary sits beside the `examples/` directory this was built into.
-/// Resolved rather than assumed on `PATH`: a measurement of "what ships" must be
-/// of the binary built from this tree, not of whatever a shell happens to find.
+/// Names the venue binary to measure, overriding the sibling lookup. A bench
+/// runner that executes a copy of this binary from somewhere other than the
+/// cargo target directory sets it to the venue built from the measured tree.
+const VENUE_BINARY_ENV: &str = "MOGWAI_VENUE_BINARY";
+
+/// The venue binary: `MOGWAI_VENUE_BINARY` when set, else the `mogwai` beside
+/// this executable in the cargo target directory. Resolved rather than assumed
+/// on `PATH`: a measurement of "what ships" must be of the binary built from
+/// this tree, not of whatever a shell happens to find. A relative override is
+/// made absolute here, because the launcher would otherwise search `PATH` for
+/// a bare name while the check below looked in the working directory.
 fn venue_binary() -> OsString {
-    let exe = std::env::current_exe().expect("this example has a path");
-    let profile_dir = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("<target>/<profile>/examples/<name>");
-    let candidate = profile_dir.join(mogwai_protocol::launch::DEFAULT_BINARY);
+    let candidate = match std::env::var_os(VENUE_BINARY_ENV) {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .expect("the working directory resolves")
+                    .join(path)
+            }
+        }
+        None => {
+            let exe = std::env::current_exe().expect("this binary has a path");
+            exe.parent()
+                .expect("<target>/<profile>/mogwai-bench")
+                .join(mogwai_protocol::launch::DEFAULT_BINARY)
+        }
+    };
     assert!(
         candidate.is_file(),
-        "the venue binary is not beside this example at {}; build the workspace binaries first",
+        "the venue binary is not at {}; build the workspace binaries first or set {VENUE_BINARY_ENV}",
         candidate.display()
     );
     candidate.into_os_string()
 }
 
-#[tokio::main]
-async fn main() {
-    let mut args = std::env::args().skip(1);
+/// The accelerated fixture, in `mogwai-cli`'s test configs. Anchored at compile
+/// time on this crate's manifest directory, so the string is the same
+/// `crates/mogwai-cli/tests/configs/accelerated.toml` path the harness printed
+/// when it lived in `mogwai-cli`.
+fn default_config() -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the bench crate sits under crates/")
+        .join("mogwai-cli/tests/configs/accelerated.toml")
+        .display()
+        .to_string()
+}
+
+pub(crate) fn run(config: Option<String>, sample_seconds: f64) {
+    // The multi-thread runtime with every driver enabled, which is what
+    // `#[tokio::main]` expanded to when this was an example's `main`.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the tokio runtime builds")
+        .block_on(measure(config, sample_seconds));
+}
+
+async fn measure(config: Option<String>, sample_seconds: f64) {
     // An empty first argument means "the default config", so a caller who only
     // wants to change the sample length does not have to restate the fixture
     // path to reach the second positional.
-    let config = args
-        .next()
+    let config = config
         .filter(|arg| !arg.is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/tests/configs/accelerated.toml",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-    let sample = Duration::from_secs_f64(
-        args.next()
-            .map_or(10.0, |raw| raw.parse().expect("sample seconds is a number")),
-    );
+        .unwrap_or_else(default_config);
+    let sample = Duration::from_secs_f64(sample_seconds);
 
     let venue = launch(LaunchSpec {
         binary: Some(venue_binary()),

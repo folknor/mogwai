@@ -6,7 +6,7 @@ Part of the architecture reference. The map and the reading order are in
 
 ## The workspace and the offline evidence toolbox
 
-Seven crates. `mogwai-protocol` owns the wire types and the shipped launcher and
+One crate per directory under `crates/`. `mogwai-protocol` owns the wire types and the shipped launcher and
 imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
 exchange core. `mogwai-data` owns the compact record representation and the
 single-river `RiverSource` interface the serving path reads, the event-facing
@@ -23,9 +23,13 @@ that binds a socket; the rest are the intake and measurement surface - `gen`,
 `minute-range-envelope`, `arrival-control`, `arrival-screen`,
 `arrival-envelope-diagnostic`, `tick-composition-ratios`). `mogwai --help` is
 the authority on the current set. `mogwai-adapter` is
-the lone nautilus-dependent crate, unchanged by anything below.
+the lone nautilus-dependent crate, unchanged by anything below. `mogwai-bench`
+is an unpublished binary of measurement harnesses, the loops with no `mogwai`
+command line, one subcommand each; the `brokkr bench` scripts drive it, nothing
+in the workspace depends on it, and it is outside the shipped build graph.
 
-One binary is a standing decision, not an accident of growth. A split into a
+One shipped binary for the venue and the lab is a standing decision, not an
+accident of growth (`mogwai-bench` is a measurement tool, not a part of it). A split into a
 venue binary and a lab binary was proposed and refused 2026-08-20, and a
 re-proposal has to answer three things. First, `arrival-control`'s B1 gate
 execs `gen` on `current_exe` so the binary generating the byte comparison is

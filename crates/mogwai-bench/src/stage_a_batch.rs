@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Reproducible quick and full panels for Stage A throughput work.
+//!
+//! Argv: `<pilot|manifest|quick|full> [--jobs N] [--measure PATH]
+//! [--manifest PATH] [--pilot PATH] [--output PATH]`. Paths default relative
+//! to the working directory, the repository root.
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Instant;
 
 use mogwai_lab::arrival_screen::{
@@ -19,25 +24,44 @@ use mogwai_lab::stage_a_batch::{
     resolve_cell,
 };
 
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 const MEASURE: &str = "analysis/mnq-measure-12a.json";
 const MANIFEST: &str = "analysis/stage-a-batch-manifest.json";
 const PILOT: &str = "target/stage-a-batch-pilot.json";
 const FROZEN_PILOT: &str = "analysis/stage-a-batch-pilot.json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Mode {
     Pilot,
     Manifest,
     Quick,
     Full,
 }
 
+/// The command line. A repeated option keeps its last value (the subcommand
+/// sets `args_override_self`), and `--jobs` refuses zero on every occurrence,
+/// as the hand-written parser this replaced did.
+#[derive(Debug, clap::Args)]
+pub(crate) struct Args {
+    #[arg(value_enum)]
+    mode: Mode,
+    /// Worker threads; defaults to the available parallelism
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    jobs: Option<u64>,
+    #[arg(long, default_value = MEASURE)]
+    measure: PathBuf,
+    #[arg(long, default_value = MANIFEST)]
+    manifest: PathBuf,
+    #[arg(long, default_value = PILOT)]
+    pilot: PathBuf,
+    /// Kept optional through dispatch: in manifest mode its absence is what
+    /// also writes the frozen pilot
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+/// The parsed arguments with `--jobs` resolved.
 #[derive(Debug)]
-struct Args {
+struct Settings {
     mode: Mode,
     jobs: usize,
     measure: PathBuf,
@@ -79,56 +103,22 @@ struct ValidationCoverage {
     half_b_weighted_s: f64,
 }
 
-fn usage() -> &'static str {
-    "usage: stage_a_batch_bench <pilot|manifest|quick|full> [--jobs N] \
-     [--measure PATH] [--manifest PATH] [--pilot PATH] [--output PATH]"
+fn settings(args: &Args) -> Result<Settings, String> {
+    let jobs = match args.jobs {
+        Some(jobs) => usize::try_from(jobs).map_err(|_| format!("invalid --jobs value {jobs}"))?,
+        None => std::thread::available_parallelism().map_or(1, usize::from),
+    };
+    Ok(Settings {
+        mode: args.mode,
+        jobs,
+        measure: args.measure.clone(),
+        manifest: args.manifest.clone(),
+        pilot: args.pilot.clone(),
+        output: args.output.clone(),
+    })
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut values = std::env::args().skip(1);
-    let mode = match values.next().as_deref() {
-        Some("pilot") => Mode::Pilot,
-        Some("manifest") => Mode::Manifest,
-        Some("quick") => Mode::Quick,
-        Some("full") => Mode::Full,
-        Some("--help" | "-h") => {
-            println!("{}", usage());
-            std::process::exit(0);
-        }
-        _ => return Err(usage().into()),
-    };
-    let mut args = Args {
-        mode,
-        jobs: std::thread::available_parallelism().map_or(1, usize::from),
-        measure: PathBuf::from(MEASURE),
-        manifest: PathBuf::from(MANIFEST),
-        pilot: PathBuf::from(PILOT),
-        output: None,
-    };
-    while let Some(flag) = values.next() {
-        let value = values
-            .next()
-            .ok_or_else(|| format!("{flag} needs a value"))?;
-        match flag.as_str() {
-            "--jobs" => {
-                args.jobs = value
-                    .parse()
-                    .map_err(|_| format!("invalid --jobs value {value}"))?;
-                if args.jobs == 0 {
-                    return Err("--jobs must be positive".into());
-                }
-            }
-            "--measure" => args.measure = value.into(),
-            "--manifest" => args.manifest = value.into(),
-            "--pilot" => args.pilot = value.into(),
-            "--output" => args.output = Some(value.into()),
-            _ => return Err(format!("unknown argument {flag}\n{}", usage())),
-        }
-    }
-    Ok(args)
-}
-
-fn run_pilot(args: &Args) -> Result<(), String> {
+fn run_pilot(args: &Settings) -> Result<(), String> {
     let measurement_sha256 = sha256_file(&args.measure).map_err(|error| error.to_string())?;
     let context = ScreenContext::open(&args.measure, None)
         .map_err(|error| error.to_string())?
@@ -178,7 +168,7 @@ fn run_pilot(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn generate_manifest(args: &Args) -> Result<(), String> {
+fn generate_manifest(args: &Settings) -> Result<(), String> {
     let measurement_sha256 = sha256_file(&args.measure).map_err(|error| error.to_string())?;
     let pilot_bytes = std::fs::read(&args.pilot).map_err(|error| error.to_string())?;
     let pilot: PilotArtifact =
@@ -223,7 +213,7 @@ fn load_manifest(path: &Path, measure: &Path) -> Result<BatchManifest, String> {
     Ok(manifest)
 }
 
-fn run_panel(args: &Args, manifest: &BatchManifest) -> Result<Vec<CellRun>, String> {
+fn run_panel(args: &Settings, manifest: &BatchManifest) -> Result<Vec<CellRun>, String> {
     let panel = match args.mode {
         Mode::Quick => manifest.quick.clone(),
         Mode::Full => manifest.full.clone(),
@@ -458,7 +448,7 @@ fn validation_coverage(results: &[CellRun], manifest: &BatchManifest) -> Validat
 }
 
 fn report_panel(
-    args: &Args,
+    args: &Settings,
     manifest: &BatchManifest,
     results: &[CellRun],
     elapsed_s: f64,
@@ -603,7 +593,7 @@ const fn instrument_set() -> &'static str {
     }
 }
 
-fn benchmark(args: &Args) -> Result<(), String> {
+fn benchmark(args: &Settings) -> Result<(), String> {
     let manifest = load_manifest(&args.manifest, &args.measure)?;
     let sampler = ResourceSampler::start(Vec::new(), None);
     sidecar::marker(if args.mode == Mode::Quick {
@@ -619,18 +609,18 @@ fn benchmark(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
+/// Returns the exit status rather than calling `std::process::exit`, so the
+/// hotpath guard in `main` still drops and writes its report on failure.
+pub(crate) fn run(args: &Args) -> ExitCode {
     sidecar::init();
-    #[cfg(feature = "hotpath")]
-    let _guard = hotpath::HotpathGuardBuilder::new("main").build();
-
-    let result = parse_args().and_then(|args| match args.mode {
+    let result = settings(args).and_then(|args| match args.mode {
         Mode::Pilot => run_pilot(&args),
         Mode::Manifest => generate_manifest(&args),
         Mode::Quick | Mode::Full => benchmark(&args),
     });
     if let Err(error) = result {
         eprintln!("error: {error}");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }

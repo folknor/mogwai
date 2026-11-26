@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! Submit, amend and cancel against the aggregate hold fold for a margin-equity
+//! account.
+//!
+//! Argv: `[resting orders] [rounds]`, defaulting to 50 and 2,000; the canonical
+//! decision cell is 50 resting orders. The timed wall goes to stdout as
+//! `elapsed_ns`, the work sizes to stderr.
+
 use std::{collections::HashMap, hint::black_box, time::Instant};
 
 use mogwai_engine::{
@@ -32,13 +39,7 @@ fn limit(id: String, price: i64) -> SubmitOrder {
     }
 }
 
-fn main() {
-    let resting = std::env::args().nth(1).map_or(50, |value| {
-        value.parse::<usize>().expect("resting order count")
-    });
-    let rounds = std::env::args()
-        .nth(2)
-        .map_or(2_000, |value| value.parse::<usize>().expect("round count"));
+pub(crate) fn run(resting: usize, rounds: usize) {
     assert!(resting >= 2, "the mix needs at least two resting orders");
 
     let instrument = InstrumentDef {

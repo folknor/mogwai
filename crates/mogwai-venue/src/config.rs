@@ -26,8 +26,8 @@ use crate::source;
 /// tokio broadcast ring is eagerly allocated at roughly 40 bytes per slot and
 /// that depth costs on the order of 170 MB - per boat, once boats are plural.
 ///
-/// Public so the `ring_sizing` benchmark measures the depth that ships rather
-/// than a copy of it that can drift.
+/// Public so the `ring-sizing` benchmark in `mogwai-bench` measures the depth
+/// that ships rather than a copy of it that can drift.
 pub const DEFAULT_FANOUT_DEPTH: usize = 1_048_576;
 
 /// Replay/runtime configuration, loaded from a TOML config file at startup

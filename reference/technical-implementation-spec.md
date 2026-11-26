@@ -69,11 +69,12 @@ the one the project has already settled.
      runnable this way).
    - `brokkr run mogwai -- serve` plus `python3 scripts/smoke.py` - the live
      end-to-end path over a real socket.
-   - `brokkr mogwai ... --bench/--hotpath/--alloc`, `brokkr results` and
-     `brokkr sidecar` - the durable measurement record. A spec whose gate is
-     a number names the invocation and the row it is compared against, and a
-     benched surface emits its work size as a counter so a wall delta cannot
-     be confused with doing less work.
+   - `brokkr bench NAME --param value` (with `--iterations`, `--hotpath` or
+     `--alloc` before the name), `brokkr results` and `brokkr sidecar` - the
+     durable measurement record. A spec whose gate is a number names the
+     invocation and the run it is compared against, and a benched surface
+     emits its work size as a counter, parsed by its bench script into the
+     stored record, so a wall delta cannot be confused with doing less work.
 
    The profile split bites: `brokkr check` runs tests in dev and `brokkr
    test` in release. A brick whose gate pins `debug_assertions` behaviour

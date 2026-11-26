@@ -44,13 +44,6 @@ zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2
 nix = { version = "0.32.0", default-features = false }
 hotpath = { workspace = true, optional = true }
 
-# Examples only. `ring_sizing` allocates one shipped per-boat broadcast ring to
-# measure its eager resident cost. The library names no tokio item itself, so
-# it is declared here rather than as a dependency, though tokio reaches the
-# library's build through mogwai-venue anyway.
-[dev-dependencies]
-tokio.workspace = true
-
 # Mirrors mogwai-data's two-level indirection; see the note there. `hotpath`
 # also forwards to mogwai-data's own feature, because a projection profile that
 # stopped at the crate boundary would attribute the whole parent walk to one
@@ -67,23 +60,6 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "mogwai-data/hotpath"]
 # See the module comment in `tree.rs` for the second, runtime guard.
 test-seam = []
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "mogwai-data/hotpath-alloc"]
-
-# The layer-2 projection instrument. `required-features` is what stops a plain
-# `--examples` build from producing a binary named for profiling that measures
-# nothing: without the feature the annotations compile away and the harness
-# would run, report an empty table, and look like a finding.
-[[example]]
-name = "screen_projection_bench"
-required-features = ["hotpath"]
-
-[[example]]
-name = "stage_a_batch_bench"
-
-# No `required-features`: its canonical output is a WALL and a per-month unit
-# price, which an instrumented build would distort. `--hotpath` on this target
-# is opt-in through the call site's own `--features`.
-[[example]]
-name = "envelope_evaluation_bench"
 
 # Every integration test compiles into the one `all` target below, which
 # `autotests = false` in [package] makes the only one. Cargo's default links a

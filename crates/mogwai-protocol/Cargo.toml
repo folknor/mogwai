@@ -35,19 +35,12 @@ nix = { version = "0.32.0", features = ["process", "signal"] }
 
 [dev-dependencies]
 
-# The wire-decode cost probe behind `reference/performance.md`'s tag-decode
-# table. No `required-features`: it counts allocator calls with its own
-# wrapping global allocator, so an instrumented build would measure the
-# profiler's allocator instead of serde's.
-[[example]]
-name = "tag_decode_probe"
-
 # The symbol-representation probe behind `reference/performance.md`'s inline
-# `Symbol` table, which refused that change. No `required-features` for exactly
-# the same reason as above: it wraps the global allocator too, so an
-# instrumented build would count the profiler's allocator rather than serde's.
-# Nor is it a `brokkr mogwai` target, deliberately - `brokkr.toml` records
-# why beside the other non-registrations.
+# `Symbol` table, which refused that change. No `required-features`: it wraps
+# the global allocator to count allocator calls, so an instrumented build
+# would count the profiler's allocator rather than serde's. Nor is it a
+# registered bench, deliberately - it settled one question, and a registered
+# bench invites re-benching a decision already made.
 [[example]]
 name = "symbol_decode_probe"
 

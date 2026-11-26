@@ -4,9 +4,19 @@ Measured numbers across every operational surface, plus how to obtain and read
 them. Every later change that moves a number appends a row; rows are never
 edited in place, so this file is a history and not a snapshot.
 
-Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
-here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
-Numbers from the criterion harnesses do not, and are pinned by commit instead.
+Benched numbers carry their result UUID, so any claim here can be re-derived -
+`brokkr results <uuid>` and `brokkr sidecar <uuid>`. Numbers from the
+criterion harnesses do not, and are pinned by commit instead.
+
+Benching has moved to `brokkr bench` script benches (the invocation surface
+below). Every UUID recorded before the move was measured through brokkr's
+retired per-project bench command and its target registry, and is kept as a
+historical record: those rows live in `.brokkr/results.db`, not the bench
+store `brokkr bench` writes, under a different pairing key, so they never pair with a `brokkr bench` run, and a
+before-and-after reading across the move is two readings, not a comparison.
+Where an older section names one of the eight harness targets listed under
+the invocation surface, the same loop is now a subcommand of `mogwai-bench`,
+run through its bench.
 
 ## The arrival kernel's cost cliff, 2026-08-19
 
@@ -174,7 +184,8 @@ Two cuts, and neither weakened a gate.
 The binary ran twice for nothing. The `instrumented` sweep builds this crate
 with `hotpath-alloc` so that a feature nothing compiles cannot rot; that is a
 compile-time property, and `crates/mogwai-data/src` carries no `hotpath`
-annotation at all - the crate's only one is in `examples/arrival_walk_bench.rs`.
+annotation at all - the crate's only one was in its `arrival_walk` example
+harness, which has since moved to `mogwai-bench` as `arrival-walk`.
 So the second sweep re-executed every million-tick walk to learn nothing: the
 same test measures 7.65 s in the default shape and 7.67 s in the instrumented
 one. The five walks over ~2 s now carry `#[cfg(not(feature = "hotpath"))]`, so
@@ -316,12 +327,12 @@ cost the other 57 used to pay each.
 ## Session-segment cut and compose, 2026-08-18
 
 The session-segment sampler's two offline surfaces, measured on host `bygg`
-against the delivered MNQ 2026-04 TBBO month. Not through `brokkr mogwai`, and
-the reason is worth recording: that tool resolves the first token after `--` as
-a harness target unless it is one of the CLI subcommands it already knows, and
-`segments` is new, so an argv-shaped bench of it is refused with
-`unknown target "segments"` despite the documented rule that CLI surfaces need
-no registration. The commands therefore emit their own elapsed as stderr
+against the delivered MNQ 2026-04 TBBO month. Not through the bench command of
+the day, and the reason is worth recording: that command, since retired,
+resolved the first token after `--` as a harness target unless it was one of
+the CLI subcommands it already knew, and `segments` was new, so an argv-shaped
+bench of it was refused with `unknown target "segments"` despite the
+documented rule that CLI surfaces needed no registration. The commands therefore emit their own elapsed as stderr
 counters - `cut_seconds`, `library_load_seconds`, `compose_seconds` - beside
 the work-size counters they already carried, which makes the surface
 self-measuring rather than dependent on that resolution being fixed.
@@ -373,13 +384,14 @@ here is a gate.
 
 Piece 9 reduced the shipped per-boat `fanout_depth` to 1,048,576, the smallest
 power of two already measured to hold the protocol-8 worst p99.9 wall-second
-frame work. On host `bygg`, `brokkr mogwai ring_sizing --alloc 3 --force`
+frame work. On host `bygg`, the `ring_sizing` harness target of the retired
+target registry, run under alloc profiling with argv `3` on a dirty tree,
 reported `ring_resident_bytes=42213376` for one eagerly allocated Tokio
 broadcast ring. It was measured from the dirty tree that preceded the boatyard
 landing, so brokkr correctly stored no durable results row; the benchmark's
 stderr counter is the measurement record for this landing. The depth itself is
 `mogwai_venue::config::DEFAULT_FANOUT_DEPTH`, public precisely so the
-`ring_sizing` harness measures the shipped value rather than a copy of it, and
+ring-sizing harness, now `mogwai-bench ring-sizing`, measures the shipped value rather than a copy of it, and
 the ring is allocated per boat - a run serving several rivers at once pays it
 once per placed boat.
 
@@ -458,51 +470,65 @@ Fill behaviour is gated automatically, by
 
 ## The invocation surface
 
-Settled 2026-08-10, replacing the two-layer setup that preceded it. There are no
-layers and no frozen workloads: the argv is composed at the call site and
-captured verbatim in the row, so pairing rows is a query rather than a name
-lookup. The registry that carries the targets and their feature shapes, and the
-reasoning for what it deliberately leaves out, is `brokkr.toml`.
+Script benches, `brokkr bench NAME --param value`, with the manual in `brokkr
+man bench` and `brokkr man bench-config`. There are no layers and no frozen
+workloads: a bench takes typed params plus a passthrough for the rest of its
+subcommand's argv, so the workload is composed at the call site, and the
+stored run keeps its bound params and every child's argv. Runs pair on the
+bench, the bound params and the measurement class, so pairing is a query
+rather than a name lookup; the argv is evidence, not identity, so a value that
+defines the workload must be a bound param. The registry is
+`brokkr.d/benches.toml`, included from `brokkr.toml`: one `[bench.NAME]` table
+per bench with its build settings, params and annotations, its Lua under
+`benches/FAMILY/NAME.lua`, shared modules in `benches/lib`, and contract tests
+in `benches/tests` that `brokkr check` runs. The registry's header comment
+carries the layout rules.
 
-Two kinds of surface, the same three modes over both. Recording a row needs a
-clean tree.
+Two kinds of bench, the same three modes over both: timing (the default, its
+count set by `--iterations N`), `--hotpath` and `--alloc`, each flag brokkr's
+option and so before the bench name. A dirty tree's run is stored and marked
+dirty, and `brokkr results --compare` never pairs it; a run meant to stand for a commit comes
+from a clean tree or `--commit`.
 
-**CLI surfaces, through the shipped bin.** No registration beyond the bin
-itself, so benching measures what ships, startup and argument parsing included.
+**CLI benches, through the shipped bin.** One bench per `mogwai` subcommand
+that is benched, running `mogwai` itself, so benching measures what ships,
+startup and argument parsing included. The bench for `gen`, for instance, is
+`brokkr bench gen` with the generator's arguments as its params.
+
+**Harness benches, through `mogwai-bench`.** These are the loops with no
+`mogwai` command line. Each is a subcommand of the unpublished `mogwai-bench`
+bin taking the argv its former example target took - `arrival-walk`,
+`screen-projection`, `tape-lateness`, `ring-sizing`, `stage-a-batch`,
+`envelope-evaluation`, `tag-decode` and `order-path-refold` - and each has a
+bench of its own:
 
 ```
-brokkr mogwai -- gen --type summary --symbol MNQ --seed 1
-brokkr mogwai -- arrival-screen --cost-probe
+brokkr bench --hotpath arrival-walk
+brokkr bench --alloc screen-projection
 ```
 
-**Harness surfaces, through an example target.** These are the loops with no
-command line. They resolve by name against `[mogwai.targets.*]` in
-`brokkr.toml`, which carries the feature shape each one needs.
+`arrival-walk` runs the kernel draw with no projection attached;
+`screen-projection` runs one Stage A cell with the projection. The gap between
+them is the measurement cost the Stage A round is spending against, and it is
+read by subtraction rather than by annotation - see the reading rules below.
 
-```
-brokkr mogwai arrival_walk --hotpath
-brokkr mogwai screen_projection --alloc
-```
+A profile needs the bench to declare it: `--hotpath` is refused for a bench
+that sets no `hotpath_features` and `--alloc` for one that sets no
+`alloc_features`, a profiled iteration must capture a report from every call
+its script marks, and a timing
+run whose build resolves one of those features fails rather than reporting an
+instrumented wall. hotpath ships its counting allocator without installing it,
+so a harness measured under `--alloc` must declare the `#[global_allocator]`
+itself under the alloc feature; an alloc run without that line reports zero
+bytes everywhere.
 
-`arrival_walk` (`mogwai-data`) runs the kernel draw with no projection attached;
-`screen_projection` (`mogwai-lab`) runs one Stage A cell with the projection.
-The gap between them is the measurement cost the Stage A round is spending
-against, and it is read by subtraction rather than by annotation - see the
-reading rules below.
+brokkr keeps each child's stderr tail as evidence but never turns it into
+record entries: each script parses its surface's `key=value` counters into
+`record.counters`, which is what `brokkr results --compare` diffs.
 
-Both need their crate's `hotpath` feature, which `required-features` enforces:
-a plain `--examples` build skips them rather than producing an uninstrumented
-binary that reports an empty profile. `hotpath-alloc` additionally arms the
-allocation counting, and both harnesses declare the `#[global_allocator]`
-themselves under it, because hotpath ships the allocator without installing it
-and an alloc run without that line reports zero bytes everywhere. Registering
-the feature shape is what makes `--hotpath` produce a profile at all; a target
-registered without it records a row with an empty table.
-
-`fill_walk_bench` and `fill_bench` are not registered targets. They are criterion
+`fill_walk_bench` and `fill_bench` are not benches. They are criterion
 harnesses that parse `--bench` out of their own argv, which is what lets them
-live in example targets, and which would collide with the mode flag. Run them as
-in the section above.
+live in example targets. Run them as in the section above.
 
 The delivered July corpus is registered per host under
 `[bygg.datasets.mnq-tbbo-july]` and pinned by an XXH128 digest over the whole
@@ -514,8 +540,8 @@ preflight is about the contents being the ones the method was fitted to.
 
 **The two output channels.** Every benched command emits its work size beside
 its timing, unconditionally, on both channels
-(`mogwai_lab::sidecar`): `key=value` scalars on stderr for the tracked
-regression row, and timestamped phase markers plus counters on the marker FIFO
+(`mogwai_lab::sidecar`): `key=value` scalars on stderr, which the bench
+script parses into the stored record's counters, and timestamped phase markers plus counters on the marker FIFO
 for the sampled `/proc` timeline. Absent the FIFO environment variable the
 marker path is a load and a branch, so a plain interactive run pays nothing.
 
@@ -554,7 +580,7 @@ per-parent cost) or from the allocation profile, never from a finer annotation.
 
 ## Reading rules
 
-How a verdict is read off this file and `.brokkr/results.db`. Seeded 2026-08-10
+How a verdict is read off this file and the stored runs. Seeded 2026-08-10
 from the first stored rows; this section grows as the ground is learned, and
 every rule here should be traceable to a run.
 
@@ -583,13 +609,17 @@ every rule here should be traceable to a run.
   distinguishes a host that can judge 50 ms from one that cannot. A threshold
   nobody can evaluate had to be excluded from the debug lane for being a latency
   budget and from the release lane for being unjudgeable under load, leaving a
-  gate that no lane ran. It is now the `tape_lateness` target
-  (`brokkr mogwai tape_lateness`, argv `[config] [sample_seconds]`), which
-  records `frames`, `non_trade_text`, `control_frames`, `ending`,
+  gate that no lane ran. It is now the `tape-lateness` subcommand of
+  `mogwai-bench` (argv `[config] [sample_seconds]`), run through its bench,
+  `brokkr bench tape-lateness --venue target/release/mogwai`. The bench
+  builds only `mogwai-bench`, so the venue it launches is named by `--venue`
+  and is neither built nor digested by brokkr: build it from the same tree
+  first. The bench records `frames`, `non_trade_text`, `control_frames`, `ending`,
   `p50_lateness_ns`, `p99_lateness_ns` and `max_lateness_ns`
   against the machine and the commit that produced them. A series of readings
   shows a regression; a portable threshold never existed to show one.
-  - Baseline, host `bygg`, `brokkr mogwai tape_lateness -- "" 3` at `62c2501`,
+  - Baseline, host `bygg`, the retired registry's `tape_lateness` target with
+    argv `"" 3` at `62c2501`,
     three consecutive 3 s samples on `accelerated.toml`, all
     `ending=sample_complete` and all `control_frames=0`:
 
@@ -625,14 +655,15 @@ every rule here should be traceable to a run.
   Both are inside the noise above. That holds only while the annotation set
   stays at phase boundaries - see the discipline above.
 - **Neither `--hotpath` nor `--alloc` reports peak RSS.** It comes from the
-  sidecar timeline on a `--bench` or plain run. Peak anon is a headline quantity
+  sidecar timeline on a timing or plain run. Peak anon is a headline quantity
   here rather than a footnote: a venue is one process per run, hosts carry many
   of them at once, and every instance-level cost is multiplied by that count.
 
 ## Stage A baseline, 2026-08-09
 
 Host `bygg` (AMD Ryzen 9 9950X3D2, 16c/32t, governor performance, kernel
-7.1.4-x64v3-xanmod1), release, at commit `93c4a9d`. The harness pair, both modes.
+7.1.4-x64v3-xanmod1), release, at commit `93c4a9d`. The harness pair, both
+modes, measured as targets of the retired registry.
 
 | surface | uuid | mode | parents | measured | ns/parent | exclusive alloc |
 |---|---|---|---:|---:|---:|---:|
@@ -672,8 +703,9 @@ nothing; do not re-open that line.
 ## Predictive-envelope month price, 2026-08-11
 
 Host `bygg`, release, one run per family through
-`brokkr run --release envelope_evaluation_bench -- <family> <months>`
-(registered as `[mogwai.targets.envelope_evaluation]`). The measured unit is
+the `envelope_evaluation_bench` example with argv `<family> <months>`, then
+also a target of the retired registry. The harness is now `mogwai-bench
+envelope-evaluation`, taking the same argv through its bench. The measured unit is
 one replicate month of the protocol-12b section 9.7 envelope over the frozen
 section 8 exposure, 2,674,800 grid cells. An evaluation is exactly
 `500 * (1 + K)` months, so the unit multiplies out to every K tier; the work
@@ -1461,8 +1493,8 @@ without touching the identity.
 ## 2026-08-15 data ownership and micro-optimization audit
 
 Host `bygg`, release, current working tree against commit `0352f64`. The
-registered `arrival_walk` surface ran five identical 6,000,000-parent,
-50,914,229-child walks before and after the proposed cached geometric
+`arrival_walk` surface, then a target of the retired registry, ran five
+identical 6,000,000-parent, 50,914,229-child walks before and after the proposed cached geometric
 denominator. Both read 300 ms externally. Baseline UUID `307adca9` records
 300 / 300 / 301 / 301 / 300 ms; the changed dirty-tree run read 300 ms. The
 cache therefore did not earn its landing and was reverted.
@@ -1485,11 +1517,12 @@ same allocation as its key. Their JSON representation is unchanged.
 
 ## 2026-08-15 wire tag decode probe
 
-Host `bygg`, release, current working tree. The registered `tag_decode_probe`
-target decoded the same representative `Trade` frame 2,000,000 times per arm and
-counted allocator calls through its own wrapping global allocator. Re-run it
-with `brokkr mogwai tag_decode_probe` (an optional argv is the iteration count),
-or `brokkr run --release tag_decode_probe` for a bare run that stores no row.
+Host `bygg`, release, current working tree. The `tag_decode_probe` target of
+the retired registry decoded the same representative `Trade` frame 2,000,000
+times per arm and counted allocator calls through its own wrapping global
+allocator. The harness is now `mogwai-bench tag-decode`, whose optional argv
+is the iteration count; re-run it through its bench, or bare with `brokkr run
+--release mogwai-bench -- tag-decode`.
 
 | decoder | ns / frame | allocations / frame |
 |---|---:|---:|
@@ -1602,8 +1635,8 @@ So the type-level bound would have caught the order-entry gap for free, which is
 the honest point in its favour; it does not survive the cost of the edit, and a
 one-line call to the validator that already existed closed the gap instead.
 
-The probe is deliberately not a registered `brokkr mogwai` target: it settled one
-decision rather than opening a series.
+The probe is deliberately not a bench: it settled one decision rather than
+opening a series.
 
 ## 2026-08-23 the resident vol window closes the submit-budget debt
 
@@ -1647,8 +1680,9 @@ goes; the walk's cost is unchanged because it is the same walk.
 ## 2026-08-26 the margin-equity refold is priced and acceptable
 
 Host `plantasjen`, release, row `27d8f088` at commit 1c4a9d4, from
-`brokkr mogwai order_path_refold --bench` (the `mogwai-engine` example
-`order_path_refold_bench`, registered as target `order_path_refold`).
+the timing mode of the retired registry's `order_path_refold` target (the
+`mogwai-engine` example `order_path_refold_bench`, since moved to `mogwai-bench
+order-path-refold`, which its bench runs).
 
 The question, carried since the round-8 cache refusal: a margin-equity sell
 in play makes `rest_open`, `take_open` and `refresh_open_hold` each trigger a

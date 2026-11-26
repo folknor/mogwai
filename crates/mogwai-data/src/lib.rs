@@ -46,11 +46,12 @@ pub mod segment;
 mod tape_rng;
 mod trigger;
 
-// This library carries no `hotpath` annotation: the dependency exists for the
-// `arrival_walk_bench` example alone, which is why it is optional and only the
-// `hotpath` feature pulls it in. Cargo's unused-dependency lint reads the lib
-// target, not the example, so the feature-gated anchor below is what tells it
-// the dependency is wanted when the feature is on.
+// This library carries no `hotpath` annotation: the feature exists so that
+// `mogwai-bench` and `mogwai-lab` can forward it uniformly and the instrumented
+// check lane keeps compiling this crate's `hotpath` shape, which is why the
+// dependency is optional and only the feature pulls it in. The feature-gated
+// anchor below is what tells the unused-dependency lint the dependency is
+// wanted when the feature is on.
 #[cfg(feature = "hotpath")]
 use hotpath as _;
 

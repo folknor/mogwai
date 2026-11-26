@@ -37,14 +37,14 @@ use std::collections::HashSet;
 // This crate's lib test binary is built and run twice by the full gate: once in
 // the default shape, and once with `hotpath-alloc` on, so that a feature nothing
 // compiles cannot rot unnoticed. That second sweep exists to prove the
-// annotations, the optional dependency and the harness examples still build - a
-// compile-time property, satisfied by compiling.
+// annotations and the optional dependency still build - a compile-time
+// property, satisfied by compiling.
 //
 // Re-executing a multi-second statistical walk in it proves nothing further,
 // because `crates/mogwai-data/src` carries no `hotpath` annotation at all: the
-// only `cfg(feature = "hotpath")` in this crate is in
-// `examples/arrival_walk_bench.rs`. The two shapes differ in the dependency
-// graph and in that example, not in one byte of behaviour these tests can
+// walk instrument that annotates this crate's draw lives in `mogwai-bench`
+// (`arrival-walk`). The two shapes differ in the dependency graph, not in one
+// byte of behaviour these tests can
 // observe - measured, `session_modulation_reproduces_curves` runs 7.65 s in the
 // default shape and 7.67 s in the instrumented one.
 //

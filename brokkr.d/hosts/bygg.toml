@@ -1,0 +1,22 @@
+# The delivered corpus, per host, as a plain dataset: `path` plus `xxh128`.
+# The measure, fit and preflight benches bind it as their `corpus` param, so
+# brokkr reserves the directory, digests it and records exactly which
+# delivery a row was measured against, and a cross-month comparison can tell
+# two corpora apart. It does not replace the run's own verification:
+# `measure` refuses a corpus whose SHA-256 hashes disagree with the jobs
+# manifest and the committed preflight artifact, and that check is about the
+# contents being the ones the method was fitted to. This digest is about
+# drift - the file under this path not being the file it was last time -
+# which is a different question and is why the two hashes are allowed to be
+# different algorithms over different scopes.
+#
+# The digest is over the whole directory - two `.csv.zst` archives beside
+# `manifest.json`, `metadata.json` and `condition.json` - because that is what
+# `measure --corpus` takes.
+#
+# XXH128, which is not the SHA-256 the delivery manifest carries. There is
+# nothing to transcribe from the manifest here; this value came from
+# `brokkr env` and is the only place it can come from.
+[bygg.datasets.mnq-tbbo-july]
+path = "research/market-data/databento/mnqv/2026-07.full.tbbo"
+xxh128 = "280ade40376bd49f50c579bb127f3fbd"

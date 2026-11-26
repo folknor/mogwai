@@ -3,10 +3,6 @@
 
 //! Measures the eager resident and allocator cost of one shipped per-boat ring.
 
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 /// The shipped per-boat depth, read from the config default rather than
 /// restated: a measurement that can drift from the knob it verifies measures
 /// nothing.
@@ -30,9 +26,7 @@ fn allocate_ring(depth: usize) -> tokio::sync::broadcast::Sender<u64> {
     tokio::sync::broadcast::channel(depth).0
 }
 
-fn main() {
-    #[cfg(feature = "hotpath")]
-    let _guard = hotpath::HotpathGuardBuilder::new("main").build();
+pub(crate) fn run() {
     mogwai_lab::sidecar::init();
     let depth = depth();
     let before = rss_bytes();

@@ -45,7 +45,7 @@ nautilus adapter does.
 The seed is the whole of the reproduction: that command draws the same river on
 any machine running the same build.
 
-A Cargo workspace of seven crates under `crates/`:
+A Cargo workspace, one crate per directory under `crates/`:
 
 - `mogwai-protocol` - the JSON-over-WS wire types, the divergence catalog and
   the shipped launcher.
@@ -58,6 +58,8 @@ A Cargo workspace of seven crates under `crates/`:
   parsing, the measurement engine, fingerprint synthesis and the fit.
 - `mogwai-adapter` - the nautilus venue adapter a host registers for the
   `MOGWAI` venue; the only crate that imports nautilus.
+- `mogwai-bench` - an unpublished binary of benchmark harnesses, driven by the
+  repository's `brokkr bench` scripts; not part of what ships.
 
 ## Contents
 
@@ -70,7 +72,7 @@ A Cargo workspace of seven crates under `crates/`:
 
 ## Building
 
-The six broker crates build nautilus-free. `mogwai-adapter` depends on the
+Every crate but `mogwai-adapter` builds nautilus-free. `mogwai-adapter` depends on the
 published nautilus crates from crates.io, pinned in its `Cargo.toml`
 (default-features off, no pyo3), so a full build needs no sibling checkout -
 cargo fetches nautilus like any other dependency.

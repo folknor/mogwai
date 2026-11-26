@@ -39,20 +39,13 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 [dev-dependencies]
 criterion.workspace = true
 
-# The instrumented example is declared so it can carry `required-features`.
-# Declaring a target does not turn `autoexamples` off: the rest would still be
-# discovered, so the plain entries below are redundant but harmless, and a
-# declared entry simply overrides the discovered target of the same name.
+# Declaring a target does not turn `autoexamples` off: these would be
+# discovered anyway, so the plain entries are redundant but harmless.
 [[example]]
 name = "peek"
 
 [[example]]
 name = "fill_walk_bench"
-
-# The layer-2 walk instrument: the parent draw with no projection attached.
-[[example]]
-name = "arrival_walk_bench"
-required-features = ["hotpath"]
 
 # The amendment-only regenerator for the committed arrival transcript pins.
 # The reason it is an example rather than an `#[ignore]`d test: the gate

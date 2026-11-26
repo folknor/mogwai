@@ -145,7 +145,7 @@ fn main() {
     let tagged = r#"{"type":"Trade","symbol":"MNQ","price":"20123.25","size":"4","aggressor":"Buyer","ts_event":1234567890123456789}"#;
     let plain = r#"{"symbol":"MNQ","price":"20123.25","size":"4","aggressor":"Buyer","ts_event":1234567890123456789}"#;
 
-    // Arm parity, the assertion `tag_decode_probe` was fixed to carry after a
+    // Arm parity, the assertion the tag-decode probe was fixed to carry after a
     // measurement compared arms with mismatched fields. Two halves here: the
     // tagged frame is the plain one plus exactly the tag, and the two payload
     // structs decode the same symbol out of it, so neither arm is measuring a

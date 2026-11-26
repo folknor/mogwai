@@ -27,9 +27,9 @@ knowledge in config or a preset rather than hardcoded in the method.
 
 ## Workspace
 
-A Cargo workspace, seven crates under `crates/`. `reference/architecture.md`
-is the full map; what follows is each crate's identity and the one fact that
-binds work on it.
+A Cargo workspace, one crate per directory under `crates/`.
+`reference/architecture.md` is the full map; what follows is each crate's
+identity and the one fact that binds work on it.
 
 - `mogwai-protocol` - the wire types both ends serialize against; never
   imports nautilus. Also ships `launch`, the venue launcher, kept here because
@@ -58,7 +58,11 @@ binds work on it.
   is no cycle.
 - `mogwai-adapter` - the nautilus venue adapter and the only crate that
   touches nautilus: published crates.io releases pinned in its `Cargo.toml`,
-  default-features off, no pyo3. The other six build nautilus-free.
+  default-features off, no pyo3. Every other crate builds nautilus-free.
+- `mogwai-bench` - the unpublished `mogwai-bench` binary holding the
+  measurement harnesses that have no `mogwai` command line, one subcommand
+  each, driven by the `brokkr bench` scripts. It is a measurement surface
+  only: nothing in the workspace depends on it, and it never ships.
 
 `scripts/` holds the end-to-end smoke test and the harness-bug flush;
 `analysis/` is the offline Python that fits the fingerprint; `notes/` holds
@@ -292,27 +296,53 @@ Use `brokkr` (not `cargo`) for check/test. Output is never capped or scoped: eve
 
 ## Benchmarking
 
-`brokkr mogwai` measures, `brokkr results` queries the durable record, and
-`brokkr sidecar` queries the profiler store. The complete manual is bundled
-with the tool - `brokkr man mogwai`, `brokkr man results`, `brokkr man
-measure` and `brokkr man output-channels` - and `reference/performance.md`
-carries the durable numbers and the annotation discipline; this section
-deliberately repeats none of it. What binds every use:
+`brokkr bench NAME --param value` measures, `brokkr results` queries the
+stored runs, and `brokkr sidecar` reads a run's per-child evidence. The
+complete manual is bundled with the tool - `brokkr man bench`, `brokkr man
+bench-config`, `brokkr man results` (its Script benches part) and `brokkr man
+measure` - and `reference/performance.md` carries the durable numbers and the
+annotation discipline; this section deliberately repeats none of it.
 
-- There are no layers and no frozen workloads. The argv is composed at the
-  call site and captured verbatim in the row, so selecting an arm is a query
-  rather than a name lookup. Adding a surface to the measurable set is
-  registering a target under `[mogwai.targets.*]` in `brokkr.toml`.
+The registry is `brokkr.d/benches.toml`, included from `brokkr.toml`: one
+`[bench.NAME]` table per bench, its Lua in `benches/FAMILY/NAME.lua`, shared
+modules in `benches/lib` and contract tests in `benches/tests`, which `brokkr
+check` and `brokkr bench --test` run. Its header comment is the layout's
+rulebook. Two kinds of bench drive two binaries: the `mogwai` CLI benches run
+the shipped bin, one bench per subcommand, so a measurement includes startup
+and argument parsing; the harness benches run a subcommand of the unpublished
+`mogwai-bench` bin, for loops with no `mogwai` command line. What binds every
+use:
+
+- There are no layers and no frozen workloads. A bench takes typed params
+  plus a passthrough for the rest of the subcommand's argv, so the workload is
+  composed at the call site; the run stores its bound params and every
+  child's argv, and runs pair on the bound params (with the bench and the
+  measurement class), so selecting an arm is a query rather than a name
+  lookup. Pairing reads the params, not the argv: a value that defines the
+  workload must arrive as a bound param, or two different workloads pair.
+  Adding a surface to the measurable set is
+  registering a bench in `brokkr.d/benches.toml` with its script.
 - A wall alone cannot distinguish "the code got faster" from "the code did
   less": a benched surface emits its work size as stderr `key=value`
-  counters, and `--compare` reports the ones that moved. Where a moved count
-  invalidates a series - a seeded tape whose draw moved - that owes a
-  `TAPE_PROTOCOL_VERSION` bump, which cannot be waived per comparison.
-- Recording needs a clean tree; `--force` runs a dirty tree but stores no
-  `results.db` row.
-- A target registering `hotpath` has its `--bench` walls measured on an
-  instrumented build. Register the feature on the target that needs it,
-  never on every target.
+  counters, its script parses them into `record.counters`, and `brokkr
+  results --compare` names the record entries that moved. brokkr keeps a
+  child's stderr tail as evidence but never turns it into record entries, so
+  a counter the script does not parse is not compared. Where a moved count invalidates a series - a seeded tape whose draw
+  moved - that owes a `TAPE_PROTOCOL_VERSION` bump, which cannot be waived
+  per comparison.
+- A run of a dirty tree is stored, marked dirty, and never paired by
+  `brokkr results --compare`, so a
+  measurement meant to stand for a commit is taken from a clean tree or with
+  `--commit`. A change to a `.md` file does not make the tree dirty.
+- `--iterations N`, `--hotpath`, `--alloc` and `--commit` are brokkr's
+  options and go before the bench name; the bench's params go after it.
+  `--hotpath` is refused for a bench that sets no `hotpath_features`, and
+  `--alloc` for one that sets no `alloc_features`. Set them on the bench that
+  needs a profile, never on every bench: a timing run whose build resolves
+  one of them fails rather than measuring an instrumented build.
+- Rows recorded by brokkr's retired per-project bench command, through its
+  target registry, do not pair with `brokkr bench` runs;
+  `reference/performance.md` keeps them as history.
 
 ## Document folders
 

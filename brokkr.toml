@@ -1,5 +1,12 @@
 project = "mogwai"
 
+# The script benches live in brokkr.d/benches.toml, and each host's datasets in
+# its own file under brokkr.d/hosts/; a host lists only the datasets it holds.
+include = [
+    "brokkr.d/benches.toml",
+    "brokkr.d/hosts/bygg.toml",
+]
+
 # The source identity the venue and lab build scripts stamp, computed once
 # before every cargo call. With it set, neither script runs git or watches
 # `.git`; they rerun only when this value changes. Before, the venue script
@@ -11,10 +18,10 @@ project = "mogwai"
 MOGWAI_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 
 # The default shape: every crate with no feature on. That is the shipped shape
-# and the one every consumer builds - `mogwai-data` and `mogwai-lab` each carry
-# `hotpath`/`hotpath-alloc`, and both are optional dependencies precisely so
-# that with neither feature named the profiler is absent from the dependency
-# graph rather than merely inert.
+# and the one every consumer builds - the crates that carry
+# `hotpath`/`hotpath-alloc` make both optional dependencies precisely so that
+# with neither feature named the profiler is absent from the dependency graph
+# rather than merely inert.
 [[check]]
 name = "workspace"
 # `parallel = { budget = 8 }` fans the test binaries out concurrently -
@@ -35,21 +42,23 @@ parallel = { budget = 8 }
 
 # The instrumented shape. It exists because a feature nothing compiles is a
 # feature that is broken and nobody knows: with `hotpath` off, every
-# `cfg_attr(feature = "hotpath", hotpath::measure)` annotation and both
-# `required-features` harness examples vanish from the build, so a rename, a
-# moved function or a macro-argument change breaks nothing that any lane runs.
+# `cfg_attr(feature = "hotpath", hotpath::measure)` annotation and every
+# instrumented path of the `mogwai-bench` instruments vanish from the build, so
+# a rename, a moved function or a macro-argument change breaks nothing that any
+# lane runs.
 #
 # `hotpath-alloc` rather than `hotpath` because it is the strict superset - it
-# enables `hotpath` too, and additionally compiles the harnesses'
-# `#[global_allocator]` declarations, which the timing-only feature does not.
-# One sweep therefore covers both feature shapes' code.
+# enables `hotpath` too, and additionally compiles the counting
+# `#[global_allocator]` in `mogwai-bench`, which the timing-only feature does
+# not. One sweep therefore covers both feature shapes' code, short of the
+# allocator selection itself, which differs between the two.
 #
 # Scoped with `packages` because this is a virtual workspace: cargo rejects
 # `--features` at the root, so the features have to be attributed to the crates
 # that declare them.
 [[check]]
 name = "instrumented"
-packages = ["mogwai-data", "mogwai-lab"]
+packages = ["mogwai-data", "mogwai-lab", "mogwai-bench"]
 features = ["hotpath-alloc"]
 # Same fan-out as the workspace sweep; direct execution works on every
 # selection shape, package-scoped included.
@@ -77,9 +86,9 @@ parallel = { budget = 8 }
 # is a statement about the host, not about this code - a release run failed it at
 # 311 ms under a load average of 1.46 - and no admission test distinguishes a
 # machine that can judge that budget from one that cannot. A gate that must be
-# excluded from every lane that would run it measures nothing, so it became a
-# measurable target, `tape_lateness` below, where every run records the number
-# against the machine and the commit that produced it.
+# excluded from every lane that would run it measures nothing, so it became the
+# `tape-lateness` script bench (brokkr.d/benches.toml), where every run records
+# the number against the machine and the commit that produced it.
 #
 # A note on `only`: it is a substring filter, so `read_market_latency` catches
 # `read_market_latency_stays_within_submit_budget` and nothing else today. The
@@ -415,7 +424,7 @@ skip = [
     # same justification, and that justification had run out: excluded from the
     # debug lane for being a latency budget and excluded from the release lane
     # in practice for being unjudgeable on a loaded host, it was a gate no lane
-    # evaluated. It is now the `tape_lateness` measurable target instead.
+    # evaluated. It is now the `tape-lateness` script bench instead.
     "read_market_latency_stays_within_submit_budget",
     # `dwell_is_bounded_across_run_seeds` used to sit here and no longer does.
     # It was excluded under the cost heading above - "walks millions of ticks",
@@ -713,7 +722,7 @@ message = "write the emphasis into the sentence; don't shout in all caps (shout-
 name = "no-shouting-hash-comments"
 preset = "no-shouting"
 pattern = '#[^`]*(?:`[^`]*`[^`]*)*\b(?:[A-Z]{5,}|ALL|BOTH|MUST|NEVER|NOT|ONE|ONLY|SAME)\b'
-paths = ["scripts/**/*.py", "analysis/**/*.py", "crates/**/*.toml", "Cargo.toml", "brokkr.toml"]
+paths = ["scripts/**/*.py", "analysis/**/*.py", "crates/**/*.toml", "Cargo.toml", "brokkr.toml", "brokkr.d/**/*.toml"]
 # `deshout_toml.py` is the one-off that de-shouted this file, so its string
 # table is shouting by construction.
 exclude = ["scripts/deshout_toml.py"]
@@ -769,12 +778,12 @@ forbid = [
     "mogwai-adapter",
 ]
 
-# The offline method library is reached only through the binary; nothing in
-# the serving path may depend back on it.
+# The offline method library is reached only through the binary and the
+# benchmark instruments; nothing in the serving path may depend back on it.
 [[dependency_rule]]
 name = "lab-only-under-the-cli"
 from = "*"
-except = ["mogwai-lab", "mogwai-cli"]
+except = ["mogwai-lab", "mogwai-cli", "mogwai-bench"]
 forbid = "mogwai-lab"
 
 # The adapter and the binary are the tops of the graph.
@@ -784,162 +793,23 @@ from = "*"
 except = ["mogwai-adapter", "mogwai-cli"]
 forbid = ["mogwai-adapter", "mogwai-cli"]
 
-# ---------------------------------------------------------------------------
-# The benchmark registry: targets and their feature shapes, plus out-of-git
-# inputs. Nothing else.
-#
-# What is not here, deliberately: workloads. Every mogwai surface takes a
-# config-shaped invocation - preset, window, seed, cell, probe mode - so the
-# set of things worth measuring is the product of surfaces, inputs and flag
-# axes, plus every library-level loop that has no command at all. That product
-# cannot be enumerated, and a registry that must be edited before a new
-# question can be asked does not survive a decade of asking them. An earlier
-# cut of this file froze four invocations by name and had already run out of
-# room before the Stage A round started. The argv is composed at the call site
-# and captured verbatim in the row; pairing rows is a query (`--command`,
-# `--dataset`, `--grep`, `--grep-v`), not a name lookup, and the captured argv
-# cannot lie about what was run the way a name can.
-#
-# Two kinds of surface.
-#
-# Argv-shaped, through the shipped bin - `gen`, `tick-composition`,
-# `preflight`, `measure`, `fit`, `cache`, `synth`, `arrival-screen`. These need
-# no registration beyond the bin itself: benching through
-# `target/release/mogwai` measures what ships, startup and argument parsing
-# included, which is the honest end-to-end number.
-#
-# Harness-shaped, through an example target - the loops with no command line:
-# the arrival draw, the screen's projection, and in time the engine's matching
-# loop, the `TickSource` implementations, the serving path and the adapter.
-# These are the majority of the eventual surface, which is why they get first
-# class registration rather than an escape hatch. Adding a surface to the
-# measurable set is registering a target, which is the work you were going to
-# do anyway the moment you wanted to optimize it.
-#
-# Harnesses may take an argv, like the bin. An argument-free harness would need
-# a new entry here per cell shape or seed, which is the enumeration trap again
-# at one remove.
+# The benchmark instruments are a bin of their own so that nothing ships them:
+# the top of the graph, with no dependents. They may reach the lab, which is
+# why the rule above excepts them, and they may not reach the binary or the
+# adapter, which the rule before this one already forbids.
+[[dependency_rule]]
+name = "bench-has-no-dependents"
+from = "*"
+except = ["mogwai-bench"]
+forbid = "mogwai-bench"
+
+# The installed brokkr still refuses to load a `project = "mogwai"` config
+# without this section, though nothing here is read through it any more:
+# every measurement is a script bench in `brokkr.d/benches.toml`. It names
+# the CLI package and its bin, and goes once brokkr stops requiring it.
 [mogwai]
 package = "mogwai-cli"
-# The bin target name differs from the package name, and that is load-bearing
-# rather than incidental: the shipped launcher and every doc exec
-# `target/release/mogwai`.
 bin = "mogwai"
-
-# The parent draw with no projection attached.
-#
-# It is registered with its feature shape because that is what was missing when
-# `--hotpath` recorded rows containing no profile: `hotpath` is an optional
-# dependency and both harnesses carry `required-features`, so without the
-# feature named here the annotations compile away and the target does not build
-# at all. `hotpath-alloc` is the strict superset and is what `--alloc` needs;
-# brokkr selects it for that mode.
-[mogwai.targets.arrival_walk]
-package = "mogwai-data"
-example = "arrival_walk_bench"
-features = ["hotpath"]
-
-# One Stage A screen cell.
-#
-# Deliberately a separate ms-scale target rather than a mode of the full screen,
-# and this is a property of the profiler rather than an architectural layer. The
-# hotpath crate queues one event per instrumented call and drains at roughly
-# 1.3M events/s; the arrival draw produces them far faster than that, so a
-# seconds-scale run backlogs tens of gigabytes before it ends. dellingr ships a
-# second ms-scale file per workload for exactly this reason and pbfhogg keeps
-# its instrumentation sparse to avoid it.
-[mogwai.targets.screen_projection]
-package = "mogwai-lab"
-example = "screen_projection_bench"
-features = ["hotpath"]
-
-# How late a paced tape arrives at a consumer that keeps up, under acceleration.
-#
-# A gate that became a measurement. It was `tape_lateness_under_acceleration`,
-# asserting a 50 ms p99 - a statement about the host rather than about the code,
-# unjudgeable in the debug lane and unreliable in the release one, and therefore
-# excluded from both. The number is worth having on every run; the threshold was
-# never portable. Argv is `[config] [sample_seconds]`.
-#
-# Carries no registered features: its canonical output is a set of scraped
-# counters, and an instrumented build would be measuring the profiler's own
-# per-call cost inside a latency figure.
-[mogwai.targets.tape_lateness]
-package = "mogwai-cli"
-example = "tape_lateness_bench"
-
-[mogwai.targets.ring_sizing]
-package = "mogwai-lab"
-example = "ring_sizing"
-features = ["hotpath"]
-
-[mogwai.targets.stage_a_batch]
-package = "mogwai-lab"
-example = "stage_a_batch_bench"
-
-# One predictive-envelope replicate month, per spec 9.7.
-#
-# The unit the envelope budgets are derived from: an evaluation is 500 * (1 + K)
-# months and nothing else, so a per-month price multiplies out to every K tier.
-# Carries no registered features - its canonical output is a wall and a unit
-# price, and an instrumented build would measure the profiler instead. Argv is
-# `<family> [months]`.
-[mogwai.targets.envelope_evaluation]
-package = "mogwai-lab"
-example = "envelope_evaluation_bench"
-
-# The per-frame cost of the wire decoder, over one representative `Trade`.
-#
-# Registered so the tag-decode table in `reference/performance.md` is
-# re-runnable rather than a number someone once printed. Carries no features,
-# and the profiler modes do not apply: it wraps the global allocator itself to
-# count allocator calls per frame, which `--alloc` would displace, and its
-# per-frame cost is nanoseconds, which `--hotpath` would dominate. Argv is an
-# optional iteration count, default 2,000,000.
-[mogwai.targets.tag_decode_probe]
-package = "mogwai-protocol"
-example = "tag_decode_probe"
-
-# Submit, amend and cancel against the aggregate hold fold for a margin-equity
-# account. Argv is `[resting orders] [rounds]`; the canonical decision cell is
-# 50 resting orders.
-[mogwai.targets.order_path_refold]
-package = "mogwai-engine"
-example = "order_path_refold_bench"
-
-# Not registered: `fill_walk_bench`, also an example target in `mogwai-data`.
-# It is a criterion harness that parses `--bench` itself - that is what lets it
-# live in an example target at all - so it would collide with the mode flag.
-# Run it with `brokkr run --release fill_walk_bench -- --bench`.
-
-# Not registered: `symbol_decode_probe`, an example target in `mogwai-protocol`.
-# It answered one question - what an inline fixed-capacity `Symbol` would buy the
-# adapter's decode path against what the per-tick path spends right after it -
-# and the answer was a refusal, recorded in `reference/performance.md`. A
-# registered target invites re-benching a decision already made; a plain example
-# keeps the measurement reproducible without inviting that. Run it with
-# `brokkr run --release symbol_decode_probe -- 2000000`. It wraps the global
-# allocator, so the profiler modes would not apply to it either.
-
-# The delivered corpus, per host. This records exactly which delivery a row was measured
-# against so a cross-month comparison can tell two corpora apart. It does not
-# replace the run's own verification: `measure` refuses a corpus whose SHA-256
-# hashes disagree with the jobs manifest and the committed preflight artifact,
-# and that check is about the contents being the ones the method was fitted to.
-# This digest is about drift - the file under this path not being the file it
-# was last time - which is a different question and is why the two hashes are
-# allowed to be different algorithms over different scopes.
-#
-# The digest is over the whole directory - two `.csv.zst` archives beside
-# `manifest.json`, `metadata.json` and `condition.json` - because that is what
-# `measure --corpus` takes.
-#
-# XXH128, which is not the SHA-256 the delivery manifest carries. There is
-# nothing to transcribe from the manifest here; this value came from
-# `brokkr env` and is the only place it can come from.
-[bygg.datasets.mnq-tbbo-july]
-path = "research/market-data/databento/mnqv/2026-07.full.tbbo"
-xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 
 [[quarantine]]
 category = "doctests"

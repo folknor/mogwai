@@ -1,0 +1,55 @@
+[package]
+name = "mogwai-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+# Not published: built from the tested tree by `brokkr bench`. Its instruments
+# are measuring tools, kept out of the shipped `mogwai` binary.
+publish = false
+autotests = false
+
+# The benchmark instruments, one subcommand each. A bin rather than examples
+# because `brokkr bench` builds only bin targets.
+[[bin]]
+name = "mogwai-bench"
+path = "src/main.rs"
+
+[dependencies]
+mogwai-protocol.workspace = true
+mogwai-engine.workspace = true
+mogwai-data.workspace = true
+mogwai-venue.workspace = true
+mogwai-lab.workspace = true
+
+clap = { version = "4.6.3", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+# `ring-sizing` allocates one shipped per-boat broadcast ring; `tape-lateness`
+# drives the shipped venue over its websocket.
+tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite = "0.30.0"
+hotpath = { workspace = true, optional = true }
+
+# Off by default, so the default build is uninstrumented and the profiler is
+# absent from the dependency graph. `hotpath` arms this crate's own
+# annotations and forwards to the two libraries that carry theirs;
+# `hotpath-alloc` is the strict superset and additionally installs hotpath's
+# counting global allocator (see `main.rs` for how that and `tag-decode`'s own
+# counting allocator are kept apart).
+[features]
+default = []
+hotpath = ["dep:hotpath", "hotpath/hotpath", "mogwai-data/hotpath", "mogwai-lab/hotpath"]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "mogwai-data/hotpath-alloc",
+    "mogwai-lab/hotpath-alloc",
+]
+
+[lints]
+workspace = true
